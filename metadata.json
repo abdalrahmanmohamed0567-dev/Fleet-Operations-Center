@@ -1,0 +1,6 @@
+{
+  "name": "Fleet Operations Center",
+  "description": "نظام احترافي لإدارة وتحليل ومراقبة أداء مندوبي HungerStation وKeeta عبر تقارير Excel والتخزين السحابي.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

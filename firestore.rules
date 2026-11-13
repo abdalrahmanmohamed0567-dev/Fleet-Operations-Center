@@ -1,0 +1,1006 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // Global Safety Net (Default Deny)
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // Core Primitives
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isVerified() {
+      return isSignedIn() && request.auth.token.email_verified == true;
+    }
+
+    function isBootstrappedOwner() {
+      return isVerified()
+        && ('email' in request.auth.token)
+        && request.auth.token.email.lower() == 'abdalrahmanmohamed0567@gmail.com';
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() >= 1 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isOwner(userId) {
+      return isVerified() && request.auth.uid == userId;
+    }
+
+    function getUserDoc() {
+      return get(/databases/$(database)/documents/users/$(request.auth.uid));
+    }
+
+    function hasActiveRole(roles) {
+      return isBootstrappedOwner() || (
+        isVerified()
+        && exists(/databases/$(database)/documents/users/$(request.auth.uid))
+        && getUserDoc().data.active == true
+        && getUserDoc().data.role in roles
+      );
+    }
+
+    function isAdmin() {
+      return hasActiveRole(['owner', 'admin']);
+    }
+
+    function isOpsManagerOrAbove() {
+      return hasActiveRole(['owner', 'admin', 'operations_manager']);
+    }
+
+    function isSupervisorOrAbove() {
+      return hasActiveRole(['owner', 'admin', 'operations_manager', 'supervisor']);
+    }
+
+    function isActiveMember() {
+      return hasActiveRole(['owner', 'admin', 'operations_manager', 'supervisor', 'viewer']);
+    }
+
+    // Zero-get() list gate using bounded allowedUids or creator/bootstrapped owner
+    function canListResource() {
+      return isVerified() && (
+        isBootstrappedOwner()
+        || existing().createdByUid == request.auth.uid
+        || (
+          existing().allowedUids is list
+          && existing().allowedUids.size() <= 20
+          && request.auth.uid in existing().allowedUids
+        )
+      );
+    }
+
+    function isValidAllowedUids(listVal) {
+      return listVal is list
+        && listVal.size() >= 1
+        && listVal.size() <= 20
+        && listVal[0] is string
+        && listVal[0].size() <= 128;
+    }
+
+    function isValidIsoDate(val) {
+      return val is string && val.size() == 10 && val.matches('^\\d{4}-\\d{2}-\\d{2}$');
+    }
+
+    function isValidString(val, maxLen) {
+      return val is string && val.size() <= maxLen;
+    }
+
+    function isOptionalString(data, field, maxLen) {
+      return !(field in data) || (data[field] is string && data[field].size() <= maxLen);
+    }
+
+    function isOptionalNum(data, field) {
+      return !(field in data) || data[field] is number || data[field] == null;
+    }
+
+    function isOptionalBool(data, field) {
+      return !(field in data) || data[field] is bool;
+    }
+
+    // Entity Validation Helpers
+    function isValidUserProfile(data, userId) {
+      return data.keys().hasAll(['uid', 'email', 'displayName', 'role', 'active', 'createdAt', 'updatedAt'])
+        && data.keys().hasOnly(['uid', 'email', 'displayName', 'role', 'active', 'assignedBranch', 'managedByAdminUids', 'createdAt', 'updatedAt'])
+        && data.uid == userId
+        && isValidId(data.uid)
+        && data.email is string && data.email.size() >= 3 && data.email.size() <= 200
+        && data.displayName is string && data.displayName.size() >= 1 && data.displayName.size() <= 120
+        && data.role in ['owner', 'admin', 'operations_manager', 'supervisor', 'viewer']
+        && data.active is bool
+        && isOptionalString(data, 'assignedBranch', 100)
+        && (!('managedByAdminUids' in data) || (data.managedByAdminUids is list && data.managedByAdminUids.size() <= 10))
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidRiderMaster(data, docId) {
+      return data.keys().hasAll(['internalRiderId', 'fullName', 'status', 'createdByUid', 'allowedUids', 'createdAt', 'updatedAt'])
+        && data.keys().hasOnly(['internalRiderId', 'fullName', 'city', 'branch', 'supervisor', 'contractName', 'vehicleType', 'status', 'createdByUid', 'allowedUids', 'createdAt', 'updatedAt'])
+        && data.internalRiderId == docId
+        && isValidId(data.internalRiderId)
+        && data.fullName is string && data.fullName.size() >= 1 && data.fullName.size() <= 150
+        && data.status in ['active', 'inactive', 'suspended']
+        && isOptionalString(data, 'city', 100)
+        && isOptionalString(data, 'branch', 100)
+        && isOptionalString(data, 'supervisor', 100)
+        && isOptionalString(data, 'contractName', 120)
+        && isOptionalString(data, 'vehicleType', 64)
+        && isValidId(data.createdByUid)
+        && isValidAllowedUids(data.allowedUids)
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidRiderIdentityMapping(data, docId) {
+      return data.keys().hasAll(['mappingId', 'internalRiderId', 'platform', 'platformRiderId', 'createdByUid', 'allowedUids', 'createdAt', 'updatedAt'])
+        && data.keys().hasOnly(['mappingId', 'internalRiderId', 'platform', 'platformRiderId', 'platformRiderName', 'createdByUid', 'allowedUids', 'createdAt', 'updatedAt'])
+        && data.mappingId == docId
+        && isValidId(data.mappingId)
+        && isValidId(data.internalRiderId)
+        && data.platform in ['hungerstation', 'keeta']
+        && data.platformRiderId is string && data.platformRiderId.size() >= 1 && data.platformRiderId.size() <= 64
+        && isOptionalString(data, 'platformRiderName', 150)
+        && isValidId(data.createdByUid)
+        && isValidAllowedUids(data.allowedUids)
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidImportBatch(data, docId) {
+      return data.keys().hasAll(['batchId', 'fileName', 'fileHash', 'platform', 'sourceType', 'validCount', 'duplicateCount', 'rejectedCount', 'status', 'createdByUid', 'allowedUids', 'createdAt'])
+        && data.keys().hasOnly(['batchId', 'fileName', 'fileHash', 'platform', 'sourceType', 'driveFileId', 'detectedPeriodStart', 'detectedPeriodEnd', 'sheetsDetected', 'unknownColumns', 'validCount', 'duplicateCount', 'rejectedCount', 'updatedCount', 'status', 'importedByEmail', 'createdByUid', 'allowedUids', 'createdAt'])
+        && data.batchId == docId
+        && isValidId(data.batchId)
+        && data.fileName is string && data.fileName.size() >= 1 && data.fileName.size() <= 255
+        && data.fileHash is string && data.fileHash.size() >= 1 && data.fileHash.size() <= 128
+        && data.platform in ['hungerstation', 'keeta']
+        && data.sourceType in ['local', 'google_drive']
+        && isOptionalString(data, 'driveFileId', 200)
+        && isOptionalString(data, 'detectedPeriodStart', 20)
+        && isOptionalString(data, 'detectedPeriodEnd', 20)
+        && (!('sheetsDetected' in data) || (data.sheetsDetected is list && data.sheetsDetected.size() <= 20))
+        && (!('unknownColumns' in data) || (data.unknownColumns is list && data.unknownColumns.size() <= 100))
+        && data.validCount is number && data.duplicateCount is number && data.rejectedCount is number
+        && isOptionalNum(data, 'updatedCount')
+        && data.status in ['previewed', 'committed', 'failed']
+        && isOptionalString(data, 'importedByEmail', 200)
+        && isValidId(data.createdByUid)
+        && isValidAllowedUids(data.allowedUids)
+        && data.createdAt is timestamp;
+    }
+
+    function isValidHungerDaily(data, docId) {
+      return data.keys().hasAll(['recordKey', 'platform', 'riderId', 'date', 'month', 'sourceFile', 'sourceSheet', 'importBatchId', 'rowChecksum', 'createdByUid', 'allowedUids', 'importedAt', 'updatedAt'])
+        && data.keys().hasOnly([
+          'recordKey', 'platform', 'riderId', 'date', 'month', 'city', 'contractName', 'vehicleName',
+          'batchNumber', 'tgaStatus', 'errorCodes', 'shifts', 'plannedWorkingHours', 'actualWorkingHours',
+          'avgWorkingHoursPerDay', 'attendanceRate', 'breakHours', 'lostHours', 'acceptanceRate',
+          'contactRate', 'noShows', 'noShowPct', 'notifiedDeliveries', 'completedDeliveries',
+          'acceptedDeliveries', 'stackedDeliveries', 'declinedDeliveries', 'cancelledDeliveries',
+          'deductionDeliveries', 'notAcceptedDeliveries', 'manualUndispatched', 'chatResponsePct',
+          'sourceFile', 'sourceSheet', 'sourceRowNumber', 'importBatchId', 'rowChecksum',
+          'createdByUid', 'allowedUids', 'importedAt', 'updatedAt'
+        ])
+        && data.recordKey == docId && isValidId(data.recordKey)
+        && data.platform == 'hungerstation'
+        && data.riderId is string && data.riderId.size() >= 1 && data.riderId.size() <= 64
+        && isValidIsoDate(data.date)
+        && data.month is string && data.month.size() == 7
+        && isOptionalString(data, 'errorCodes', 500)
+        && isValidString(data.sourceFile, 255)
+        && isValidString(data.sourceSheet, 100)
+        && isValidString(data.importBatchId, 128)
+        && isValidString(data.rowChecksum, 128)
+        && isValidId(data.createdByUid)
+        && isValidAllowedUids(data.allowedUids)
+        && data.importedAt is timestamp && data.updatedAt is timestamp;
+    }
+
+    function isValidHungerDistanceDaily(data, docId) {
+      return data.keys().hasAll(['recordKey', 'platform', 'riderId', 'date', 'month', 'sourceFile', 'sourceSheet', 'importBatchId', 'rowChecksum', 'createdByUid', 'allowedUids', 'importedAt', 'updatedAt'])
+        && data.keys().hasOnly([
+          'recordKey', 'platform', 'riderId', 'date', 'month', 'city', 'contractName',
+          'totalKm', 'payableKm', 'avgKm', 'completedDeliveries',
+          'sourceFile', 'sourceSheet', 'sourceRowNumber', 'importBatchId', 'rowChecksum',
+          'createdByUid', 'allowedUids', 'importedAt', 'updatedAt'
+        ])
+        && data.recordKey == docId && isValidId(data.recordKey)
+        && data.platform == 'hungerstation'
+        && data.riderId is string && data.riderId.size() >= 1 && data.riderId.size() <= 64
+        && isValidIsoDate(data.date)
+        && data.month is string && data.month.size() == 7
+        && isValidId(data.createdByUid)
+        && isValidAllowedUids(data.allowedUids)
+        && data.importedAt is timestamp && data.updatedAt is timestamp;
+    }
+
+    function isValidHungerWalletSnapshot(data, docId) {
+      return data.keys().hasAll(['recordKey', 'platform', 'riderId', 'snapshotDate', 'currentWallet', 'sourceFile', 'sourceSheet', 'importBatchId', 'rowChecksum', 'createdByUid', 'allowedUids', 'importedAt', 'updatedAt'])
+        && data.keys().hasOnly([
+          'recordKey', 'platform', 'riderId', 'snapshotDate', 'currentWallet',
+          'sourceFile', 'sourceSheet', 'sourceRowNumber', 'importBatchId', 'rowChecksum',
+          'createdByUid', 'allowedUids', 'importedAt', 'updatedAt'
+        ])
+        && data.recordKey == docId && isValidId(data.recordKey)
+        && data.platform == 'hungerstation'
+        && data.riderId is string && data.riderId.size() >= 1 && data.riderId.size() <= 64
+        && isValidIsoDate(data.snapshotDate)
+        && data.currentWallet is number
+        && isValidId(data.createdByUid)
+        && isValidAllowedUids(data.allowedUids)
+        && data.importedAt is timestamp && data.updatedAt is timestamp;
+    }
+
+    function isValidHungerQualityMonthly(data, docId) {
+      return data.keys().hasAll(['recordKey', 'platform', 'riderId', 'month', 'sourceFile', 'sourceSheet', 'importBatchId', 'rowChecksum', 'createdByUid', 'allowedUids', 'importedAt', 'updatedAt'])
+        && data.keys().hasOnly([
+          'recordKey', 'platform', 'riderId', 'month', 'city', 'contractName', 'vehicleType',
+          'totalVerificationRequests', 'successfulVerificationRequests', 'verificationSuccessRate',
+          'grossOrders', 'completedOrders', 'completedOrdersInTime', 'failedOrdersByRider',
+          'onTimeDeliveryScore', 'failRateScore', 'finalDeliveryQualityScore', 'segment',
+          'sourceFile', 'sourceSheet', 'sourceRowNumber', 'importBatchId', 'rowChecksum',
+          'createdByUid', 'allowedUids', 'importedAt', 'updatedAt'
+        ])
+        && data.recordKey == docId && isValidId(data.recordKey)
+        && data.platform == 'hungerstation'
+        && data.riderId is string && data.riderId.size() >= 1 && data.riderId.size() <= 64
+        && data.month is string && data.month.size() >= 1 && data.month.size() <= 32
+        && isValidId(data.createdByUid)
+        && isValidAllowedUids(data.allowedUids)
+        && data.importedAt is timestamp && data.updatedAt is timestamp;
+    }
+
+    function isValidKeetaDashboardDaily(data, docId) {
+      return data.keys().hasAll(['recordKey', 'platform', 'riderId', 'date', 'month', 'sourceFile', 'sourceSheet', 'importBatchId', 'rowChecksum', 'createdByUid', 'allowedUids', 'importedAt', 'updatedAt'])
+        && data.keys().hasOnly([
+          'recordKey', 'platform', 'riderId', 'date', 'month', 'firstName', 'lastName', 'fullName',
+          'vehicleType', 'headquarters', 'branch', 'supervisor', 'courierType', 'shiftAttendanceSummary',
+          'onShift', 'validDay', 'appOnlineTime', 'shiftValidOnlineTime', 'shiftOnlineHours',
+          'acceptedTasks', 'restaurantArrivals', 'deliveredTasks', 'largeOrderTasksCompleted',
+          'rejectedTasks', 'rejectedTasksCourier', 'rejectedTasksAuto', 'cancellationRate',
+          'completionRate', 'onTimeRate', 'largeOrderOnTimeRate', 'avgDeliveryTimeMinutes',
+          'deliveredOver55Min', 'overdueOrderTasks', 'severelyOverdueOrderTasks', 'rawExtraColumns',
+          'sourceFile', 'sourceSheet', 'sourceRowNumber', 'importBatchId', 'rowChecksum',
+          'createdByUid', 'allowedUids', 'importedAt', 'updatedAt'
+        ])
+        && data.recordKey == docId && isValidId(data.recordKey)
+        && data.platform == 'keeta'
+        && data.riderId is string && data.riderId.size() >= 1 && data.riderId.size() <= 64
+        && isValidIsoDate(data.date)
+        && data.month is string && data.month.size() == 7
+        && isValidId(data.createdByUid)
+        && isValidAllowedUids(data.allowedUids)
+        && data.importedAt is timestamp && data.updatedAt is timestamp;
+    }
+
+    function isValidKeetaVdaDaily(data, docId) {
+      return data.keys().hasAll(['recordKey', 'platform', 'riderId', 'date', 'month', 'sourceFile', 'sourceSheet', 'importBatchId', 'rowChecksum', 'createdByUid', 'allowedUids', 'importedAt', 'updatedAt'])
+        && data.keys().hasOnly([
+          'recordKey', 'platform', 'riderId', 'date', 'month', 'vehicleType',
+          'shiftOnlineHours', 'sumValidShifts', 'shouldOnlineDays', 'totalDeliveredTasks',
+          'onTimeDTasks', 'cancellationD', 'deliveredOver55Min', 'acceptedOrders',
+          'totalDeliveryDistance', 'payableDistance', 'shiftWindows',
+          'sourceFile', 'sourceSheet', 'sourceRowNumber', 'importBatchId', 'rowChecksum',
+          'createdByUid', 'allowedUids', 'importedAt', 'updatedAt'
+        ])
+        && data.recordKey == docId && isValidId(data.recordKey)
+        && data.platform == 'keeta'
+        && data.riderId is string && data.riderId.size() >= 1 && data.riderId.size() <= 64
+        && isValidIsoDate(data.date)
+        && data.month is string && data.month.size() == 7
+        && isValidId(data.createdByUid)
+        && isValidAllowedUids(data.allowedUids)
+        && data.importedAt is timestamp && data.updatedAt is timestamp;
+    }
+
+    function isValidKeetaRankSnapshot(data, docId) {
+      return data.keys().hasAll(['recordKey', 'platform', 'riderId', 'snapshotDate', 'sourceFile', 'sourceSheet', 'importBatchId', 'rowChecksum', 'createdByUid', 'allowedUids', 'importedAt', 'updatedAt'])
+        && data.keys().hasOnly([
+          'recordKey', 'platform', 'riderId', 'snapshotDate', 'name', 'currentEstimatedLevel',
+          'rankingPercentile', 'forcedAssignmentScore', 'estimatedRewardAmount', 'onTimeRate',
+          'orderCompletionRate', 'didntTapDropOffTooEarly', 'orderVolume',
+          'sourceFile', 'sourceSheet', 'sourceRowNumber', 'importBatchId', 'rowChecksum',
+          'createdByUid', 'allowedUids', 'importedAt', 'updatedAt'
+        ])
+        && data.recordKey == docId && isValidId(data.recordKey)
+        && data.platform == 'keeta'
+        && data.riderId is string && data.riderId.size() >= 1 && data.riderId.size() <= 64
+        && isValidIsoDate(data.snapshotDate)
+        && isValidId(data.createdByUid)
+        && isValidAllowedUids(data.allowedUids)
+        && data.importedAt is timestamp && data.updatedAt is timestamp;
+    }
+
+    function isValidKeetaFacialDaily(data, docId) {
+      return data.keys().hasAll(['recordKey', 'platform', 'riderId', 'date', 'month', 'sourceFile', 'sourceSheet', 'importBatchId', 'rowChecksum', 'createdByUid', 'allowedUids', 'importedAt', 'updatedAt'])
+        && data.keys().hasOnly([
+          'recordKey', 'platform', 'riderId', 'date', 'month', 'city', 'partnerId', 'partnerName',
+          'pmm', 'finalInspectionResult', 'totalDaysTriggeredMtd', 'totalDaysPassedMtd',
+          'passRateMtd', 'over90PassRate',
+          'sourceFile', 'sourceSheet', 'sourceRowNumber', 'importBatchId', 'rowChecksum',
+          'createdByUid', 'allowedUids', 'importedAt', 'updatedAt'
+        ])
+        && data.recordKey == docId && isValidId(data.recordKey)
+        && data.platform == 'keeta'
+        && data.riderId is string && data.riderId.size() >= 1 && data.riderId.size() <= 64
+        && isValidIsoDate(data.date)
+        && data.month is string && data.month.size() == 7
+        && isValidId(data.createdByUid)
+        && isValidAllowedUids(data.allowedUids)
+        && data.importedAt is timestamp && data.updatedAt is timestamp;
+    }
+
+    function isValidDailySummary(data, docId) {
+      return data.keys().hasAll(['summaryKey', 'platform', 'date', 'month', 'totalRiders', 'activeRiders', 'completedOrders', 'workingHours', 'createdByUid', 'allowedUids', 'updatedAt'])
+        && data.keys().hasOnly([
+          'summaryKey', 'platform', 'date', 'month', 'totalRiders', 'activeRiders',
+          'completedOrders', 'acceptedOrders', 'rejectedOrders', 'cancelledOrders',
+          'workingHours', 'validHours', 'totalKm', 'payableKm', 'overdueOrders',
+          'avgAcceptanceRate', 'avgCompletionRate', 'avgOnTimeRate', 'avgAttendanceRate',
+          'createdByUid', 'allowedUids', 'updatedAt'
+        ])
+        && data.summaryKey == docId && isValidId(data.summaryKey)
+        && data.platform in ['hungerstation', 'keeta']
+        && isValidIsoDate(data.date)
+        && data.month is string && data.month.size() == 7
+        && data.totalRiders is number && data.activeRiders is number
+        && data.completedOrders is number && data.workingHours is number
+        && isValidId(data.createdByUid)
+        && isValidAllowedUids(data.allowedUids)
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidMonthlySummary(data, docId) {
+      return data.keys().hasAll(['summaryKey', 'platform', 'month', 'totalRiders', 'activeRiders', 'completedOrders', 'workingHours', 'createdByUid', 'allowedUids', 'updatedAt'])
+        && data.keys().hasOnly([
+          'summaryKey', 'platform', 'month', 'totalRiders', 'activeRiders',
+          'completedOrders', 'workingHours', 'totalKm', 'payableKm', 'overdueOrders',
+          'avgAcceptanceRate', 'avgCompletionRate', 'avgOnTimeRate', 'avgAttendanceRate',
+          'createdByUid', 'allowedUids', 'updatedAt'
+        ])
+        && data.summaryKey == docId && isValidId(data.summaryKey)
+        && data.platform in ['hungerstation', 'keeta']
+        && data.month is string && data.month.size() == 7
+        && data.totalRiders is number && data.activeRiders is number
+        && data.completedOrders is number && data.workingHours is number
+        && isValidId(data.createdByUid)
+        && isValidAllowedUids(data.allowedUids)
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidOperationalSettings(data, docId) {
+      return data.keys().hasAll([
+          'settingsId', 'minDailyWorkingHours', 'minDailyOrders', 'maxOverdueRatePct',
+          'maxCancellationRatePct', 'minAcceptanceRatePct', 'minCompletionRatePct',
+          'minOnTimeRatePct', 'minAttendanceRatePct', 'minFacialPassRatePct',
+          'minWalletBalance', 'minDeliveryQualityScore', 'createdByUid', 'allowedUids', 'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'settingsId', 'minDailyWorkingHours', 'minDailyOrders', 'maxOverdueRatePct',
+          'maxCancellationRatePct', 'minAcceptanceRatePct', 'minCompletionRatePct',
+          'minOnTimeRatePct', 'minAttendanceRatePct', 'minFacialPassRatePct',
+          'minWalletBalance', 'minDeliveryQualityScore',
+          'errorRepeatRiderThreshold', 'errorSpikeDailyThreshold', 'errorSpikeMultiplierPct',
+          'errorSpreadRidersThreshold', 'errorBranchConcentrationPct', 'alertOnNewErrorCode',
+          'scoreWeightProductivity', 'scoreWeightHours', 'scoreWeightCommitment',
+          'scoreWeightQuality', 'scoreWeightAcceptance', 'scoreWeightCancellation',
+          'minActiveOrdersPerDay', 'minActiveHoursPerDay', 'caseOverdueDays',
+          'configuredBranches', 'importMaxFiles', 'importAllowUpdates', 'importStrictDates',
+          'createdByUid', 'allowedUids', 'updatedByEmail', 'updatedAt'
+        ])
+        && data.settingsId == docId && isValidId(data.settingsId)
+        && data.minDailyWorkingHours is number
+        && data.minDailyOrders is number
+        && data.maxOverdueRatePct is number
+        && data.maxCancellationRatePct is number
+        && data.minAcceptanceRatePct is number
+        && data.minCompletionRatePct is number
+        && data.minOnTimeRatePct is number
+        && data.minAttendanceRatePct is number
+        && data.minFacialPassRatePct is number
+        && data.minWalletBalance is number
+        && data.minDeliveryQualityScore is number
+        && isOptionalNum(data, 'errorRepeatRiderThreshold')
+        && isOptionalNum(data, 'errorSpikeDailyThreshold')
+        && isOptionalNum(data, 'errorSpikeMultiplierPct')
+        && isOptionalNum(data, 'errorSpreadRidersThreshold')
+        && isOptionalNum(data, 'errorBranchConcentrationPct')
+        && isOptionalBool(data, 'alertOnNewErrorCode')
+        && isOptionalNum(data, 'scoreWeightProductivity')
+        && isOptionalNum(data, 'scoreWeightHours')
+        && isOptionalNum(data, 'scoreWeightCommitment')
+        && isOptionalNum(data, 'scoreWeightQuality')
+        && isOptionalNum(data, 'scoreWeightAcceptance')
+        && isOptionalNum(data, 'scoreWeightCancellation')
+        && isOptionalNum(data, 'minActiveOrdersPerDay')
+        && isOptionalNum(data, 'minActiveHoursPerDay')
+        && isOptionalNum(data, 'caseOverdueDays')
+        && (!('configuredBranches' in data) || (data.configuredBranches is list && data.configuredBranches.size() <= 30))
+        && isOptionalNum(data, 'importMaxFiles')
+        && isOptionalBool(data, 'importAllowUpdates')
+        && isOptionalBool(data, 'importStrictDates')
+        && isOptionalString(data, 'updatedByEmail', 200)
+        && isValidId(data.createdByUid)
+        && isValidAllowedUids(data.allowedUids)
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidErrorCodeDictionary(data, docId) {
+      return data.keys().hasAll([
+          'codeKey', 'normalizedCode', 'arabicDescription', 'severity',
+          'verifiedStatus', 'createdByUid', 'allowedUids', 'createdAt', 'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'codeKey', 'normalizedCode', 'rawExamples', 'arabicDescription',
+          'englishDescription', 'category', 'severity', 'recommendedAction',
+          'verifiedStatus', 'notes', 'updatedByEmail', 'createdByUid',
+          'allowedUids', 'createdAt', 'updatedAt'
+        ])
+        && data.codeKey == docId && isValidId(data.codeKey)
+        && data.normalizedCode is string && data.normalizedCode.size() >= 1 && data.normalizedCode.size() <= 200
+        && isOptionalString(data, 'rawExamples', 400)
+        && data.arabicDescription is string && data.arabicDescription.size() >= 1 && data.arabicDescription.size() <= 500
+        && isOptionalString(data, 'englishDescription', 500)
+        && isOptionalString(data, 'category', 120)
+        && data.severity in ['critical', 'high', 'medium', 'low', 'unknown']
+        && isOptionalString(data, 'recommendedAction', 800)
+        && data.verifiedStatus in ['verified', 'unverified']
+        && isOptionalString(data, 'notes', 1000)
+        && isOptionalString(data, 'updatedByEmail', 200)
+        && isValidId(data.createdByUid)
+        && isValidAllowedUids(data.allowedUids)
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidRiderErrorCase(data, docId) {
+      return data.keys().hasAll([
+          'caseId', 'riderId', 'date', 'codeKey', 'normalizedCode', 'rawCode',
+          'status', 'createdByUid', 'allowedUids', 'createdAt', 'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'caseId', 'riderId', 'date', 'codeKey', 'normalizedCode', 'rawCode',
+          'status', 'operationalNote', 'actionTaken', 'updatedByEmail',
+          'createdByUid', 'allowedUids', 'createdAt', 'updatedAt'
+        ])
+        && data.caseId == docId && isValidId(data.caseId)
+        && data.riderId is string && data.riderId.size() >= 1 && data.riderId.size() <= 64
+        && isValidIsoDate(data.date)
+        && isValidId(data.codeKey)
+        && data.normalizedCode is string && data.normalizedCode.size() >= 1 && data.normalizedCode.size() <= 200
+        && data.rawCode is string && data.rawCode.size() >= 1 && data.rawCode.size() <= 200
+        && data.status in ['open', 'in_review', 'resolved']
+        && isOptionalString(data, 'operationalNote', 1000)
+        && isOptionalString(data, 'actionTaken', 500)
+        && isOptionalString(data, 'updatedByEmail', 200)
+        && isValidId(data.createdByUid)
+        && isValidAllowedUids(data.allowedUids)
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidOperationalCase(data, docId) {
+      return data.keys().hasAll([
+          'caseId', 'riderId', 'platform', 'issueType', 'title', 'priority', 'status',
+          'registeredDate', 'createdByUid', 'allowedUids', 'createdAt', 'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'caseId', 'riderId', 'platform', 'riderName', 'branch', 'issueType', 'title',
+          'description', 'priority', 'status', 'assigneeEmail', 'actionTaken', 'notes',
+          'registeredDate', 'dueDate', 'closedDate', 'sourceRef', 'updatedByEmail',
+          'createdByUid', 'allowedUids', 'createdAt', 'updatedAt'
+        ])
+        && data.caseId == docId && isValidId(data.caseId)
+        && data.riderId is string && data.riderId.size() >= 1 && data.riderId.size() <= 64
+        && data.platform in ['hungerstation', 'keeta']
+        && isOptionalString(data, 'riderName', 150)
+        && isOptionalString(data, 'branch', 120)
+        && data.issueType is string && data.issueType.size() >= 1 && data.issueType.size() <= 120
+        && data.title is string && data.title.size() >= 1 && data.title.size() <= 200
+        && isOptionalString(data, 'description', 1200)
+        && data.priority in ['critical', 'high', 'medium', 'low']
+        && data.status in ['new', 'under_review', 'in_progress', 'resolved', 'closed']
+        && isOptionalString(data, 'assigneeEmail', 200)
+        && isOptionalString(data, 'actionTaken', 800)
+        && isOptionalString(data, 'notes', 1500)
+        && isValidIsoDate(data.registeredDate)
+        && isOptionalString(data, 'dueDate', 10)
+        && isOptionalString(data, 'closedDate', 10)
+        && isOptionalString(data, 'sourceRef', 200)
+        && isOptionalString(data, 'updatedByEmail', 200)
+        && isValidId(data.createdByUid)
+        && isValidAllowedUids(data.allowedUids)
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidRiderNote(data, docId) {
+      return data.keys().hasAll([
+          'noteId', 'riderKey', 'platform', 'riderId', 'category', 'content',
+          'authorEmail', 'createdByUid', 'allowedUids', 'createdAt', 'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'noteId', 'riderKey', 'platform', 'riderId', 'category', 'content',
+          'authorEmail', 'createdByUid', 'allowedUids', 'createdAt', 'updatedAt'
+        ])
+        && data.noteId == docId && isValidId(data.noteId)
+        && data.riderKey is string && data.riderKey.size() >= 1 && data.riderKey.size() <= 128
+        && data.platform in ['hungerstation', 'keeta']
+        && data.riderId is string && data.riderId.size() >= 1 && data.riderId.size() <= 64
+        && data.category in ['admin', 'warning', 'commendation', 'ops']
+        && data.content is string && data.content.size() >= 1 && data.content.size() <= 1500
+        && data.authorEmail is string && data.authorEmail.size() >= 3 && data.authorEmail.size() <= 200
+        && isValidId(data.createdByUid)
+        && isValidAllowedUids(data.allowedUids)
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidAuditLog(data, docId) {
+      return data.keys().hasAll(['logId', 'action', 'targetCollection', 'targetId', 'actorUid', 'actorEmail', 'details', 'allowedUids', 'createdAt'])
+        && data.keys().hasOnly(['logId', 'action', 'targetCollection', 'targetId', 'actorUid', 'actorEmail', 'details', 'allowedUids', 'createdAt'])
+        && data.logId == docId && isValidId(data.logId)
+        && data.action is string && data.action.size() >= 1 && data.action.size() <= 80
+        && data.targetCollection is string && data.targetCollection.size() >= 1 && data.targetCollection.size() <= 80
+        && data.targetId is string && data.targetId.size() >= 1 && data.targetId.size() <= 128
+        && data.actorUid == request.auth.uid
+        && data.actorEmail is string && data.actorEmail.size() <= 200
+        && data.details is string && data.details.size() <= 2000
+        && isValidAllowedUids(data.allowedUids)
+        && data.createdAt == request.time;
+    }
+
+    // 1. users (Strict PII isolation)
+    match /users/{userId} {
+      allow get: if isValidId(userId) && (isOwner(userId) || isAdmin());
+      allow list: if isVerified() && (
+        isBootstrappedOwner()
+        || existing().uid == request.auth.uid
+        || (existing().managedByAdminUids is list && existing().managedByAdminUids.size() <= 10 && request.auth.uid in existing().managedByAdminUids)
+      );
+      allow create: if isVerified() && isValidId(userId) && isValidUserProfile(incoming(), userId)
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time
+        && (
+          (isBootstrappedOwner() && userId == request.auth.uid && incoming().role == 'owner' && incoming().active == true)
+          || (userId == request.auth.uid && incoming().role == 'viewer' && incoming().active == false)
+          || isAdmin()
+        );
+      allow update: if isVerified() && isValidId(userId) && isValidUserProfile(incoming(), userId)
+        && incoming().uid == existing().uid
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        && (
+          isAdmin()
+          || (isOwner(userId)
+              && incoming().role == existing().role
+              && incoming().active == existing().active
+              && incoming().diff(existing()).affectedKeys().hasOnly(['displayName', 'updatedAt']))
+        );
+      allow delete: if isValidId(userId) && isBootstrappedOwner() && userId != request.auth.uid;
+    }
+
+    // 2. riderMaster
+    match /riderMaster/{riderMasterId} {
+      allow get: if isValidId(riderMasterId) && isActiveMember();
+      allow list: if canListResource();
+      allow create: if isValidId(riderMasterId) && isSupervisorOrAbove()
+        && isValidRiderMaster(incoming(), riderMasterId)
+        && incoming().createdByUid == request.auth.uid
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time;
+      allow update: if isValidId(riderMasterId) && isSupervisorOrAbove()
+        && isValidRiderMaster(incoming(), riderMasterId)
+        && incoming().createdByUid == existing().createdByUid
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        && (isAdmin() || incoming().diff(existing()).affectedKeys().hasOnly(['fullName', 'city', 'branch', 'supervisor', 'contractName', 'vehicleType', 'status', 'allowedUids', 'updatedAt']));
+      allow delete: if isValidId(riderMasterId) && isAdmin();
+    }
+
+    // 3. riderIdentityMapping
+    match /riderIdentityMapping/{mappingId} {
+      allow get: if isValidId(mappingId) && isActiveMember();
+      allow list: if canListResource();
+      allow create: if isValidId(mappingId) && isSupervisorOrAbove()
+        && isValidRiderIdentityMapping(incoming(), mappingId)
+        && incoming().createdByUid == request.auth.uid
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time
+        && exists(/databases/$(database)/documents/riderMaster/$(incoming().internalRiderId));
+      allow update: if isValidId(mappingId) && isSupervisorOrAbove()
+        && isValidRiderIdentityMapping(incoming(), mappingId)
+        && incoming().createdByUid == existing().createdByUid
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        && (isAdmin() || incoming().diff(existing()).affectedKeys().hasOnly(['internalRiderId', 'platformRiderName', 'allowedUids', 'updatedAt']));
+      allow delete: if isValidId(mappingId) && isOpsManagerOrAbove();
+    }
+
+    // 4. importBatches
+    match /importBatches/{batchId} {
+      allow get: if isValidId(batchId) && isActiveMember();
+      allow list: if canListResource();
+      allow create: if isValidId(batchId) && isOpsManagerOrAbove()
+        && isValidImportBatch(incoming(), batchId)
+        && incoming().createdByUid == request.auth.uid
+        && incoming().createdAt == request.time;
+      allow update: if isValidId(batchId) && isOpsManagerOrAbove()
+        && isValidImportBatch(incoming(), batchId)
+        && incoming().createdByUid == existing().createdByUid
+        && incoming().createdAt == existing().createdAt
+        && (isAdmin() || (existing().status != 'committed' && incoming().diff(existing()).affectedKeys().hasOnly(['status', 'validCount', 'duplicateCount', 'rejectedCount', 'updatedCount', 'allowedUids'])));
+      allow delete: if isValidId(batchId) && isAdmin();
+    }
+
+    // 5. hungerDaily
+    match /hungerDaily/{recordKey} {
+      allow get: if isValidId(recordKey) && isActiveMember();
+      allow list: if canListResource();
+      allow create: if isValidId(recordKey) && isOpsManagerOrAbove()
+        && isValidHungerDaily(incoming(), recordKey)
+        && incoming().createdByUid == request.auth.uid
+        && incoming().importedAt == request.time
+        && incoming().updatedAt == request.time;
+      allow update: if isValidId(recordKey) && isOpsManagerOrAbove()
+        && isValidHungerDaily(incoming(), recordKey)
+        && incoming().createdByUid == existing().createdByUid
+        && incoming().importedAt == existing().importedAt
+        && incoming().updatedAt == request.time
+        && (isAdmin() || incoming().diff(existing()).affectedKeys().hasOnly([
+          'city', 'contractName', 'vehicleName', 'batchNumber', 'tgaStatus', 'errorCodes',
+          'shifts', 'plannedWorkingHours', 'actualWorkingHours', 'avgWorkingHoursPerDay',
+          'attendanceRate', 'breakHours', 'lostHours', 'acceptanceRate', 'contactRate',
+          'noShows', 'noShowPct', 'notifiedDeliveries', 'completedDeliveries', 'acceptedDeliveries',
+          'stackedDeliveries', 'declinedDeliveries', 'cancelledDeliveries', 'deductionDeliveries',
+          'notAcceptedDeliveries', 'manualUndispatched', 'chatResponsePct',
+          'sourceFile', 'sourceSheet', 'sourceRowNumber', 'importBatchId', 'rowChecksum',
+          'allowedUids', 'updatedAt'
+        ]));
+      allow delete: if isValidId(recordKey) && isAdmin();
+    }
+
+    // 6. hungerDistanceDaily
+    match /hungerDistanceDaily/{recordKey} {
+      allow get: if isValidId(recordKey) && isActiveMember();
+      allow list: if canListResource();
+      allow create: if isValidId(recordKey) && isOpsManagerOrAbove()
+        && isValidHungerDistanceDaily(incoming(), recordKey)
+        && incoming().createdByUid == request.auth.uid
+        && incoming().importedAt == request.time
+        && incoming().updatedAt == request.time;
+      allow update: if isValidId(recordKey) && isOpsManagerOrAbove()
+        && isValidHungerDistanceDaily(incoming(), recordKey)
+        && incoming().createdByUid == existing().createdByUid
+        && incoming().importedAt == existing().importedAt
+        && incoming().updatedAt == request.time
+        && (isAdmin() || incoming().diff(existing()).affectedKeys().hasOnly([
+          'city', 'contractName', 'totalKm', 'payableKm', 'avgKm', 'completedDeliveries',
+          'sourceFile', 'sourceSheet', 'sourceRowNumber', 'importBatchId', 'rowChecksum',
+          'allowedUids', 'updatedAt'
+        ]));
+      allow delete: if isValidId(recordKey) && isAdmin();
+    }
+
+    // 7. hungerWalletSnapshots
+    match /hungerWalletSnapshots/{recordKey} {
+      allow get: if isValidId(recordKey) && isActiveMember();
+      allow list: if canListResource();
+      allow create: if isValidId(recordKey) && isOpsManagerOrAbove()
+        && isValidHungerWalletSnapshot(incoming(), recordKey)
+        && incoming().createdByUid == request.auth.uid
+        && incoming().importedAt == request.time
+        && incoming().updatedAt == request.time;
+      allow update: if isValidId(recordKey) && isOpsManagerOrAbove()
+        && isValidHungerWalletSnapshot(incoming(), recordKey)
+        && incoming().createdByUid == existing().createdByUid
+        && incoming().importedAt == existing().importedAt
+        && incoming().updatedAt == request.time
+        && (isAdmin() || incoming().diff(existing()).affectedKeys().hasOnly([
+          'currentWallet', 'sourceFile', 'sourceSheet', 'sourceRowNumber', 'importBatchId',
+          'rowChecksum', 'allowedUids', 'updatedAt'
+        ]));
+      allow delete: if isValidId(recordKey) && isAdmin();
+    }
+
+    // 8. hungerQualityMonthly
+    match /hungerQualityMonthly/{recordKey} {
+      allow get: if isValidId(recordKey) && isActiveMember();
+      allow list: if canListResource();
+      allow create: if isValidId(recordKey) && isOpsManagerOrAbove()
+        && isValidHungerQualityMonthly(incoming(), recordKey)
+        && incoming().createdByUid == request.auth.uid
+        && incoming().importedAt == request.time
+        && incoming().updatedAt == request.time;
+      allow update: if isValidId(recordKey) && isOpsManagerOrAbove()
+        && isValidHungerQualityMonthly(incoming(), recordKey)
+        && incoming().createdByUid == existing().createdByUid
+        && incoming().importedAt == existing().importedAt
+        && incoming().updatedAt == request.time
+        && (isAdmin() || incoming().diff(existing()).affectedKeys().hasOnly([
+          'city', 'contractName', 'vehicleType', 'totalVerificationRequests',
+          'successfulVerificationRequests', 'verificationSuccessRate', 'grossOrders',
+          'completedOrders', 'completedOrdersInTime', 'failedOrdersByRider',
+          'onTimeDeliveryScore', 'failRateScore', 'finalDeliveryQualityScore', 'segment',
+          'sourceFile', 'sourceSheet', 'sourceRowNumber', 'importBatchId', 'rowChecksum',
+          'allowedUids', 'updatedAt'
+        ]));
+      allow delete: if isValidId(recordKey) && isAdmin();
+    }
+
+    // 9. keetaDashboardDaily
+    match /keetaDashboardDaily/{recordKey} {
+      allow get: if isValidId(recordKey) && isActiveMember();
+      allow list: if canListResource();
+      allow create: if isValidId(recordKey) && isOpsManagerOrAbove()
+        && isValidKeetaDashboardDaily(incoming(), recordKey)
+        && incoming().createdByUid == request.auth.uid
+        && incoming().importedAt == request.time
+        && incoming().updatedAt == request.time;
+      allow update: if isValidId(recordKey) && isOpsManagerOrAbove()
+        && isValidKeetaDashboardDaily(incoming(), recordKey)
+        && incoming().createdByUid == existing().createdByUid
+        && incoming().importedAt == existing().importedAt
+        && incoming().updatedAt == request.time
+        && (isAdmin() || incoming().diff(existing()).affectedKeys().hasOnly([
+          'firstName', 'lastName', 'fullName', 'vehicleType', 'headquarters', 'branch',
+          'supervisor', 'courierType', 'shiftAttendanceSummary', 'onShift', 'validDay',
+          'appOnlineTime', 'shiftValidOnlineTime', 'shiftOnlineHours', 'acceptedTasks',
+          'restaurantArrivals', 'deliveredTasks', 'largeOrderTasksCompleted', 'rejectedTasks',
+          'rejectedTasksCourier', 'rejectedTasksAuto', 'cancellationRate', 'completionRate',
+          'onTimeRate', 'largeOrderOnTimeRate', 'avgDeliveryTimeMinutes', 'deliveredOver55Min',
+          'overdueOrderTasks', 'severelyOverdueOrderTasks', 'rawExtraColumns',
+          'sourceFile', 'sourceSheet', 'sourceRowNumber', 'importBatchId', 'rowChecksum',
+          'allowedUids', 'updatedAt'
+        ]));
+      allow delete: if isValidId(recordKey) && isAdmin();
+    }
+
+    // 10. keetaVdaDaily
+    match /keetaVdaDaily/{recordKey} {
+      allow get: if isValidId(recordKey) && isActiveMember();
+      allow list: if canListResource();
+      allow create: if isValidId(recordKey) && isOpsManagerOrAbove()
+        && isValidKeetaVdaDaily(incoming(), recordKey)
+        && incoming().createdByUid == request.auth.uid
+        && incoming().importedAt == request.time
+        && incoming().updatedAt == request.time;
+      allow update: if isValidId(recordKey) && isOpsManagerOrAbove()
+        && isValidKeetaVdaDaily(incoming(), recordKey)
+        && incoming().createdByUid == existing().createdByUid
+        && incoming().importedAt == existing().importedAt
+        && incoming().updatedAt == request.time
+        && (isAdmin() || incoming().diff(existing()).affectedKeys().hasOnly([
+          'vehicleType', 'shiftOnlineHours', 'sumValidShifts', 'shouldOnlineDays',
+          'totalDeliveredTasks', 'onTimeDTasks', 'cancellationD', 'deliveredOver55Min',
+          'acceptedOrders', 'totalDeliveryDistance', 'payableDistance', 'shiftWindows',
+          'sourceFile', 'sourceSheet', 'sourceRowNumber', 'importBatchId', 'rowChecksum',
+          'allowedUids', 'updatedAt'
+        ]));
+      allow delete: if isValidId(recordKey) && isAdmin();
+    }
+
+    // 11. keetaRankSnapshots
+    match /keetaRankSnapshots/{recordKey} {
+      allow get: if isValidId(recordKey) && isActiveMember();
+      allow list: if canListResource();
+      allow create: if isValidId(recordKey) && isOpsManagerOrAbove()
+        && isValidKeetaRankSnapshot(incoming(), recordKey)
+        && incoming().createdByUid == request.auth.uid
+        && incoming().importedAt == request.time
+        && incoming().updatedAt == request.time;
+      allow update: if isValidId(recordKey) && isOpsManagerOrAbove()
+        && isValidKeetaRankSnapshot(incoming(), recordKey)
+        && incoming().createdByUid == existing().createdByUid
+        && incoming().importedAt == existing().importedAt
+        && incoming().updatedAt == request.time
+        && (isAdmin() || incoming().diff(existing()).affectedKeys().hasOnly([
+          'name', 'currentEstimatedLevel', 'rankingPercentile', 'forcedAssignmentScore',
+          'estimatedRewardAmount', 'onTimeRate', 'orderCompletionRate',
+          'didntTapDropOffTooEarly', 'orderVolume',
+          'sourceFile', 'sourceSheet', 'sourceRowNumber', 'importBatchId', 'rowChecksum',
+          'allowedUids', 'updatedAt'
+        ]));
+      allow delete: if isValidId(recordKey) && isAdmin();
+    }
+
+    // 12. keetaFacialRecognitionDaily
+    match /keetaFacialRecognitionDaily/{recordKey} {
+      allow get: if isValidId(recordKey) && isActiveMember();
+      allow list: if canListResource();
+      allow create: if isValidId(recordKey) && isOpsManagerOrAbove()
+        && isValidKeetaFacialDaily(incoming(), recordKey)
+        && incoming().createdByUid == request.auth.uid
+        && incoming().importedAt == request.time
+        && incoming().updatedAt == request.time;
+      allow update: if isValidId(recordKey) && isOpsManagerOrAbove()
+        && isValidKeetaFacialDaily(incoming(), recordKey)
+        && incoming().createdByUid == existing().createdByUid
+        && incoming().importedAt == existing().importedAt
+        && incoming().updatedAt == request.time
+        && (isAdmin() || incoming().diff(existing()).affectedKeys().hasOnly([
+          'city', 'partnerId', 'partnerName', 'pmm', 'finalInspectionResult',
+          'totalDaysTriggeredMtd', 'totalDaysPassedMtd', 'passRateMtd', 'over90PassRate',
+          'sourceFile', 'sourceSheet', 'sourceRowNumber', 'importBatchId', 'rowChecksum',
+          'allowedUids', 'updatedAt'
+        ]));
+      allow delete: if isValidId(recordKey) && isAdmin();
+    }
+
+    // 13. dailySummaries
+    match /dailySummaries/{summaryKey} {
+      allow get: if isValidId(summaryKey) && isActiveMember();
+      allow list: if canListResource();
+      allow create: if isValidId(summaryKey) && isOpsManagerOrAbove()
+        && isValidDailySummary(incoming(), summaryKey)
+        && incoming().createdByUid == request.auth.uid
+        && incoming().updatedAt == request.time;
+      allow update: if isValidId(summaryKey) && isOpsManagerOrAbove()
+        && isValidDailySummary(incoming(), summaryKey)
+        && incoming().createdByUid == existing().createdByUid
+        && incoming().updatedAt == request.time
+        && (isAdmin() || incoming().diff(existing()).affectedKeys().hasOnly([
+          'totalRiders', 'activeRiders', 'completedOrders', 'acceptedOrders',
+          'rejectedOrders', 'cancelledOrders', 'workingHours', 'validHours',
+          'totalKm', 'payableKm', 'overdueOrders', 'avgAcceptanceRate',
+          'avgCompletionRate', 'avgOnTimeRate', 'avgAttendanceRate', 'allowedUids', 'updatedAt'
+        ]));
+      allow delete: if isValidId(summaryKey) && isAdmin();
+    }
+
+    // 14. monthlySummaries
+    match /monthlySummaries/{summaryKey} {
+      allow get: if isValidId(summaryKey) && isActiveMember();
+      allow list: if canListResource();
+      allow create: if isValidId(summaryKey) && isOpsManagerOrAbove()
+        && isValidMonthlySummary(incoming(), summaryKey)
+        && incoming().createdByUid == request.auth.uid
+        && incoming().updatedAt == request.time;
+      allow update: if isValidId(summaryKey) && isOpsManagerOrAbove()
+        && isValidMonthlySummary(incoming(), summaryKey)
+        && incoming().createdByUid == existing().createdByUid
+        && incoming().updatedAt == request.time
+        && (isAdmin() || incoming().diff(existing()).affectedKeys().hasOnly([
+          'totalRiders', 'activeRiders', 'completedOrders', 'workingHours',
+          'totalKm', 'payableKm', 'overdueOrders', 'avgAcceptanceRate',
+          'avgCompletionRate', 'avgOnTimeRate', 'avgAttendanceRate', 'allowedUids', 'updatedAt'
+        ]));
+      allow delete: if isValidId(summaryKey) && isAdmin();
+    }
+
+    // 15. operationalSettings
+    match /operationalSettings/{settingsId} {
+      allow get: if isValidId(settingsId) && isActiveMember();
+      allow list: if canListResource();
+      allow create: if isValidId(settingsId) && isOpsManagerOrAbove()
+        && isValidOperationalSettings(incoming(), settingsId)
+        && incoming().createdByUid == request.auth.uid
+        && incoming().updatedAt == request.time;
+      allow update: if isValidId(settingsId) && isOpsManagerOrAbove()
+        && isValidOperationalSettings(incoming(), settingsId)
+        && incoming().createdByUid == existing().createdByUid
+        && incoming().updatedAt == request.time
+        && (isAdmin() || incoming().diff(existing()).affectedKeys().hasOnly([
+          'minDailyWorkingHours', 'minDailyOrders', 'maxOverdueRatePct',
+          'maxCancellationRatePct', 'minAcceptanceRatePct', 'minCompletionRatePct',
+          'minOnTimeRatePct', 'minAttendanceRatePct', 'minFacialPassRatePct',
+          'minWalletBalance', 'minDeliveryQualityScore',
+          'errorRepeatRiderThreshold', 'errorSpikeDailyThreshold', 'errorSpikeMultiplierPct',
+          'errorSpreadRidersThreshold', 'errorBranchConcentrationPct', 'alertOnNewErrorCode',
+          'scoreWeightProductivity', 'scoreWeightHours', 'scoreWeightCommitment',
+          'scoreWeightQuality', 'scoreWeightAcceptance', 'scoreWeightCancellation',
+          'minActiveOrdersPerDay', 'minActiveHoursPerDay', 'caseOverdueDays',
+          'configuredBranches', 'importMaxFiles', 'importAllowUpdates', 'importStrictDates',
+          'allowedUids', 'updatedByEmail', 'updatedAt'
+        ]));
+      allow delete: if isValidId(settingsId) && isAdmin();
+    }
+
+    // 16. hungerErrorDictionary
+    match /hungerErrorDictionary/{codeKey} {
+      allow get: if isValidId(codeKey) && isActiveMember();
+      allow list: if canListResource();
+      allow create: if isValidId(codeKey) && isSupervisorOrAbove()
+        && isValidErrorCodeDictionary(incoming(), codeKey)
+        && incoming().createdByUid == request.auth.uid
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time;
+      allow update: if isValidId(codeKey) && isSupervisorOrAbove()
+        && isValidErrorCodeDictionary(incoming(), codeKey)
+        && incoming().createdByUid == existing().createdByUid
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        && (isAdmin() || incoming().diff(existing()).affectedKeys().hasOnly([
+          'rawExamples', 'arabicDescription', 'englishDescription', 'category',
+          'severity', 'recommendedAction', 'verifiedStatus', 'notes',
+          'updatedByEmail', 'allowedUids', 'updatedAt'
+        ]));
+      allow delete: if isValidId(codeKey) && isAdmin();
+    }
+
+    // 17. hungerRiderErrorCases
+    match /hungerRiderErrorCases/{caseId} {
+      allow get: if isValidId(caseId) && isActiveMember();
+      allow list: if canListResource();
+      allow create: if isValidId(caseId) && isSupervisorOrAbove()
+        && isValidRiderErrorCase(incoming(), caseId)
+        && incoming().createdByUid == request.auth.uid
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time;
+      allow update: if isValidId(caseId) && isSupervisorOrAbove()
+        && isValidRiderErrorCase(incoming(), caseId)
+        && incoming().createdByUid == existing().createdByUid
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        && (isAdmin() || incoming().diff(existing()).affectedKeys().hasOnly([
+          'status', 'operationalNote', 'actionTaken', 'updatedByEmail', 'allowedUids', 'updatedAt'
+        ]));
+      allow delete: if isValidId(caseId) && isAdmin();
+    }
+
+    // 18. auditLogs (Immutable)
+    match /auditLogs/{logId} {
+      allow get: if isValidId(logId) && isSupervisorOrAbove();
+      allow list: if canListResource();
+      allow create: if isValidId(logId) && isActiveMember() && isValidAuditLog(incoming(), logId);
+      allow update: if false;
+      allow delete: if false;
+    }
+
+    // 19. operationalCases
+    match /operationalCases/{caseId} {
+      allow get: if isValidId(caseId) && isActiveMember();
+      allow list: if canListResource();
+      allow create: if isValidId(caseId) && isSupervisorOrAbove()
+        && isValidOperationalCase(incoming(), caseId)
+        && incoming().createdByUid == request.auth.uid
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time;
+      allow update: if isValidId(caseId) && isSupervisorOrAbove()
+        && isValidOperationalCase(incoming(), caseId)
+        && incoming().createdByUid == existing().createdByUid
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        && (existing().status != 'closed' || isOpsManagerOrAbove())
+        && (isAdmin() || incoming().diff(existing()).affectedKeys().hasOnly([
+          'riderName', 'branch', 'issueType', 'title', 'description', 'priority',
+          'status', 'assigneeEmail', 'actionTaken', 'notes', 'dueDate', 'closedDate',
+          'updatedByEmail', 'allowedUids', 'updatedAt'
+        ]));
+      allow delete: if isValidId(caseId) && isAdmin();
+    }
+
+    // 20. riderNotes
+    match /riderNotes/{noteId} {
+      allow get: if isValidId(noteId) && isActiveMember();
+      allow list: if canListResource();
+      allow create: if isValidId(noteId) && isSupervisorOrAbove()
+        && isValidRiderNote(incoming(), noteId)
+        && incoming().createdByUid == request.auth.uid
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time;
+      allow update: if isValidId(noteId) && isSupervisorOrAbove()
+        && (isAdmin() || existing().createdByUid == request.auth.uid)
+        && isValidRiderNote(incoming(), noteId)
+        && incoming().createdByUid == existing().createdByUid
+        && incoming().riderKey == existing().riderKey
+        && incoming().platform == existing().platform
+        && incoming().riderId == existing().riderId
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        && incoming().diff(existing()).affectedKeys().hasOnly(['category', 'content', 'allowedUids', 'updatedAt']);
+      allow delete: if isValidId(noteId) && (isAdmin() || existing().createdByUid == request.auth.uid);
+    }
+  }
+}
