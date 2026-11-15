@@ -4,19 +4,39 @@ import express, { type NextFunction, type Request, type Response } from 'express
 import multer from 'multer';
 import path from 'path';
 import { createServer as createViteServer } from 'vite';
-import type { ImportPreviewResult, UserRole } from './src/types/fleet.js';
+import type {
+  GranularCapability,
+  ImportPreviewResult,
+  PermissionAction,
+  PermissionModule,
+  PrivateDocumentRecord,
+} from './src/types/fleet.js';
+import {
+  deletePrivateVaultFile,
+  getPrivateVaultStats,
+  readBrandingLogoFile,
+  readBrandingPublicMetadata,
+  readPrivateVaultFile,
+  saveBrandingLogoFile,
+  saveBrandingPublicMetadata,
+  savePrivateVaultFile,
+} from './src/server/documentVault.js';
 import { parseExcelBuffer, type ParsedWorkbookOutput } from './src/server/excelParser.js';
 import { buildExcelReportBuffer, type ExportColumn } from './src/server/exportEngine.js';
 import {
   batchCheckExisting,
   commitFirestoreWrites,
+  deleteFirestoreDoc,
   extractAffectedDates,
+  getFirestoreDoc,
+  isKeetaEnabledOnServer,
   listFirestoreCollection,
   recomputeSummariesForDates,
   verifyUserFromToken,
   type VerifiedAuthUser,
   type WriteOperation,
 } from './src/server/firestoreRest.js';
+import { matchesDataScope } from './src/shared/rbacCore.js';
 
 dotenv.config();
 
@@ -43,12 +63,23 @@ const upload = multer({
   limits: { fileSize: 35 * 1024 * 1024, files: 10 },
 });
 
+const docUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 15 * 1024 * 1024, files: 1 },
+});
+
 interface AuthedRequest extends Request {
   authUser?: VerifiedAuthUser;
   idToken?: string;
 }
 
-const IMPORT_ALLOWED_ROLES: UserRole[] = ['owner', 'admin', 'operations_manager'];
+function hasServerPermission(user: VerifiedAuthUser, module: PermissionModule, action: PermissionAction): boolean {
+  return Boolean(user.permissions?.[module]?.[action]);
+}
+
+function hasServerCapability(user: VerifiedAuthUser, cap: GranularCapability): boolean {
+  return Boolean(user.capabilities?.[cap]);
+}
 
 async function requireAuth(req: AuthedRequest, res: Response, next: NextFunction) {
   try {
@@ -92,13 +123,155 @@ async function startServer() {
     res.json({ ok: true, service: 'fleet-operations-center' });
   });
 
+  // Non-sensitive Corporate Branding for AuthGate Login & Pre-boot Shell
+  app.get('/api/branding/public', async (_req, res) => {
+    const cached = await readBrandingPublicMetadata();
+    res.json({ branding: cached || null });
+  });
+
+  app.get('/api/branding/logo/:logoKey', async (req, res) => {
+    try {
+      const logoKey = String(req.params.logoKey || '').trim();
+      if (!logoKey) {
+        res.status(404).end();
+        return;
+      }
+      const { buffer, mimeType } = await readBrandingLogoFile(logoKey);
+      res.setHeader('Content-Type', mimeType);
+      res.setHeader('X-Content-Type-Options', 'nosniff');
+      res.setHeader('Cache-Control', 'public, max-age=300');
+      res.send(buffer);
+    } catch {
+      res.status(404).json({ error: 'تعذر العثور على الشعار.' });
+    }
+  });
+
+  app.post('/api/branding/logo', requireAuth, docUpload.single('file'), async (req: AuthedRequest, res: Response) => {
+    try {
+      const user = req.authUser!;
+      if (
+        !hasServerPermission(user, 'branding', 'edit') &&
+        !hasServerPermission(user, 'company', 'edit') &&
+        !hasServerCapability(user, 'change_branding')
+      ) {
+        res.status(403).json({ error: 'صلاحياتك لا تسمح بتعديل شعارات الهوية المؤسسية.' });
+        return;
+      }
+      const slotRaw = String(req.body?.slot || 'primary').trim();
+      const slot = (slotRaw === 'alternate' || slotRaw === 'icon' ? slotRaw : 'primary') as 'primary' | 'alternate' | 'icon';
+      const uploadedFile = req.file;
+      if (!uploadedFile) {
+        res.status(400).json({ error: 'لم يتم إرفاق ملف الشعار.' });
+        return;
+      }
+      const originalFileName = Buffer.from(uploadedFile.originalname, 'latin1').toString('utf8');
+      const saved = await saveBrandingLogoFile({
+        slot,
+        buffer: uploadedFile.buffer,
+        originalFileName,
+        mimeType: uploadedFile.mimetype,
+      });
+      res.json({ success: true, slot, logoKey: saved.logoKey, mimeType: saved.mimeType, sizeBytes: saved.sizeBytes });
+    } catch (err) {
+      res.status(400).json({ error: err instanceof Error ? err.message : 'فشل رفع الشعار.' });
+    }
+  });
+
+  app.post('/api/branding/sync-public', requireAuth, async (req: AuthedRequest, res: Response) => {
+    try {
+      const user = req.authUser!;
+      if (
+        !hasServerPermission(user, 'branding', 'edit') &&
+        !hasServerPermission(user, 'company', 'edit') &&
+        !hasServerCapability(user, 'change_branding') &&
+        !hasServerCapability(user, 'manage_company')
+      ) {
+        res.status(403).json({ error: 'صلاحياتك لا تسمح بتحديث إعدادات الهوية الظاهرة.' });
+        return;
+      }
+      const body = (req.body || {}) as Record<string, unknown>;
+      const safePublic = {
+        companyNameAr: String(body.companyNameAr || ''),
+        companyNameEn: String(body.companyNameEn || ''),
+        systemNameAr: String(body.systemNameAr || 'FLEET OPERATIONS CENTER'),
+        systemNameEn: String(body.systemNameEn || 'Fleet Operations Center'),
+        primaryLogoKey: String(body.primaryLogoKey || ''),
+        alternateLogoKey: String(body.alternateLogoKey || ''),
+        iconLogoKey: String(body.iconLogoKey || ''),
+        primaryColor: String(body.primaryColor || '#0f1e36'),
+        secondaryColor: String(body.secondaryColor || '#2563eb'),
+        buttonColor: String(body.buttonColor || '#1d4ed8'),
+        sidebarColor: String(body.sidebarColor || '#0c1628'),
+        uiStyleMode: String(body.uiStyleMode || 'corporate'),
+        defaultThemeMode: String(body.defaultThemeMode || 'light'),
+        loginScreenStyle: String(body.loginScreenStyle || 'split'),
+        loginHeadlineAr: String(body.loginHeadlineAr || ''),
+        loginSubheadlineAr: String(body.loginSubheadlineAr || ''),
+        developerName: String(body.developerName || 'م- عبدالرحمن محمد'),
+        developerPhone: String(body.developerPhone || '0559786939'),
+        version: String(body.version || 'v4.0 Enterprise'),
+        updatedAt: new Date().toISOString(),
+      };
+      await saveBrandingPublicMetadata(safePublic);
+      res.json({ success: true });
+    } catch (err) {
+      res.status(400).json({ error: err instanceof Error ? err.message : 'تعذر مزامنة الهوية العامة.' });
+    }
+  });
+
+  app.get('/api/system/health', requireAuth, async (req: AuthedRequest, res: Response) => {
+    try {
+      const user = req.authUser!;
+      const idToken = req.idToken!;
+      if (!hasServerPermission(user, 'system_health', 'view') && user.role !== 'owner' && user.role !== 'admin') {
+        res.status(403).json({ error: 'صلاحياتك لا تسمح بعرض مؤشرات صحة النظام.' });
+        return;
+      }
+      const startedAt = Date.now();
+      let firestoreOk = false;
+      let firestoreLatencyMs = 0;
+      let recentBatchesCount = 0;
+      let latestBatchAt = '';
+      try {
+        await getFirestoreDoc('operationalSettings', 'default', idToken);
+        firestoreOk = true;
+        firestoreLatencyMs = Date.now() - startedAt;
+        const batches = await listFirestoreCollection<{ createdAt?: string }>('importBatches', idToken, 50);
+        recentBatchesCount = batches.length;
+        const sorted = batches
+          .map((b) => b.createdAt || '')
+          .filter(Boolean)
+          .sort()
+          .reverse();
+        latestBatchAt = sorted[0] || '';
+      } catch {
+        firestoreOk = false;
+        firestoreLatencyMs = Date.now() - startedAt;
+      }
+      const vault = await getPrivateVaultStats();
+      const mem = process.memoryUsage();
+      res.json({
+        ok: firestoreOk && vault.exists,
+        checkedAt: new Date().toISOString(),
+        serverUptimeSeconds: Math.round(process.uptime()),
+        memoryRssMb: Math.round(mem.rss / (1024 * 1024)),
+        memoryHeapUsedMb: Math.round(mem.heapUsed / (1024 * 1024)),
+        firestore: { ok: firestoreOk, latencyMs: firestoreLatencyMs },
+        vault,
+        imports: { recentBatchesCount, latestBatchAt },
+      });
+    } catch (err) {
+      res.status(500).json({ error: err instanceof Error ? err.message : 'فشل فحص صحة النظام.' });
+    }
+  });
+
   // Preview uploaded local Excel files OR Google Drive Excel files
   app.post('/api/import/preview', requireAuth, upload.array('files', 10), async (req: AuthedRequest, res: Response) => {
     try {
       const user = req.authUser!;
       const idToken = req.idToken!;
-      if (!IMPORT_ALLOWED_ROLES.includes(user.role)) {
-        res.status(403).json({ error: 'صلاحياتك الحالية لا تسمح باستيراد التقارير.' });
+      if (!hasServerPermission(user, 'applications', 'add') && !hasServerPermission(user, 'operations', 'add')) {
+        res.status(403).json({ error: 'صلاحياتك الحالية لا تسمح باستيراد تقارير المنصات.' });
         return;
       }
 
@@ -148,6 +321,12 @@ async function startServer() {
         return;
       }
 
+      const expectedPlatformRaw = String(req.body?.expectedPlatform || '').trim();
+      const expectedPlatform =
+        expectedPlatformRaw === 'hungerstation' || expectedPlatformRaw === 'keeta'
+          ? expectedPlatformRaw
+          : undefined;
+
       const allowedUids = await getTeamAllowedUids(user.uid, idToken);
       const parsedList: ParsedWorkbookOutput[] = [];
       const previewResults: ImportPreviewResult[] = [];
@@ -162,6 +341,31 @@ async function startServer() {
           createdByUid: user.uid,
           allowedUids,
         });
+        const keetaEnabled = parsed.platform === 'keeta' ? await isKeetaEnabledOnServer(idToken) : true;
+        if (parsed.platform === 'keeta' && !keetaEnabled) {
+          res.status(403).json({
+            error: 'منصة Keeta مخفية وموقوفة تشغيليًا حاليًا من قِبل الإدارة. يمكن إعادة تفعيلها من إعدادات المنصات.',
+          });
+          return;
+        }
+        if (
+          !user.allowedPlatforms.includes(parsed.platform) ||
+          (user.dataScope.platforms.length > 0 && !user.dataScope.platforms.includes(parsed.platform))
+        ) {
+          const pName = parsed.platform === 'hungerstation' ? 'HungerStation' : 'Keeta';
+          res.status(403).json({
+            error: `صلاحيات حسابك لا تسمح باستيراد ملفات منصة ${pName} (${parsed.fileName}).`,
+          });
+          return;
+        }
+        if (expectedPlatform && parsed.platform !== expectedPlatform) {
+          const expectedLabel = expectedPlatform === 'hungerstation' ? 'HungerStation' : 'Keeta';
+          const detectedLabel = parsed.platform === 'hungerstation' ? 'HungerStation' : 'Keeta';
+          res.status(400).json({
+            error: `تم رفض الملف "${parsed.fileName}": أنت داخل مركز استيراد ${expectedLabel} بينما الملف ينتمي إلى منصة ${detectedLabel}. يرجى رفعه في مساحة العمل المخصصة له.`,
+          });
+          return;
+        }
         parsedList.push(parsed);
 
         // Compare against Firestore existing records for true idempotent preview
@@ -173,6 +377,7 @@ async function startServer() {
         let duplicateCount = 0;
 
         const sheetStatMap = new Map(parsed.sheetDiagnostics.map((s) => [s.sheetName, s]));
+        const previewQuotaBySheet = new Map<string, number>();
         const previewRows: ImportPreviewResult['previewRows'] = [];
 
         for (const rec of parsed.records) {
@@ -193,7 +398,9 @@ async function startServer() {
             if (diag) diag.updatedCount++;
           }
 
-          if (previewRows.length < 40) {
+          const sheetShown = previewQuotaBySheet.get(rec.data.sourceSheet) || 0;
+          if (previewRows.length < 80 && sheetShown < 20) {
+            previewQuotaBySheet.set(rec.data.sourceSheet, sheetShown + 1);
             const dateOrPeriod =
               'date' in rec.data
                 ? rec.data.date
@@ -273,7 +480,7 @@ async function startServer() {
     try {
       const user = req.authUser!;
       const idToken = req.idToken!;
-      if (!IMPORT_ALLOWED_ROLES.includes(user.role)) {
+      if (!hasServerPermission(user, 'applications', 'add') && !hasServerPermission(user, 'operations', 'add')) {
         res.status(403).json({ error: 'صلاحياتك الحالية لا تسمح بتأكيد الاستيراد.' });
         return;
       }
@@ -407,9 +614,15 @@ async function startServer() {
     }
   });
 
-  // Server-side Excel export (+ optional upload to Google Drive)
+  // Server-side Excel export (+ optional upload to Google Drive) with strict RBAC export check
   app.post('/api/export/excel', requireAuth, async (req: AuthedRequest, res: Response) => {
     try {
+      const user = req.authUser!;
+      const idToken = req.idToken!;
+      if (!hasServerPermission(user, 'reports', 'export')) {
+        res.status(403).json({ error: 'صلاحيات حسابك لا تسمح بتصدير التقارير.' });
+        return;
+      }
       const { title, sheetName, columns, rows, metadataLines, saveToDrive, fileName } = req.body as {
         title: string;
         sheetName: string;
@@ -468,9 +681,301 @@ async function startServer() {
 
       res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
       res.setHeader('Content-Disposition', `attachment; filename*=UTF-8''${encodeURIComponent(safeName.endsWith('.xlsx') ? safeName : `${safeName}.xlsx`)}`);
+
+      // Record export audit log asynchronously (best effort)
+      const allowedUids = await getTeamAllowedUids(user.uid, idToken);
+      const exportLogId = `log_${Date.now()}_${crypto.randomBytes(4).toString('hex')}`;
+      void commitFirestoreWrites(
+        [
+          {
+            collection: 'auditLogs',
+            docId: exportLogId,
+            data: {
+              logId: exportLogId,
+              action: 'REPORT_EXPORTED',
+              targetCollection: 'reports',
+              targetId: safeName.slice(0, 128),
+              entityType: 'report',
+              actorUid: user.uid,
+              actorEmail: user.email,
+              details: `تصدير تقرير Excel: ${title || safeName} (${rows?.length ?? 0} صف)`,
+              source: 'API',
+              allowedUids,
+            },
+            serverTimestampFields: ['createdAt'],
+          },
+        ],
+        idToken
+      ).catch(() => {});
+
       res.send(buffer);
     } catch (err) {
       res.status(500).json({ error: err instanceof Error ? err.message : 'فشل تصدير ملف Excel.' });
+    }
+  });
+
+  // ==========================================
+  // PRIVATE SERVER-SIDE DOCUMENT VAULT APIs
+  // ==========================================
+  app.post('/api/documents/upload', requireAuth, docUpload.single('file'), async (req: AuthedRequest, res: Response) => {
+    try {
+      const user = req.authUser!;
+      const idToken = req.idToken!;
+      const existingDocId = String(req.body?.docId || '').trim();
+      const isReplace = Boolean(existingDocId);
+
+      if (isReplace ? !hasServerPermission(user, 'documents', 'edit') : !hasServerPermission(user, 'documents', 'add')) {
+        res.status(403).json({ error: 'صلاحياتك الحالية لا تسمح برفع أو استبدال المستندات.' });
+        return;
+      }
+
+      const uploadedFile = req.file;
+      if (!uploadedFile) {
+        res.status(400).json({ error: 'لم يتم إرفاق ملف المستند.' });
+        return;
+      }
+
+      const entityType = String(req.body?.entityType || '').trim() as 'rider' | 'vehicle' | 'handover' | 'custom_field' | 'branding';
+      const entityId = String(req.body?.entityId || '').trim();
+      const entityLabel = String(req.body?.entityLabel || '').trim().slice(0, 180);
+      const docTypeId = String(req.body?.docTypeId || '').trim();
+      const docTypeName = String(req.body?.docTypeName || docTypeId).trim().slice(0, 120);
+      const title = String(req.body?.title || docTypeName).trim().slice(0, 180);
+      const issueDate = String(req.body?.issueDate || '').trim().slice(0, 10);
+      const expiryDate = String(req.body?.expiryDate || '').trim().slice(0, 10);
+      const notes = String(req.body?.notes || '').trim().slice(0, 600);
+      const versionNote = String(req.body?.versionNote || '').trim().slice(0, 300);
+
+      if (!['rider', 'vehicle', 'handover', 'custom_field', 'branding'].includes(entityType) || !entityId || !docTypeId) {
+        res.status(400).json({ error: 'بيانات ربط المستند بالكيان غير مكتملة.' });
+        return;
+      }
+
+      // Check data scope when linked to a rider
+      if (entityType === 'rider' && !user.dataScope.allBranches) {
+        const riderDoc = await getFirestoreDoc('riderMaster', entityId, idToken).catch(() => null);
+        if (
+          riderDoc &&
+          !matchesDataScope(
+            {
+              internalRiderId: entityId,
+              branch: typeof riderDoc.branch === 'string' ? riderDoc.branch : undefined,
+              city: typeof riderDoc.city === 'string' ? riderDoc.city : undefined,
+            },
+            user.dataScope
+          )
+        ) {
+          res.status(403).json({ error: 'المندوب خارج نطاق صلاحيات الفروع/المدن الخاص بك.' });
+          return;
+        }
+      }
+
+      const docId = existingDocId || `doc_${Date.now()}_${crypto.randomBytes(4).toString('hex')}`;
+      const existingDoc = existingDocId
+        ? ((await getFirestoreDoc('privateDocuments', docId, idToken)) as PrivateDocumentRecord | null)
+        : null;
+
+      if (existingDocId && !existingDoc) {
+        res.status(404).json({ error: 'المستند المطلوب استبداله غير موجود.' });
+        return;
+      }
+
+      const nextVersion = existingDoc ? (existingDoc.currentVersion || existingDoc.versions?.length || 1) + 1 : 1;
+      const originalFileName = Buffer.from(uploadedFile.originalname, 'latin1').toString('utf8');
+
+      const saved = await savePrivateVaultFile({
+        buffer: uploadedFile.buffer,
+        docId,
+        version: nextVersion,
+        originalFileName,
+        mimeType: uploadedFile.mimetype,
+        allowExtended: entityType === 'custom_field',
+      });
+
+      const nowIso = new Date().toISOString();
+      const newVersionEntry = {
+        version: nextVersion,
+        storageKey: saved.storageKey,
+        originalFileName: originalFileName.slice(0, 200),
+        mimeType: saved.normalizedMime,
+        sizeBytes: saved.sizeBytes,
+        sha256: saved.sha256,
+        uploadedByUid: user.uid,
+        uploadedByEmail: user.email,
+        uploadedAt: nowIso,
+        note: versionNote || (nextVersion > 1 ? 'تحديث بنسخة جديدة' : 'رفع أولي'),
+      };
+
+      const versions = existingDoc && Array.isArray(existingDoc.versions)
+        ? [...existingDoc.versions, newVersionEntry].slice(-20)
+        : [newVersionEntry];
+
+      const allowedUids = await getTeamAllowedUids(user.uid, idToken);
+      const recordData: Record<string, unknown> = {
+        docId,
+        entityType: existingDoc?.entityType || entityType,
+        entityId: existingDoc?.entityId || entityId,
+        entityLabel: entityLabel || existingDoc?.entityLabel || entityId,
+        docTypeId: existingDoc?.docTypeId || docTypeId,
+        docTypeName: docTypeName || existingDoc?.docTypeName || docTypeId,
+        title: title || existingDoc?.title || docTypeName,
+        issueDate: issueDate || existingDoc?.issueDate || '',
+        expiryDate: expiryDate || existingDoc?.expiryDate || '',
+        notes: notes || existingDoc?.notes || '',
+        currentVersion: nextVersion,
+        versions,
+        createdByUid: existingDoc?.createdByUid || user.uid,
+        allowedUids,
+      };
+
+      const logId = `log_${Date.now()}_${crypto.randomBytes(4).toString('hex')}`;
+      await commitFirestoreWrites(
+        [
+          {
+            collection: 'privateDocuments',
+            docId,
+            data: recordData,
+            serverTimestampFields: existingDoc ? ['updatedAt'] : ['createdAt', 'updatedAt'],
+            preserveTimestampFields: existingDoc?.createdAt ? { createdAt: existingDoc.createdAt } : undefined,
+          },
+          {
+            collection: 'auditLogs',
+            docId: logId,
+            data: {
+              logId,
+              action: existingDoc ? 'DOCUMENT_VERSION_REPLACED' : 'DOCUMENT_UPLOADED',
+              targetCollection: 'privateDocuments',
+              targetId: docId,
+              entityType: 'document',
+              actorUid: user.uid,
+              actorEmail: user.email,
+              details: `${existingDoc ? 'استبدال' : 'رفع'} مستند: ${recordData.title} (إصدار ${nextVersion}) للكيان ${entityType}:${entityId}`,
+              oldValue: existingDoc ? `v${existingDoc.currentVersion}` : undefined,
+              newValue: `v${nextVersion} (${originalFileName})`,
+              source: 'API',
+              allowedUids,
+            },
+            serverTimestampFields: ['createdAt'],
+          },
+        ],
+        idToken
+      );
+
+      res.json({ success: true, document: { ...recordData, docId } });
+    } catch (err) {
+      res.status(400).json({ error: err instanceof Error ? err.message : 'فشل رفع المستند في الخزينة الخاصة.' });
+    }
+  });
+
+  app.get('/api/documents/:docId/file', requireAuth, async (req: AuthedRequest, res: Response) => {
+    try {
+      const user = req.authUser!;
+      const idToken = req.idToken!;
+      if (!hasServerPermission(user, 'documents', 'view')) {
+        res.status(403).json({ error: 'صلاحياتك لا تسمح بعرض أو تنزيل المستندات الخاصة.' });
+        return;
+      }
+
+      const docId = String(req.params.docId || '').trim();
+      const docRecord = (await getFirestoreDoc('privateDocuments', docId, idToken)) as PrivateDocumentRecord | null;
+      if (!docRecord) {
+        res.status(404).json({ error: 'المستند غير موجود.' });
+        return;
+      }
+
+      if (docRecord.entityType === 'rider' && !user.dataScope.allBranches) {
+        const riderDoc = await getFirestoreDoc('riderMaster', docRecord.entityId, idToken).catch(() => null);
+        if (
+          riderDoc &&
+          !matchesDataScope(
+            {
+              internalRiderId: docRecord.entityId,
+              branch: typeof riderDoc.branch === 'string' ? riderDoc.branch : undefined,
+              city: typeof riderDoc.city === 'string' ? riderDoc.city : undefined,
+            },
+            user.dataScope
+          )
+        ) {
+          res.status(403).json({ error: 'لا تملك صلاحية عرض مستندات مندوب خارج نطاق فرعك.' });
+          return;
+        }
+      }
+
+      const reqVersion = req.query.version ? Number(req.query.version) : docRecord.currentVersion;
+      const versionObj =
+        docRecord.versions?.find((v) => v.version === reqVersion) ||
+        docRecord.versions?.[docRecord.versions.length - 1];
+      if (!versionObj) {
+        res.status(404).json({ error: 'نسخة المستند غير متوفرة.' });
+        return;
+      }
+
+      const fileBuf = await readPrivateVaultFile(versionObj.storageKey);
+      const isDownload = req.query.download === '1' || req.query.download === 'true';
+      const safeName = (versionObj.originalFileName || `${docId}.pdf`).replace(/[^a-zA-Z0-9._\-\u0600-\u06FF ]/g, '_');
+
+      res.setHeader('Content-Type', versionObj.mimeType || 'application/octet-stream');
+      res.setHeader('X-Content-Type-Options', 'nosniff');
+      res.setHeader('Cache-Control', 'private, no-store, max-age=0');
+      res.setHeader(
+        'Content-Disposition',
+        `${isDownload ? 'attachment' : 'inline'}; filename*=UTF-8''${encodeURIComponent(safeName)}`
+      );
+      res.send(fileBuf);
+    } catch (err) {
+      res.status(404).json({ error: err instanceof Error ? err.message : 'تعذر قراءة ملف المستند.' });
+    }
+  });
+
+  app.delete('/api/documents/:docId', requireAuth, async (req: AuthedRequest, res: Response) => {
+    try {
+      const user = req.authUser!;
+      const idToken = req.idToken!;
+      if (!hasServerPermission(user, 'documents', 'delete')) {
+        res.status(403).json({ error: 'صلاحياتك لا تسمح بحذف المستندات.' });
+        return;
+      }
+      const docId = String(req.params.docId || '').trim();
+      const docRecord = (await getFirestoreDoc('privateDocuments', docId, idToken)) as PrivateDocumentRecord | null;
+      if (!docRecord) {
+        res.status(404).json({ error: 'المستند غير موجود.' });
+        return;
+      }
+
+      for (const v of docRecord.versions || []) {
+        await deletePrivateVaultFile(v.storageKey);
+      }
+      await deleteFirestoreDoc('privateDocuments', docId, idToken);
+
+      const allowedUids = await getTeamAllowedUids(user.uid, idToken);
+      const logId = `log_${Date.now()}_${crypto.randomBytes(4).toString('hex')}`;
+      await commitFirestoreWrites(
+        [
+          {
+            collection: 'auditLogs',
+            docId: logId,
+            data: {
+              logId,
+              action: 'DOCUMENT_DELETED',
+              targetCollection: 'privateDocuments',
+              targetId: docId,
+              entityType: 'document',
+              actorUid: user.uid,
+              actorEmail: user.email,
+              details: `حذف المستند: ${docRecord.title} (${docRecord.entityType}:${docRecord.entityId})`,
+              oldValue: docRecord.title,
+              source: 'API',
+              allowedUids,
+            },
+            serverTimestampFields: ['createdAt'],
+          },
+        ],
+        idToken
+      );
+
+      res.json({ success: true });
+    } catch (err) {
+      res.status(500).json({ error: err instanceof Error ? err.message : 'فشل حذف المستند.' });
     }
   });
 

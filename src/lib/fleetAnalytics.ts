@@ -258,6 +258,22 @@ function avgOfNonNull(values: Array<number | null>): number | null {
   return Number((valid.reduce((a, b) => a + b, 0) / valid.length).toFixed(2));
 }
 
+function weightedPctOfRows(
+  pairs: Array<{ rate: number | null; weight: number | null }>
+): number | null {
+  let wSum = 0;
+  let wTotal = 0;
+  for (const p of pairs) {
+    if (p.rate === null || Number.isNaN(p.rate)) continue;
+    if (p.weight !== null && p.weight > 0) {
+      wSum += p.rate * p.weight;
+      wTotal += p.weight;
+    }
+  }
+  if (wTotal > 0) return Number((wSum / wTotal).toFixed(2));
+  return avgOfNonNull(pairs.map((p) => p.rate));
+}
+
 export function computeOverviewMetrics(
   rows: UnifiedDailyRow[],
   settings: OperationalSettings
@@ -270,6 +286,21 @@ export function computeOverviewMetrics(
   const overdueOrders = rows.reduce((s, r) => s + (r.overdueOrders ?? 0), 0);
   const totalKm = rows.reduce((s, r) => s + (r.totalKm ?? 0), 0);
   const payableKm = rows.reduce((s, r) => s + (r.payableKm ?? 0), 0);
+
+  const totalAccepted = rows.reduce((s, r) => s + (r.acceptedOrders ?? 0), 0);
+  const totalRejected = rows.reduce((s, r) => s + (r.rejectedOrders ?? 0), 0);
+  const hasCountsForAcceptance = rows.some((r) => r.acceptedOrders !== null && r.rejectedOrders !== null);
+  const acceptanceRate =
+    hasCountsForAcceptance && totalAccepted + totalRejected > 0
+      ? Number(((totalAccepted / (totalAccepted + totalRejected)) * 100).toFixed(2))
+      : avgOfNonNull(rows.map((r) => r.acceptanceRate));
+
+  const completionRate = weightedPctOfRows(
+    rows.map((r) => ({ rate: r.completionRate, weight: r.acceptedOrders }))
+  );
+  const onTimeRate = weightedPctOfRows(
+    rows.map((r) => ({ rate: r.onTimeRate, weight: r.completedOrders }))
+  );
 
   // Per-rider performance check against configured settings
   const byRider = new Map<string, UnifiedDailyRow[]>();
@@ -309,9 +340,9 @@ export function computeOverviewMetrics(
     avgHoursPerRider:
       uniqueRiders.size > 0 ? Number((workingHours / uniqueRiders.size).toFixed(1)) : null,
     attendanceRate: avgOfNonNull(rows.map((r) => r.attendanceRate)),
-    acceptanceRate: avgOfNonNull(rows.map((r) => r.acceptanceRate)),
-    completionRate: avgOfNonNull(rows.map((r) => r.completionRate)),
-    onTimeRate: avgOfNonNull(rows.map((r) => r.onTimeRate)),
+    acceptanceRate,
+    completionRate,
+    onTimeRate,
     overdueOrders,
     totalKm: Number(totalKm.toFixed(1)),
     payableKm: Number(payableKm.toFixed(1)),
@@ -596,4 +627,39 @@ export function generateOperationalAlerts(
     if (a.severity !== b.severity) return a.severity === 'critical' ? -1 : 1;
     return b.date.localeCompare(a.date);
   });
+}
+
+export function scopeDatasetToPlatform(
+  dataset: FleetDataset,
+  scope: 'hungerstation' | 'keeta' | 'global'
+): FleetDataset {
+  if (scope === 'global') {
+    return dataset;
+  }
+  if (scope === 'hungerstation') {
+    return {
+      hungerDaily: dataset.hungerDaily,
+      hungerDistanceDaily: dataset.hungerDistanceDaily,
+      hungerWalletSnapshots: dataset.hungerWalletSnapshots,
+      hungerQualityMonthly: dataset.hungerQualityMonthly,
+      keetaDashboardDaily: [],
+      keetaVdaDaily: [],
+      keetaRankSnapshots: [],
+      keetaFacialRecognitionDaily: [],
+      riderMaster: dataset.riderMaster,
+      riderMappings: dataset.riderMappings.filter((m) => m.platform === 'hungerstation'),
+    };
+  }
+  return {
+    hungerDaily: [],
+    hungerDistanceDaily: [],
+    hungerWalletSnapshots: [],
+    hungerQualityMonthly: [],
+    keetaDashboardDaily: dataset.keetaDashboardDaily,
+    keetaVdaDaily: dataset.keetaVdaDaily,
+    keetaRankSnapshots: dataset.keetaRankSnapshots,
+    keetaFacialRecognitionDaily: dataset.keetaFacialRecognitionDaily,
+    riderMaster: dataset.riderMaster,
+    riderMappings: dataset.riderMappings.filter((m) => m.platform === 'keeta'),
+  };
 }

@@ -1,9 +1,11 @@
 import { RotateCcw } from 'lucide-react';
-import type { FilterState } from '../types/fleet';
+import type { FilterState, Platform } from '../types/fleet';
+import { Button, Card, Input, Select } from './ui/EnterpriseUI';
 
 interface FilterBarProps {
   filters: FilterState;
   onChange: (next: FilterState) => void;
+  lockedPlatform?: Platform;
   options: {
     dates: string[];
     months: string[];
@@ -27,120 +29,129 @@ export const EMPTY_FILTERS: FilterState = {
   riderId: '',
 };
 
-const selectCls =
-  'w-full rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-950 px-2.5 py-1.5 text-xs text-slate-800 dark:text-slate-100 focus:border-slate-400 dark:focus:border-slate-500 focus:bg-white dark:focus:bg-slate-900 focus:outline-none';
+export function FilterBar({ filters, onChange, lockedPlatform, options }: FilterBarProps) {
+  const update = (patch: Partial<FilterState>) =>
+    onChange({
+      ...filters,
+      ...patch,
+      platform: lockedPlatform || patch.platform || filters.platform,
+    });
 
-export function FilterBar({ filters, onChange, options }: FilterBarProps) {
-  const update = (patch: Partial<FilterState>) => onChange({ ...filters, ...patch });
+  const handleReset = () =>
+    onChange({
+      ...EMPTY_FILTERS,
+      platform: lockedPlatform || 'all',
+    });
 
   return (
-    <div className="no-print rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 p-4">
-      <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-5 xl:grid-cols-10">
+    <Card padding="sm" className="no-print">
+      <div className={`grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-5 ${lockedPlatform ? 'xl:grid-cols-9' : 'xl:grid-cols-10'}`}>
         <div>
-          <label className="mb-1 block text-xs font-medium text-slate-500 dark:text-slate-400">التاريخ</label>
-          <select value={filters.date} onChange={(e) => update({ date: e.target.value })} className={selectCls}>
+          <label className="mb-1 block text-[11px] font-semibold text-slate-500 dark:text-slate-400">التاريخ</label>
+          <Select value={filters.date} onChange={(e) => update({ date: e.target.value })} className="font-mono-num">
             <option value="">كل التواريخ</option>
             {options.dates.map((d) => (
               <option key={d} value={d}>{d}</option>
             ))}
-          </select>
+          </Select>
         </div>
 
         <div>
-          <label className="mb-1 block text-xs font-medium text-slate-500 dark:text-slate-400">الشهر</label>
-          <select value={filters.month} onChange={(e) => update({ month: e.target.value })} className={selectCls}>
+          <label className="mb-1 block text-[11px] font-semibold text-slate-500 dark:text-slate-400">الشهر</label>
+          <Select value={filters.month} onChange={(e) => update({ month: e.target.value })} className="font-mono-num">
             <option value="">كل الأشهر</option>
             {options.months.map((m) => (
               <option key={m} value={m}>{m}</option>
             ))}
-          </select>
+          </Select>
         </div>
 
-        <div>
-          <label className="mb-1 block text-xs font-medium text-slate-500 dark:text-slate-400">المنصة</label>
-          <select
-            value={filters.platform}
-            onChange={(e) => update({ platform: e.target.value as FilterState['platform'] })}
-            className={selectCls}
-          >
-            <option value="all">الكل (هنقر + كيتا)</option>
-            <option value="hungerstation">HungerStation</option>
-            <option value="keeta">Keeta</option>
-          </select>
-        </div>
+        {!lockedPlatform && (
+          <div>
+            <label className="mb-1 block text-[11px] font-semibold text-slate-500 dark:text-slate-400">المنصة</label>
+            <Select
+              value={filters.platform}
+              onChange={(e) => update({ platform: e.target.value as FilterState['platform'] })}
+            >
+              <option value="all">الكل (هنقر + كيتا)</option>
+              <option value="hungerstation">HungerStation</option>
+              <option value="keeta">Keeta</option>
+            </Select>
+          </div>
+        )}
 
         <div>
-          <label className="mb-1 block text-xs font-medium text-slate-500 dark:text-slate-400">المدينة</label>
-          <select value={filters.city} onChange={(e) => update({ city: e.target.value })} className={selectCls}>
+          <label className="mb-1 block text-[11px] font-semibold text-slate-500 dark:text-slate-400">المدينة</label>
+          <Select value={filters.city} onChange={(e) => update({ city: e.target.value })}>
             <option value="">كل المدن</option>
             {options.cities.map((c) => (
               <option key={c} value={c}>{c}</option>
             ))}
-          </select>
+          </Select>
         </div>
 
         <div>
-          <label className="mb-1 block text-xs font-medium text-slate-500 dark:text-slate-400">الفرع</label>
-          <select value={filters.branch} onChange={(e) => update({ branch: e.target.value })} className={selectCls}>
+          <label className="mb-1 block text-[11px] font-semibold text-slate-500 dark:text-slate-400">الفرع</label>
+          <Select value={filters.branch} onChange={(e) => update({ branch: e.target.value })}>
             <option value="">كل الفروع</option>
             {options.branches.map((b) => (
               <option key={b} value={b}>{b}</option>
             ))}
-          </select>
+          </Select>
         </div>
 
         <div>
-          <label className="mb-1 block text-xs font-medium text-slate-500 dark:text-slate-400">العقد</label>
-          <select value={filters.contract} onChange={(e) => update({ contract: e.target.value })} className={selectCls}>
+          <label className="mb-1 block text-[11px] font-semibold text-slate-500 dark:text-slate-400">العقد</label>
+          <Select value={filters.contract} onChange={(e) => update({ contract: e.target.value })}>
             <option value="">كل العقود</option>
             {options.contracts.map((c) => (
               <option key={c} value={c}>{c}</option>
             ))}
-          </select>
+          </Select>
         </div>
 
         <div>
-          <label className="mb-1 block text-xs font-medium text-slate-500 dark:text-slate-400">المشرف</label>
-          <select value={filters.supervisor} onChange={(e) => update({ supervisor: e.target.value })} className={selectCls}>
+          <label className="mb-1 block text-[11px] font-semibold text-slate-500 dark:text-slate-400">المشرف</label>
+          <Select value={filters.supervisor} onChange={(e) => update({ supervisor: e.target.value })}>
             <option value="">كل المشرفين</option>
             {options.supervisors.map((s) => (
               <option key={s} value={s}>{s}</option>
             ))}
-          </select>
+          </Select>
         </div>
 
         <div>
-          <label className="mb-1 block text-xs font-medium text-slate-500 dark:text-slate-400">نوع المركبة</label>
-          <select value={filters.vehicleType} onChange={(e) => update({ vehicleType: e.target.value })} className={selectCls}>
+          <label className="mb-1 block text-[11px] font-semibold text-slate-500 dark:text-slate-400">نوع المركبة</label>
+          <Select value={filters.vehicleType} onChange={(e) => update({ vehicleType: e.target.value })}>
             <option value="">الكل</option>
             {options.vehicles.map((v) => (
               <option key={v} value={v}>{v}</option>
             ))}
-          </select>
+          </Select>
         </div>
 
         <div>
-          <label className="mb-1 block text-xs font-medium text-slate-500 dark:text-slate-400">معرف / اسم المندوب</label>
-          <input
+          <label className="mb-1 block text-[11px] font-semibold text-slate-500 dark:text-slate-400">معرف / اسم المندوب</label>
+          <Input
             type="text"
             value={filters.riderId}
             onChange={(e) => update({ riderId: e.target.value })}
             placeholder="بحث بالمعرف..."
-            className={`${selectCls} placeholder:text-slate-400 dark:placeholder:text-slate-500`}
           />
         </div>
 
         <div className="flex items-end">
-          <button
-            type="button"
-            onClick={() => onChange(EMPTY_FILTERS)}
-            className="inline-flex w-full items-center justify-center gap-1.5 rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-100 dark:bg-slate-800 px-3 py-1.5 text-xs font-medium text-slate-700 dark:text-slate-200 hover:bg-slate-200 dark:hover:bg-slate-700 whitespace-nowrap shrink-0"
+          <Button
+            variant="secondary"
+            size="md"
+            onClick={handleReset}
+            icon={<RotateCcw className="h-3.5 w-3.5" />}
+            className="w-full"
           >
-            <RotateCcw className="h-3.5 w-3.5" />
-            <span>تصفير</span>
-          </button>
+            تصفير
+          </Button>
         </div>
       </div>
-    </div>
+    </Card>
   );
 }

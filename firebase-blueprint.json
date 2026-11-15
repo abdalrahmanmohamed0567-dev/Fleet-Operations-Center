@@ -8,9 +8,15 @@
         "uid": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
         "email": { "type": "string", "minLength": 3, "maxLength": 200 },
         "displayName": { "type": "string", "minLength": 1, "maxLength": 120 },
-        "role": { "type": "string", "enum": ["owner", "admin", "operations_manager", "supervisor", "viewer"] },
+        "role": { "type": "string", "enum": ["owner", "admin", "operations_manager", "supervisor", "viewer", "hr_manager", "hr_employee", "fleet_manager", "fleet_employee", "accountant"] },
+        "customRoleId": { "type": "string", "maxLength": 64 },
         "active": { "type": "boolean" },
+        "allowedPlatforms": { "type": "array", "description": "Permitted platforms (hungerstation, keeta) for platform-scoped RBAC." },
         "assignedBranch": { "type": "string", "maxLength": 100 },
+        "assignedCity": { "type": "string", "maxLength": 100 },
+        "dataScope": { "type": "object", "description": "Granular branch/city/platform/rider access scope." },
+        "permissionOverrides": { "type": "object", "description": "Per-user permission overrides." },
+        "managedByAdminUids": { "type": "array" },
         "createdAt": { "type": "string", "format": "date-time" },
         "updatedAt": { "type": "string", "format": "date-time" }
       },
@@ -18,17 +24,32 @@
     },
     "RiderMaster": {
       "title": "RiderMaster",
-      "description": "Internal company rider master record uniting platform accounts.",
+      "description": "Internal Company Rider Profile uniting HR, documents, platform accounts, and vehicle assignments.",
       "type": "object",
       "properties": {
         "internalRiderId": { "type": "string", "minLength": 1, "maxLength": 64, "pattern": "^[a-zA-Z0-9_\\-]+$" },
         "fullName": { "type": "string", "minLength": 1, "maxLength": 150 },
+        "iqamaNumber": { "type": "string", "maxLength": 40 },
+        "iqamaIssueDate": { "type": "string", "maxLength": 10 },
+        "iqamaExpiryDate": { "type": "string", "maxLength": 10 },
+        "iqamaRenewalNotes": { "type": "string", "maxLength": 600 },
+        "phone": { "type": "string", "maxLength": 32 },
+        "birthDate": { "type": "string", "maxLength": 10 },
+        "nationality": { "type": "string", "maxLength": 80 },
+        "joinDate": { "type": "string", "maxLength": 10 },
+        "exitDate": { "type": "string", "maxLength": 10 },
+        "driverLicenseNumber": { "type": "string", "maxLength": 40 },
+        "driverLicenseType": { "type": "string", "maxLength": 60 },
+        "driverLicenseIssueDate": { "type": "string", "maxLength": 10 },
+        "driverLicenseExpiryDate": { "type": "string", "maxLength": 10 },
+        "adminNotes": { "type": "string", "maxLength": 1500 },
         "city": { "type": "string", "maxLength": 100 },
         "branch": { "type": "string", "maxLength": 100 },
         "supervisor": { "type": "string", "maxLength": 100 },
         "contractName": { "type": "string", "maxLength": 120 },
         "vehicleType": { "type": "string", "maxLength": 64 },
-        "status": { "type": "string", "enum": ["active", "inactive", "suspended"] },
+        "status": { "type": "string", "enum": ["new", "onboarding", "ready", "active", "suspended", "on_leave", "terminated", "inactive"] },
+        "statusHistory": { "type": "array" },
         "createdByUid": { "type": "string", "minLength": 1, "maxLength": 128 },
         "allowedUids": { "type": "array" },
         "createdAt": { "type": "string", "format": "date-time" },
@@ -232,12 +253,17 @@
         "branch": { "type": "string", "maxLength": 100 },
         "supervisor": { "type": "string", "maxLength": 100 },
         "courierType": { "type": "string", "maxLength": 64 },
-        "shiftAttendanceSummary": { "type": "string", "maxLength": 200 },
+        "shiftAttendanceSummary": { "type": "string", "maxLength": 500 },
+        "parsedShiftSlots": { "type": "array" },
         "onShift": { "type": "string", "maxLength": 32 },
         "validDay": { "type": "string", "maxLength": 32 },
         "appOnlineTime": { "type": "number" },
+        "appOnlineTimeRaw": { "type": "string", "maxLength": 64 },
         "shiftValidOnlineTime": { "type": "number" },
+        "shiftValidOnlineTimeRaw": { "type": "string", "maxLength": 64 },
         "shiftOnlineHours": { "type": "number" },
+        "shiftPeAbdoOnlineHours": { "type": "number" },
+        "shiftPeAbdoOnlineHoursRaw": { "type": "string", "maxLength": 64 },
         "acceptedTasks": { "type": "number" },
         "restaurantArrivals": { "type": "number" },
         "deliveredTasks": { "type": "number" },
@@ -251,8 +277,10 @@
         "largeOrderOnTimeRate": { "type": "number" },
         "avgDeliveryTimeMinutes": { "type": "number" },
         "deliveredOver55Min": { "type": "number" },
+        "deliveredOver55MinProp": { "type": "number" },
         "overdueOrderTasks": { "type": "number" },
         "severelyOverdueOrderTasks": { "type": "number" },
+        "originalHeaders": { "type": "object" },
         "rawExtraColumns": { "type": "object" },
         "sourceFile": { "type": "string", "maxLength": 255 },
         "sourceSheet": { "type": "string", "maxLength": 100 },
@@ -276,18 +304,28 @@
         "riderId": { "type": "string", "minLength": 1, "maxLength": 64 },
         "date": { "type": "string", "minLength": 10, "maxLength": 10 },
         "month": { "type": "string", "minLength": 7, "maxLength": 7 },
+        "firstOnlineDate": { "type": "string", "maxLength": 20 },
         "vehicleType": { "type": "string", "maxLength": 64 },
+        "threePlId": { "type": "string", "maxLength": 64 },
+        "threePlName": { "type": "string", "maxLength": 120 },
+        "pmm": { "type": "string", "maxLength": 100 },
+        "ifNewRider": { "type": "string", "maxLength": 32 },
         "shiftOnlineHours": { "type": "number" },
         "sumValidShifts": { "type": "number" },
         "shouldOnlineDays": { "type": "number" },
         "totalDeliveredTasks": { "type": "number" },
+        "sumDeliveredAdvanceTasks": { "type": "number" },
         "onTimeDTasks": { "type": "number" },
         "cancellationD": { "type": "number" },
         "deliveredOver55Min": { "type": "number" },
         "acceptedOrders": { "type": "number" },
+        "vdaScore": { "type": "number" },
         "totalDeliveryDistance": { "type": "number" },
         "payableDistance": { "type": "number" },
         "shiftWindows": { "type": "object" },
+        "shiftsS1ToS6": { "type": "array" },
+        "originalHeaders": { "type": "object" },
+        "rawExtraColumns": { "type": "object" },
         "sourceFile": { "type": "string", "maxLength": 255 },
         "sourceSheet": { "type": "string", "maxLength": 100 },
         "sourceRowNumber": { "type": "number" },
@@ -309,6 +347,7 @@
         "platform": { "type": "string", "enum": ["keeta"] },
         "riderId": { "type": "string", "minLength": 1, "maxLength": 64 },
         "snapshotDate": { "type": "string", "minLength": 10, "maxLength": 10 },
+        "snapshotMonth": { "type": "string", "maxLength": 16 },
         "name": { "type": "string", "maxLength": 150 },
         "currentEstimatedLevel": { "type": "string", "maxLength": 64 },
         "rankingPercentile": { "type": "number" },
@@ -318,6 +357,8 @@
         "orderCompletionRate": { "type": "number" },
         "didntTapDropOffTooEarly": { "type": "number" },
         "orderVolume": { "type": "number" },
+        "originalHeaders": { "type": "object" },
+        "rawExtraColumns": { "type": "object" },
         "sourceFile": { "type": "string", "maxLength": 255 },
         "sourceSheet": { "type": "string", "maxLength": 100 },
         "sourceRowNumber": { "type": "number" },
@@ -344,11 +385,15 @@
         "partnerId": { "type": "string", "maxLength": 64 },
         "partnerName": { "type": "string", "maxLength": 150 },
         "pmm": { "type": "string", "maxLength": 100 },
+        "ifTriggeredToday": { "type": ["boolean", "string", "null"] },
+        "ifTriggeredTodayRaw": { "type": "string", "maxLength": 32 },
         "finalInspectionResult": { "type": "string", "maxLength": 64 },
         "totalDaysTriggeredMtd": { "type": "number" },
         "totalDaysPassedMtd": { "type": "number" },
         "passRateMtd": { "type": "number" },
         "over90PassRate": { "type": "string", "maxLength": 32 },
+        "originalHeaders": { "type": "object" },
+        "rawExtraColumns": { "type": "object" },
         "sourceFile": { "type": "string", "maxLength": 255 },
         "sourceSheet": { "type": "string", "maxLength": 100 },
         "sourceRowNumber": { "type": "number" },
@@ -452,6 +497,10 @@
         "importMaxFiles": { "type": "number" },
         "importAllowUpdates": { "type": "boolean" },
         "importStrictDates": { "type": "boolean" },
+        "keetaEnabled": { "type": "boolean" },
+        "keetaHidden": { "type": "boolean" },
+        "expiryAlertDays": { "type": "array" },
+        "customVehicleTypes": { "type": "array" },
         "createdByUid": { "type": "string", "minLength": 1, "maxLength": 128 },
         "allowedUids": { "type": "array" },
         "updatedByEmail": { "type": "string", "maxLength": 200 },
@@ -513,9 +562,13 @@
         "action": { "type": "string", "minLength": 1, "maxLength": 80 },
         "targetCollection": { "type": "string", "minLength": 1, "maxLength": 80 },
         "targetId": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "entityType": { "type": "string", "maxLength": 64 },
         "actorUid": { "type": "string", "minLength": 1, "maxLength": 128 },
         "actorEmail": { "type": "string", "maxLength": 200 },
         "details": { "type": "string", "maxLength": 2000 },
+        "oldValue": { "type": "string", "maxLength": 2000 },
+        "newValue": { "type": "string", "maxLength": 2000 },
+        "source": { "type": "string", "enum": ["UI", "API", "Import", "System"] },
         "allowedUids": { "type": "array" },
         "createdAt": { "type": "string", "format": "date-time" }
       },
@@ -569,20 +622,529 @@
         "updatedAt": { "type": "string", "format": "date-time" }
       },
       "required": ["noteId", "riderKey", "platform", "riderId", "category", "content", "authorEmail", "createdByUid", "allowedUids", "createdAt", "updatedAt"]
+    },
+    "RoleTemplate": {
+      "title": "RoleTemplate",
+      "description": "Customizable RBAC role template storing module x action permission matrix.",
+      "type": "object",
+      "properties": {
+        "roleId": { "type": "string", "minLength": 1, "maxLength": 64, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "nameAr": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "nameEn": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "description": { "type": "string", "maxLength": 400 },
+        "isSystemPreset": { "type": "boolean" },
+        "permissions": { "type": "object" },
+        "createdByUid": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "allowedUids": { "type": "array" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["roleId", "nameAr", "nameEn", "isSystemPreset", "permissions", "createdByUid", "allowedUids", "createdAt", "updatedAt"]
+    },
+    "DocumentTypeConfig": {
+      "title": "DocumentTypeConfig",
+      "description": "Configurable document type definitions for HR, Fleet, and Handovers.",
+      "type": "object",
+      "properties": {
+        "typeId": { "type": "string", "minLength": 1, "maxLength": 64, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "nameAr": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "nameEn": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "targetEntity": { "type": "string", "enum": ["rider", "vehicle", "handover"] },
+        "requiresExpiry": { "type": "boolean" },
+        "isDefault": { "type": "boolean" },
+        "active": { "type": "boolean" },
+        "createdByUid": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "allowedUids": { "type": "array" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["typeId", "nameAr", "nameEn", "targetEntity", "requiresExpiry", "isDefault", "active", "createdByUid", "allowedUids", "createdAt", "updatedAt"]
+    },
+    "PrivateDocumentRecord": {
+      "title": "PrivateDocumentRecord",
+      "description": "Metadata and version history for files stored in the server-side private vault.",
+      "type": "object",
+      "properties": {
+        "docId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "entityType": { "type": "string", "enum": ["rider", "vehicle", "handover"] },
+        "entityId": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "entityLabel": { "type": "string", "maxLength": 180 },
+        "docTypeId": { "type": "string", "minLength": 1, "maxLength": 64 },
+        "docTypeName": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "title": { "type": "string", "minLength": 1, "maxLength": 180 },
+        "issueDate": { "type": "string", "maxLength": 10 },
+        "expiryDate": { "type": "string", "maxLength": 10 },
+        "notes": { "type": "string", "maxLength": 600 },
+        "currentVersion": { "type": "number" },
+        "versions": { "type": "array" },
+        "createdByUid": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "allowedUids": { "type": "array" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["docId", "entityType", "entityId", "docTypeId", "docTypeName", "title", "currentVersion", "versions", "createdByUid", "allowedUids", "createdAt", "updatedAt"]
+    },
+    "PlatformCatalogEntry": {
+      "title": "PlatformCatalogEntry",
+      "description": "Delivery platform registry with feature flags for enabling/hiding platforms.",
+      "type": "object",
+      "properties": {
+        "platformId": { "type": "string", "minLength": 1, "maxLength": 64, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "name": { "type": "string", "minLength": 1, "maxLength": 100 },
+        "nameAr": { "type": "string", "minLength": 1, "maxLength": 100 },
+        "enabled": { "type": "boolean" },
+        "hiddenFromUi": { "type": "boolean" },
+        "operationalImportEnabled": { "type": "boolean" },
+        "supportsExcelImport": { "type": "boolean" },
+        "isBuiltIn": { "type": "boolean" },
+        "description": { "type": "string", "maxLength": 400 },
+        "createdByUid": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "allowedUids": { "type": "array" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["platformId", "name", "nameAr", "enabled", "hiddenFromUi", "operationalImportEnabled", "supportsExcelImport", "isBuiltIn", "createdByUid", "allowedUids", "createdAt", "updatedAt"]
+    },
+    "PlatformAccount": {
+      "title": "PlatformAccount",
+      "description": "Independent courier platform account linked to a Company Rider Profile.",
+      "type": "object",
+      "properties": {
+        "accountId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "companyRiderId": { "type": "string", "maxLength": 64 },
+        "platformId": { "type": "string", "minLength": 1, "maxLength": 64 },
+        "platformName": { "type": "string", "minLength": 1, "maxLength": 100 },
+        "platformRiderId": { "type": "string", "minLength": 1, "maxLength": 64 },
+        "startDate": { "type": "string", "maxLength": 10 },
+        "deactivationDate": { "type": "string", "maxLength": 10 },
+        "accountStatus": { "type": "string", "enum": ["active", "suspended", "inactive"] },
+        "linkingStatus": { "type": "string", "enum": ["linked", "unlinked", "conflict_review"] },
+        "conflictCandidateRiderIds": { "type": "array" },
+        "branch": { "type": "string", "maxLength": 100 },
+        "city": { "type": "string", "maxLength": 100 },
+        "supervisor": { "type": "string", "maxLength": 100 },
+        "vehicleType": { "type": "string", "maxLength": 64 },
+        "notes": { "type": "string", "maxLength": 800 },
+        "createdByUid": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "allowedUids": { "type": "array" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["accountId", "companyRiderId", "platformId", "platformName", "platformRiderId", "accountStatus", "linkingStatus", "createdByUid", "allowedUids", "createdAt", "updatedAt"]
+    },
+    "VehicleMaster": {
+      "title": "VehicleMaster",
+      "description": "Independent company fleet vehicle profile including documents and ownership.",
+      "type": "object",
+      "properties": {
+        "vehicleInternalId": { "type": "string", "minLength": 1, "maxLength": 64, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "plateNumber": { "type": "string", "minLength": 1, "maxLength": 40 },
+        "vehicleType": { "type": "string", "minLength": 1, "maxLength": 64 },
+        "make": { "type": "string", "minLength": 1, "maxLength": 80 },
+        "model": { "type": "string", "minLength": 1, "maxLength": 80 },
+        "year": { "type": "number" },
+        "color": { "type": "string", "maxLength": 40 },
+        "vin": { "type": "string", "maxLength": 64 },
+        "ownershipType": { "type": "string", "enum": ["owned", "leased"] },
+        "ownerOrLeasingCompany": { "type": "string", "maxLength": 120 },
+        "status": { "type": "string", "enum": ["available", "assigned", "maintenance", "out_of_service", "leased_out", "ended"] },
+        "istimaraNumber": { "type": "string", "maxLength": 64 },
+        "istimaraExpiryDate": { "type": "string", "maxLength": 10 },
+        "insuranceCompany": { "type": "string", "maxLength": 120 },
+        "insurancePolicyNumber": { "type": "string", "maxLength": 80 },
+        "insuranceExpiryDate": { "type": "string", "maxLength": 10 },
+        "periodicInspectionExpiryDate": { "type": "string", "maxLength": 10 },
+        "currentRiderId": { "type": "string", "maxLength": 64 },
+        "currentAssignmentId": { "type": "string", "maxLength": 128 },
+        "notes": { "type": "string", "maxLength": 1000 },
+        "createdByUid": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "allowedUids": { "type": "array" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["vehicleInternalId", "plateNumber", "vehicleType", "make", "model", "ownershipType", "status", "createdByUid", "allowedUids", "createdAt", "updatedAt"]
+    },
+    "VehicleAssignment": {
+      "title": "VehicleAssignment",
+      "description": "Vehicle handover and return custody record with odometer and overlap safety.",
+      "type": "object",
+      "properties": {
+        "assignmentId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "vehicleInternalId": { "type": "string", "minLength": 1, "maxLength": 64 },
+        "plateNumber": { "type": "string", "minLength": 1, "maxLength": 40 },
+        "companyRiderId": { "type": "string", "minLength": 1, "maxLength": 64 },
+        "riderName": { "type": "string", "maxLength": 150 },
+        "handoverDate": { "type": "string", "minLength": 10, "maxLength": 10, "pattern": "^\\d{4}-\\d{2}-\\d{2}$" },
+        "handoverTime": { "type": "string", "maxLength": 16 },
+        "handoverOdometer": { "type": "number" },
+        "handoverCondition": { "type": "string", "minLength": 1, "maxLength": 300 },
+        "handoverNotes": { "type": "string", "maxLength": 1000 },
+        "handoverDocIds": { "type": "array" },
+        "handoverByUid": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "handoverByEmail": { "type": "string", "minLength": 3, "maxLength": 200 },
+        "returnDate": { "type": "string", "maxLength": 10 },
+        "returnTime": { "type": "string", "maxLength": 16 },
+        "returnOdometer": { "type": "number" },
+        "returnCondition": { "type": "string", "maxLength": 300 },
+        "returnNotes": { "type": "string", "maxLength": 1000 },
+        "returnDamageNotes": { "type": "string", "maxLength": 1000 },
+        "returnDocIds": { "type": "array" },
+        "returnByUid": { "type": "string", "maxLength": 128 },
+        "returnByEmail": { "type": "string", "maxLength": 200 },
+        "status": { "type": "string", "enum": ["active", "returned"] },
+        "allowSharedOverride": { "type": "boolean" },
+        "createdByUid": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "allowedUids": { "type": "array" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["assignmentId", "vehicleInternalId", "plateNumber", "companyRiderId", "handoverDate", "handoverCondition", "handoverByUid", "handoverByEmail", "status", "createdByUid", "allowedUids", "createdAt", "updatedAt"]
+    },
+    "VehicleMaintenanceRecord": {
+      "title": "VehicleMaintenanceRecord",
+      "description": "Fleet vehicle maintenance log with cost, workshop, odometer, and next service schedule.",
+      "type": "object",
+      "properties": {
+        "maintenanceId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "vehicleInternalId": { "type": "string", "minLength": 1, "maxLength": 64 },
+        "plateNumber": { "type": "string", "minLength": 1, "maxLength": 40 },
+        "maintenanceType": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "maintenanceDate": { "type": "string", "minLength": 10, "maxLength": 10, "pattern": "^\\d{4}-\\d{2}-\\d{2}$" },
+        "cost": { "type": "number" },
+        "odometer": { "type": "number" },
+        "workshop": { "type": "string", "maxLength": 150 },
+        "details": { "type": "string", "maxLength": 1200 },
+        "nextMaintenanceDate": { "type": "string", "maxLength": 10 },
+        "nextMaintenanceOdometer": { "type": "number" },
+        "createdByUid": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "allowedUids": { "type": "array" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["maintenanceId", "vehicleInternalId", "plateNumber", "maintenanceType", "maintenanceDate", "createdByUid", "allowedUids", "createdAt", "updatedAt"]
+    },
+    "EntityNoteTask": {
+      "title": "EntityNoteTask",
+      "description": "Executive and operational follow-up notes/tasks bound to General, Rider, Vehicle, or Platform Account.",
+      "type": "object",
+      "properties": {
+        "noteTaskId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "entityType": { "type": "string", "enum": ["general", "rider", "vehicle", "platform_account"] },
+        "entityId": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "entityLabel": { "type": "string", "maxLength": 180 },
+        "title": { "type": "string", "minLength": 1, "maxLength": 200 },
+        "content": { "type": "string", "minLength": 1, "maxLength": 1800 },
+        "priority": { "type": "string", "enum": ["critical", "high", "medium", "low"] },
+        "status": { "type": "string", "enum": ["open", "in_progress", "closed"] },
+        "assigneeUid": { "type": "string", "maxLength": 128 },
+        "assigneeEmail": { "type": "string", "maxLength": 200 },
+        "dueDate": { "type": "string", "maxLength": 10 },
+        "actionTaken": { "type": "string", "maxLength": 1000 },
+        "resolutionNote": { "type": "string", "maxLength": 1000 },
+        "closedAt": { "type": "string", "maxLength": 40 },
+        "closedByEmail": { "type": "string", "maxLength": 200 },
+        "customFields": { "type": "object" },
+        "createdByUid": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "createdByEmail": { "type": "string", "minLength": 3, "maxLength": 200 },
+        "allowedUids": { "type": "array" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["noteTaskId", "entityType", "entityId", "title", "content", "priority", "status", "createdByUid", "createdByEmail", "allowedUids", "createdAt", "updatedAt"]
+    },
+    "CompanyBrandingDoc": {
+      "title": "CompanyBrandingDoc",
+      "description": "Corporate profile, visual branding, login theme, and developer credits.",
+      "type": "object",
+      "properties": {
+        "brandingId": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "company": { "type": "object" },
+        "branding": { "type": "object" },
+        "credits": { "type": "object" },
+        "updatedByEmail": { "type": "string", "maxLength": 200 },
+        "createdByUid": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "allowedUids": { "type": "array" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["brandingId", "company", "branding", "credits", "createdByUid", "allowedUids", "createdAt", "updatedAt"]
+    },
+    "SystemSectionConfig": {
+      "title": "SystemSectionConfig",
+      "description": "Customizable navigation sections for Sidebar & System Builder.",
+      "type": "object",
+      "properties": {
+        "sectionId": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "titleAr": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "titleEn": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "iconName": { "type": "string" },
+        "order": { "type": "number" },
+        "visible": { "type": "boolean" },
+        "isBuiltIn": { "type": "boolean" },
+        "createdByUid": { "type": "string" },
+        "allowedUids": { "type": "array" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["sectionId", "titleAr", "titleEn", "iconName", "order", "visible", "isBuiltIn", "createdByUid", "allowedUids", "createdAt", "updatedAt"]
+    },
+    "SystemPageConfig": {
+      "title": "SystemPageConfig",
+      "description": "Custom admin pages created via System Builder.",
+      "type": "object",
+      "properties": {
+        "pageId": { "type": "string" },
+        "slug": { "type": "string" },
+        "titleAr": { "type": "string" },
+        "titleEn": { "type": "string" },
+        "sectionId": { "type": "string" },
+        "formId": { "type": "string" },
+        "iconName": { "type": "string" },
+        "order": { "type": "number" },
+        "visible": { "type": "boolean" },
+        "isBuiltIn": { "type": "boolean" },
+        "createdByUid": { "type": "string" },
+        "allowedUids": { "type": "array" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["pageId", "slug", "titleAr", "titleEn", "sectionId", "formId", "iconName", "order", "visible", "isBuiltIn", "createdByUid", "allowedUids", "createdAt", "updatedAt"]
+    },
+    "DynamicFieldDefinition": {
+      "title": "DynamicFieldDefinition",
+      "description": "Metadata-driven dynamic field configuration supporting 18 field types.",
+      "type": "object",
+      "properties": {
+        "fieldId": { "type": "string" },
+        "key": { "type": "string" },
+        "labelAr": { "type": "string" },
+        "labelEn": { "type": "string" },
+        "type": { "type": "string" },
+        "module": { "type": "string" },
+        "formId": { "type": "string" },
+        "order": { "type": "number" },
+        "required": { "type": "boolean" },
+        "visible": { "type": "boolean" },
+        "editable": { "type": "boolean" },
+        "createdByUid": { "type": "string" },
+        "allowedUids": { "type": "array" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["fieldId", "key", "labelAr", "labelEn", "type", "module", "formId", "order", "required", "visible", "editable", "createdByUid", "allowedUids", "createdAt", "updatedAt"]
+    },
+    "DynamicFormDefinition": {
+      "title": "DynamicFormDefinition",
+      "description": "Published & draft dynamic form layout with sections, tabs, wizard steps, and field placements.",
+      "type": "object",
+      "properties": {
+        "formId": { "type": "string" },
+        "nameAr": { "type": "string" },
+        "nameEn": { "type": "string" },
+        "module": { "type": "string" },
+        "targetEntity": { "type": "string" },
+        "layoutMode": { "type": "string", "enum": ["sections", "tabs", "wizard"] },
+        "sections": { "type": "array" },
+        "placements": { "type": "array" },
+        "publishedVersion": { "type": "number" },
+        "status": { "type": "string", "enum": ["published", "draft"] },
+        "createdByUid": { "type": "string" },
+        "allowedUids": { "type": "array" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["formId", "nameAr", "nameEn", "module", "targetEntity", "layoutMode", "sections", "placements", "publishedVersion", "status", "createdByUid", "allowedUids", "createdAt", "updatedAt"]
+    },
+    "DynamicFormVersion": {
+      "title": "DynamicFormVersion",
+      "description": "Immutable version snapshot for dynamic form rollback.",
+      "type": "object",
+      "properties": {
+        "versionId": { "type": "string" },
+        "formId": { "type": "string" },
+        "versionNumber": { "type": "number" },
+        "layoutMode": { "type": "string" },
+        "sections": { "type": "array" },
+        "placements": { "type": "array" },
+        "publishedByUid": { "type": "string" },
+        "publishedByEmail": { "type": "string" },
+        "createdByUid": { "type": "string" },
+        "allowedUids": { "type": "array" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["versionId", "formId", "versionNumber", "layoutMode", "sections", "placements", "publishedByUid", "publishedByEmail", "createdByUid", "allowedUids", "createdAt"]
+    },
+    "CustomEntityRecord": {
+      "title": "CustomEntityRecord",
+      "description": "User records stored inside custom admin pages.",
+      "type": "object",
+      "properties": {
+        "recordId": { "type": "string" },
+        "pageId": { "type": "string" },
+        "formId": { "type": "string" },
+        "title": { "type": "string" },
+        "customFields": { "type": "object" },
+        "createdByUid": { "type": "string" },
+        "createdByEmail": { "type": "string" },
+        "allowedUids": { "type": "array" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["recordId", "pageId", "formId", "title", "customFields", "createdByUid", "createdByEmail", "allowedUids", "createdAt", "updatedAt"]
+    },
+    "SavedViewConfig": {
+      "title": "SavedViewConfig",
+      "description": "Saved personal or shared filter & column presets.",
+      "type": "object",
+      "properties": {
+        "viewId": { "type": "string" },
+        "scope": { "type": "string" },
+        "nameAr": { "type": "string" },
+        "filters": { "type": "object" },
+        "isShared": { "type": "boolean" },
+        "ownerUid": { "type": "string" },
+        "ownerEmail": { "type": "string" },
+        "createdByUid": { "type": "string" },
+        "allowedUids": { "type": "array" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["viewId", "scope", "nameAr", "filters", "isShared", "ownerUid", "ownerEmail", "createdByUid", "allowedUids", "createdAt", "updatedAt"]
+    },
+    "UserPreferenceDoc": {
+      "title": "UserPreferenceDoc",
+      "description": "Per-user dashboard layout, table columns, and UI preferences.",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string" },
+        "createdByUid": { "type": "string" },
+        "allowedUids": { "type": "array" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["userId", "createdByUid", "allowedUids", "updatedAt"]
+    },
+    "NotificationRuleConfig": {
+      "title": "NotificationRuleConfig",
+      "description": "Smart configurable notification rules.",
+      "type": "object",
+      "properties": {
+        "ruleId": { "type": "string" },
+        "nameAr": { "type": "string" },
+        "module": { "type": "string" },
+        "eventType": { "type": "string" },
+        "severity": { "type": "string" },
+        "targetRoles": { "type": "array" },
+        "enabled": { "type": "boolean" },
+        "createdByUid": { "type": "string" },
+        "allowedUids": { "type": "array" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["ruleId", "nameAr", "module", "eventType", "severity", "targetRoles", "enabled", "createdByUid", "allowedUids", "createdAt", "updatedAt"]
+    },
+    "TrashItemRecord": {
+      "title": "TrashItemRecord",
+      "description": "Soft-deleted recoverable configuration or operational records.",
+      "type": "object",
+      "properties": {
+        "trashId": { "type": "string" },
+        "itemType": { "type": "string" },
+        "sourceCollection": { "type": "string" },
+        "sourceDocId": { "type": "string" },
+        "titleAr": { "type": "string" },
+        "snapshotJson": { "type": "string" },
+        "status": { "type": "string" },
+        "createdByUid": { "type": "string" },
+        "allowedUids": { "type": "array" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["trashId", "itemType", "sourceCollection", "sourceDocId", "titleAr", "snapshotJson", "deletedByUid", "deletedByEmail", "status", "createdByUid", "allowedUids", "createdAt"]
+    },
+    "ConfigSnapshotRecord": {
+      "title": "ConfigSnapshotRecord",
+      "description": "System customization backup snapshots.",
+      "type": "object",
+      "properties": {
+        "snapshotId": { "type": "string" },
+        "nameAr": { "type": "string" },
+        "payloadJson": { "type": "string" },
+        "createdByUid": { "type": "string" },
+        "createdByEmail": { "type": "string" },
+        "allowedUids": { "type": "array" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["snapshotId", "nameAr", "payloadJson", "createdByUid", "createdByEmail", "allowedUids", "createdAt"]
+    },
+    "CustomReportTemplate": {
+      "title": "CustomReportTemplate",
+      "description": "Saved custom report & print layout templates.",
+      "type": "object",
+      "properties": {
+        "templateId": { "type": "string" },
+        "nameAr": { "type": "string" },
+        "dataSource": { "type": "string" },
+        "columns": { "type": "array" },
+        "headerTitle": { "type": "string" },
+        "includeCompanyLogo": { "type": "boolean" },
+        "includeCompanyDetails": { "type": "boolean" },
+        "orientation": { "type": "string" },
+        "createdByUid": { "type": "string" },
+        "createdByEmail": { "type": "string" },
+        "allowedUids": { "type": "array" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["templateId", "nameAr", "dataSource", "columns", "headerTitle", "includeCompanyLogo", "includeCompanyDetails", "orientation", "createdByUid", "createdByEmail", "allowedUids", "createdAt", "updatedAt"]
     }
   },
   "firestore": {
     "/users/{userId}": {
       "schema": { "$ref": "#/entities/UserProfile" },
-      "description": "Fleet application user profiles and RBAC roles."
+      "description": "Fleet application user profiles, RBAC role templates, overrides, and data scopes."
+    },
+    "/roleTemplates/{roleId}": {
+      "schema": { "$ref": "#/entities/RoleTemplate" },
+      "description": "Customizable role permission matrices."
     },
     "/riderMaster/{riderMasterId}": {
       "schema": { "$ref": "#/entities/RiderMaster" },
-      "description": "Company-internal master rider records."
+      "description": "Company Rider Profile master records (HR + Iqama + Driver License + Status History)."
+    },
+    "/documentTypes/{typeId}": {
+      "schema": { "$ref": "#/entities/DocumentTypeConfig" },
+      "description": "Configurable document type definitions."
+    },
+    "/privateDocuments/{docId}": {
+      "schema": { "$ref": "#/entities/PrivateDocumentRecord" },
+      "description": "Private vault document metadata and version history."
+    },
+    "/platformCatalog/{platformId}": {
+      "schema": { "$ref": "#/entities/PlatformCatalogEntry" },
+      "description": "Platform registry and feature flags."
+    },
+    "/platformAccounts/{accountId}": {
+      "schema": { "$ref": "#/entities/PlatformAccount" },
+      "description": "Courier accounts across delivery platforms linked to Company Rider Profiles."
+    },
+    "/vehicles/{vehicleInternalId}": {
+      "schema": { "$ref": "#/entities/VehicleMaster" },
+      "description": "Fleet vehicle master records and vehicle document expiries."
+    },
+    "/vehicleAssignments/{assignmentId}": {
+      "schema": { "$ref": "#/entities/VehicleAssignment" },
+      "description": "Vehicle handover and return history."
+    },
+    "/vehicleMaintenance/{maintenanceId}": {
+      "schema": { "$ref": "#/entities/VehicleMaintenanceRecord" },
+      "description": "Vehicle maintenance logs and next service tracking."
+    },
+    "/entityNotesTasks/{noteTaskId}": {
+      "schema": { "$ref": "#/entities/EntityNoteTask" },
+      "description": "Executive administrative notes and follow-up tasks bound to ERP entities."
     },
     "/riderIdentityMapping/{mappingId}": {
       "schema": { "$ref": "#/entities/RiderIdentityMapping" },
-      "description": "Manual mapping between internal rider IDs and platform IDs."
+      "description": "Legacy/synced mapping between internal rider IDs and platform IDs."
     },
     "/importBatches/{batchId}": {
       "schema": { "$ref": "#/entities/ImportBatch" },
@@ -630,7 +1192,7 @@
     },
     "/operationalSettings/{settingsId}": {
       "schema": { "$ref": "#/entities/OperationalSettings" },
-      "description": "Configurable alert and KPI target thresholds."
+      "description": "Configurable alert thresholds, feature flags, and policy settings."
     },
     "/hungerErrorDictionary/{codeKey}": {
       "schema": { "$ref": "#/entities/ErrorCodeDictionaryEntry" },
@@ -651,6 +1213,58 @@
     "/auditLogs/{logId}": {
       "schema": { "$ref": "#/entities/AuditLog" },
       "description": "Immutable operational audit logs."
+    },
+    "/companyBranding/{brandingId}": {
+      "schema": { "$ref": "#/entities/CompanyBrandingDoc" },
+      "description": "Company profile, corporate branding, login theme, and credits."
+    },
+    "/systemSections/{sectionId}": {
+      "schema": { "$ref": "#/entities/SystemSectionConfig" },
+      "description": "Customizable sidebar navigation sections."
+    },
+    "/systemPages/{pageId}": {
+      "schema": { "$ref": "#/entities/SystemPageConfig" },
+      "description": "Custom admin pages created inside System Builder."
+    },
+    "/dynamicFields/{fieldId}": {
+      "schema": { "$ref": "#/entities/DynamicFieldDefinition" },
+      "description": "Dynamic custom field definitions across modules and forms."
+    },
+    "/dynamicForms/{formId}": {
+      "schema": { "$ref": "#/entities/DynamicFormDefinition" },
+      "description": "Dynamic form layout schemas with draft and published versions."
+    },
+    "/dynamicFormVersions/{versionId}": {
+      "schema": { "$ref": "#/entities/DynamicFormVersion" },
+      "description": "Version history snapshots for dynamic forms."
+    },
+    "/customEntityRecords/{recordId}": {
+      "schema": { "$ref": "#/entities/CustomEntityRecord" },
+      "description": "Data records submitted in custom admin pages."
+    },
+    "/savedViews/{viewId}": {
+      "schema": { "$ref": "#/entities/SavedViewConfig" },
+      "description": "Personal and shared saved table views and filter presets."
+    },
+    "/userPreferences/{userId}": {
+      "schema": { "$ref": "#/entities/UserPreferenceDoc" },
+      "description": "Per-user dashboard layout and table column display preferences."
+    },
+    "/notificationRules/{ruleId}": {
+      "schema": { "$ref": "#/entities/NotificationRuleConfig" },
+      "description": "Customizable smart notification rules."
+    },
+    "/trashItems/{trashId}": {
+      "schema": { "$ref": "#/entities/TrashItemRecord" },
+      "description": "Soft-deleted recoverable configuration and entity records."
+    },
+    "/configSnapshots/{snapshotId}": {
+      "schema": { "$ref": "#/entities/ConfigSnapshotRecord" },
+      "description": "Full JSON backup snapshots of system customization."
+    },
+    "/customReportTemplates/{templateId}": {
+      "schema": { "$ref": "#/entities/CustomReportTemplate" },
+      "description": "Saved custom report and print designer templates."
     }
   }
 }

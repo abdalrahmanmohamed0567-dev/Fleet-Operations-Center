@@ -1,5 +1,9 @@
 import assert from 'node:assert/strict';
-import type { FleetDataset, UnifiedDailyRow } from '../src/lib/fleetAnalytics';
+import {
+  scopeDatasetToPlatform,
+  type FleetDataset,
+  type UnifiedDailyRow,
+} from '../src/lib/fleetAnalytics';
 import {
   buildInterventionQueue,
   computePeriodComparisons,
@@ -9,9 +13,11 @@ import {
 import type {
   ErrorCodeDictionaryEntry,
   HungerDailyRecord,
+  KeetaDashboardDaily,
   KeetaFacialRecognitionDaily,
   OperationalCase,
   OperationalSettings,
+  RiderIdentityMapping,
 } from '../src/types/fleet';
 
 const baseSettings: OperationalSettings = {
@@ -379,6 +385,91 @@ function makeUnifiedRow(overrides: Partial<UnifiedDailyRow> & { date: string }):
   const lowOrdersCandidate = queue.find((q) => q.reasonType === 'low_orders');
   assert.equal(lowHoursCandidate?.existingCase?.caseId, 'case_open_1');
   assert.equal(lowOrdersCandidate?.existingCase, undefined);
+
+  // 5. Test scopeDatasetToPlatform strict isolation
+  const keetaDailyRow: KeetaDashboardDaily = {
+    recordKey: 'kd_K100_2026-10-14',
+    platform: 'keeta',
+    riderId: 'K100',
+    date: '2026-10-14',
+    month: '2026-10',
+    firstName: 'Ahmed',
+    lastName: 'Ali',
+    fullName: 'Ahmed Ali',
+    branch: 'الرياض - الشمال',
+    onShift: 'Yes',
+    validDay: 'Yes',
+    appOnlineTime: 480,
+    shiftValidOnlineTime: 460,
+    shiftOnlineHours: 8,
+    acceptedTasks: 10,
+    restaurantArrivals: 10,
+    deliveredTasks: 10,
+    largeOrderTasksCompleted: 1,
+    rejectedTasks: 0,
+    rejectedTasksCourier: 0,
+    rejectedTasksAuto: 0,
+    cancellationRate: 0,
+    completionRate: 100,
+    onTimeRate: 95,
+    largeOrderOnTimeRate: 100,
+    avgDeliveryTimeMinutes: 24,
+    deliveredOver55Min: 0,
+    overdueOrderTasks: 0,
+    severelyOverdueOrderTasks: 0,
+    sourceFile: 'keeta.xlsx',
+    sourceSheet: 'Dashboard',
+    sourceRowNumber: 2,
+    importBatchId: 'b2',
+    rowChecksum: 'chk_kd1',
+    createdByUid: 'u1',
+    allowedUids: ['u1'],
+  };
+  const mappings: RiderIdentityMapping[] = [
+    {
+      mappingId: 'map_hs',
+      internalRiderId: 'INT001',
+      platform: 'hungerstation',
+      platformRiderId: 'H_ERR',
+      createdByUid: 'u1',
+      allowedUids: ['u1'],
+    },
+    {
+      mappingId: 'map_kt',
+      internalRiderId: 'INT001',
+      platform: 'keeta',
+      platformRiderId: 'K100',
+      createdByUid: 'u1',
+      allowedUids: ['u1'],
+    },
+  ];
+  const mixedDataset: FleetDataset = {
+    ...dataset,
+    keetaDashboardDaily: [keetaDailyRow],
+    riderMappings: mappings,
+  };
+
+  const hsScoped = scopeDatasetToPlatform(mixedDataset, 'hungerstation');
+  assert.equal(hsScoped.hungerDaily.length, 2);
+  assert.equal(hsScoped.keetaDashboardDaily.length, 0);
+  assert.equal(hsScoped.keetaFacialRecognitionDaily.length, 0);
+  assert.equal(hsScoped.keetaVdaDaily.length, 0);
+  assert.equal(hsScoped.keetaRankSnapshots.length, 0);
+  assert.deepEqual(hsScoped.riderMappings.map((m) => m.platform), ['hungerstation']);
+
+  const ktScoped = scopeDatasetToPlatform(mixedDataset, 'keeta');
+  assert.equal(ktScoped.hungerDaily.length, 0);
+  assert.equal(ktScoped.hungerDistanceDaily.length, 0);
+  assert.equal(ktScoped.hungerWalletSnapshots.length, 0);
+  assert.equal(ktScoped.hungerQualityMonthly.length, 0);
+  assert.equal(ktScoped.keetaDashboardDaily.length, 1);
+  assert.equal(ktScoped.keetaFacialRecognitionDaily.length, 1);
+  assert.deepEqual(ktScoped.riderMappings.map((m) => m.platform), ['keeta']);
+
+  const globalScoped = scopeDatasetToPlatform(mixedDataset, 'global');
+  assert.equal(globalScoped.hungerDaily.length, 2);
+  assert.equal(globalScoped.keetaDashboardDaily.length, 1);
+  assert.equal(globalScoped.riderMappings.length, 2);
 }
 
-console.log('✅ Enterprise analytics verification passed (period comparisons, weighted scoring, anomaly detection, 7-trigger intervention queue).');
+console.log('✅ Enterprise analytics verification passed (period comparisons, weighted scoring, anomaly detection, 7-trigger intervention queue, platform isolation).');

@@ -139,6 +139,27 @@ export function subscribeAuth(cb: (user: User | null) => void) {
 
 export const BOOTSTRAPPED_OWNER_EMAIL = 'abdalrahmanmohamed0567@gmail.com';
 
+export function getUserAllowedPlatforms(profile: UserProfile | null | undefined): ('hungerstation' | 'keeta')[] {
+  if (!profile) return [];
+  if (profile.role === 'owner' || profile.role === 'admin') {
+    return ['hungerstation', 'keeta'];
+  }
+  const list = Array.isArray(profile.allowedPlatforms)
+    ? profile.allowedPlatforms.filter((p): p is 'hungerstation' | 'keeta' => p === 'hungerstation' || p === 'keeta')
+    : [];
+  return list.length > 0 ? Array.from(new Set(list)) : ['hungerstation', 'keeta'];
+}
+
+export function canAccessGlobalHub(profile: UserProfile | null | undefined): boolean {
+  if (!profile) return false;
+  if (profile.role === 'owner' || profile.role === 'admin') return true;
+  if (profile.role === 'operations_manager') {
+    const platforms = getUserAllowedPlatforms(profile);
+    return platforms.includes('hungerstation') && platforms.includes('keeta');
+  }
+  return false;
+}
+
 export async function ensureUserProfile(user: User): Promise<UserProfile> {
   const path = `users/${user.uid}`;
   const ref = doc(db, 'users', user.uid);
@@ -167,6 +188,7 @@ export async function ensureUserProfile(user: User): Promise<UserProfile> {
     displayName,
     role: isOwner ? 'owner' : 'viewer',
     active: isOwner ? true : false,
+    allowedPlatforms: ['hungerstation', 'keeta'],
     createdAt: serverTimestamp(),
     updatedAt: serverTimestamp(),
   };
@@ -212,6 +234,10 @@ export const DEFAULT_OPERATIONAL_SETTINGS: Omit<OperationalSettings, 'createdByU
   importMaxFiles: 10,
   importAllowUpdates: true,
   importStrictDates: true,
+  keetaEnabled: false,
+  keetaHidden: true,
+  expiryAlertDays: [90, 60, 30, 7, 0],
+  customVehicleTypes: ['سيارة سيدان', 'فان / توصيل', 'دراجة نارية', 'دراجة كهربائية'],
 };
 
 export function hydrateOperationalSettings(raw: Partial<OperationalSettings>): OperationalSettings {
@@ -237,6 +263,16 @@ export function hydrateOperationalSettings(raw: Partial<OperationalSettings>): O
     importMaxFiles: raw.importMaxFiles ?? DEFAULT_OPERATIONAL_SETTINGS.importMaxFiles,
     importAllowUpdates: raw.importAllowUpdates ?? DEFAULT_OPERATIONAL_SETTINGS.importAllowUpdates,
     importStrictDates: raw.importStrictDates ?? DEFAULT_OPERATIONAL_SETTINGS.importStrictDates,
+    keetaEnabled: raw.keetaEnabled ?? false,
+    keetaHidden: raw.keetaHidden ?? true,
+    expiryAlertDays:
+      Array.isArray(raw.expiryAlertDays) && raw.expiryAlertDays.length > 0
+        ? raw.expiryAlertDays
+        : DEFAULT_OPERATIONAL_SETTINGS.expiryAlertDays,
+    customVehicleTypes:
+      Array.isArray(raw.customVehicleTypes) && raw.customVehicleTypes.length > 0
+        ? raw.customVehicleTypes
+        : DEFAULT_OPERATIONAL_SETTINGS.customVehicleTypes,
     createdByUid: raw.createdByUid || '',
     allowedUids: Array.isArray(raw.allowedUids) ? raw.allowedUids : [],
   };
@@ -284,3 +320,15 @@ export async function ensureOperationalSettings(
     handleFirestoreError(error, OperationType.CREATE, path);
   }
 }
+
+export const DEFAULT_DOCUMENT_TYPES = [
+  { typeId: 'iqama', nameAr: 'صورة الإقامة', nameEn: 'Iqama ID', targetEntity: 'rider' as const, requiresExpiry: true, isDefault: true, active: true },
+  { typeId: 'driver_license', nameAr: 'رخصة القيادة', nameEn: 'Driver License', targetEntity: 'rider' as const, requiresExpiry: true, isDefault: true, active: true },
+  { typeId: 'passport', nameAr: 'جواز السفر', nameEn: 'Passport', targetEntity: 'rider' as const, requiresExpiry: true, isDefault: true, active: true },
+  { typeId: 'employment_contract', nameAr: 'عقد العمل', nameEn: 'Employment Contract', targetEntity: 'rider' as const, requiresExpiry: false, isDefault: true, active: true },
+  { typeId: 'vehicle_istimara', nameAr: 'استمارة المركبة', nameEn: 'Vehicle Istimara', targetEntity: 'vehicle' as const, requiresExpiry: true, isDefault: true, active: true },
+  { typeId: 'vehicle_insurance', nameAr: 'وثيقة التأمين', nameEn: 'Vehicle Insurance', targetEntity: 'vehicle' as const, requiresExpiry: true, isDefault: true, active: true },
+  { typeId: 'vehicle_inspection', nameAr: 'الفحص الدوري', nameEn: 'Periodic Inspection', targetEntity: 'vehicle' as const, requiresExpiry: true, isDefault: true, active: true },
+  { typeId: 'handover_photo', nameAr: 'صور تسليم/استلام العهدة', nameEn: 'Handover Photo', targetEntity: 'handover' as const, requiresExpiry: false, isDefault: true, active: true },
+];
+

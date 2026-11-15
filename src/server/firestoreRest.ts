@@ -1,14 +1,30 @@
 import fs from 'fs';
 import path from 'path';
 import type {
+  CapabilityMap,
   DailySummary,
+  DataScope,
   HungerDailyRecord,
   HungerDistanceDailyRecord,
   KeetaDashboardDaily,
   KeetaVdaDaily,
   MonthlySummary,
+  PermissionMatrix,
+  Platform,
+  RoleTemplate,
+  UserProfile,
   UserRole,
 } from '../types/fleet.js';
+import {
+  BOOTSTRAPPED_OWNER_EMAIL_LOWER,
+  createEmptyCapabilities,
+  createEmptyPermissionMatrix,
+  createFullCapabilities,
+  createFullPermissionMatrix,
+  resolveDataScope,
+  resolveEffectiveCapabilities,
+  resolveEffectivePermissions,
+} from '../shared/rbacCore.js';
 import type { ParsedCollectionRecord } from './excelParser.js';
 
 interface FirebaseAppletConfig {
@@ -52,7 +68,12 @@ export interface VerifiedAuthUser {
   email: string;
   emailVerified: boolean;
   role: UserRole;
+  customRoleId?: string;
   active: boolean;
+  allowedPlatforms: Platform[];
+  permissions: PermissionMatrix;
+  capabilities: CapabilityMap;
+  dataScope: DataScope;
 }
 
 export async function verifyUserFromToken(idToken: string): Promise<VerifiedAuthUser> {
@@ -77,18 +98,22 @@ export async function verifyUserFromToken(idToken: string): Promise<VerifiedAuth
     throw new Error('البريد الإلكتروني غير موثق.');
   }
 
-  const isBootstrappedOwner = user.email.toLowerCase() === 'abdalrahmanmohamed0567@gmail.com';
+  const isBootstrappedOwner = user.email.toLowerCase() === BOOTSTRAPPED_OWNER_EMAIL_LOWER;
   if (isBootstrappedOwner) {
     return {
       uid: user.localId,
       email: user.email,
       emailVerified: true,
       role: 'owner',
+      customRoleId: 'super_admin',
       active: true,
+      allowedPlatforms: ['hungerstation', 'keeta'],
+      permissions: createFullPermissionMatrix(),
+      capabilities: createFullCapabilities(),
+      dataScope: { allBranches: true, branches: [], cities: [], platforms: [], riderIds: [] },
     };
   }
 
-  // Fetch user role document using caller's ID token
   const userDoc = await getFirestoreDoc('users', user.localId, idToken);
   if (!userDoc) {
     return {
@@ -97,14 +122,46 @@ export async function verifyUserFromToken(idToken: string): Promise<VerifiedAuth
       emailVerified: true,
       role: 'viewer',
       active: false,
+      allowedPlatforms: ['hungerstation', 'keeta'],
+      permissions: createEmptyPermissionMatrix(),
+      capabilities: createEmptyCapabilities(),
+      dataScope: { allBranches: false, branches: [], cities: [], platforms: [], riderIds: [] },
     };
   }
+
+  const typedProfile = userDoc as unknown as UserProfile;
+  const role = (typedProfile.role as UserRole) || 'viewer';
+  const rawPlatforms = Array.isArray(typedProfile.allowedPlatforms)
+    ? typedProfile.allowedPlatforms.filter((p): p is Platform => p === 'hungerstation' || p === 'keeta')
+    : [];
+  const allowedPlatforms: Platform[] =
+    role === 'owner' || role === 'admin'
+      ? ['hungerstation', 'keeta']
+      : rawPlatforms.length > 0
+        ? rawPlatforms
+        : ['hungerstation', 'keeta'];
+
+  let roleTemplates: RoleTemplate[] = [];
+  if (typedProfile.customRoleId) {
+    const customDoc = await getFirestoreDoc('roleTemplates', typedProfile.customRoleId, idToken).catch(() => null);
+    if (customDoc) roleTemplates = [customDoc as unknown as RoleTemplate];
+  }
+
+  const permissions = resolveEffectivePermissions({ ...typedProfile, email: user.email, role }, roleTemplates);
+  const capabilities = resolveEffectiveCapabilities({ ...typedProfile, email: user.email, role }, roleTemplates);
+  const dataScope = resolveDataScope({ ...typedProfile, email: user.email, role });
+
   return {
     uid: user.localId,
     email: user.email,
     emailVerified: true,
-    role: (userDoc.role as UserRole) || 'viewer',
-    active: Boolean(userDoc.active),
+    role,
+    customRoleId: typedProfile.customRoleId,
+    active: Boolean(typedProfile.active),
+    allowedPlatforms,
+    permissions,
+    capabilities,
+    dataScope,
   };
 }
 
@@ -190,6 +247,40 @@ export async function getFirestoreDoc(
   }
   const doc = (await res.json()) as { fields?: Record<string, FirestoreValue> };
   return docToObject(doc);
+}
+
+export async function deleteFirestoreDoc(
+  collection: string,
+  docId: string,
+  idToken: string
+): Promise<void> {
+  const res = await fetch(`${dbBaseUrl()}/${collection}/${encodeURIComponent(docId)}`, {
+    method: 'DELETE',
+    headers: { Authorization: `Bearer ${idToken}` },
+  });
+  if (res.status === 404) return;
+  if (!res.ok) {
+    const errText = await res.text();
+    throw new Error(`Firestore DELETE error (${collection}/${docId}): ${errText}`);
+  }
+}
+
+export async function isKeetaEnabledOnServer(idToken: string): Promise<boolean> {
+  try {
+    const [settingsDoc, catalogDoc] = await Promise.all([
+      getFirestoreDoc('operationalSettings', 'default', idToken).catch(() => null),
+      getFirestoreDoc('platformCatalog', 'keeta', idToken).catch(() => null),
+    ]);
+    if (catalogDoc) {
+      return Boolean(catalogDoc.enabled === true && catalogDoc.hiddenFromUi !== true);
+    }
+    if (settingsDoc) {
+      return Boolean(settingsDoc.keetaEnabled === true && settingsDoc.keetaHidden !== true);
+    }
+    return false;
+  } catch {
+    return false;
+  }
 }
 
 export async function listFirestoreCollection<T = Record<string, unknown>>(
@@ -491,9 +582,27 @@ export async function recomputeSummariesForDates(params: {
       const workingHours = rows.reduce((s, r) => s + (r.shiftOnlineHours ?? 0), 0);
       const validHours = rows.reduce((s, r) => s + (r.shiftValidOnlineTime ?? 0), 0);
       const overdueOrders = rows.reduce((s, r) => s + (r.overdueOrderTasks ?? 0), 0);
-      const compRates = rows.map((r) => r.completionRate).filter((v): v is number => v !== null);
-      const onTimeRates = rows.map((r) => r.onTimeRate).filter((v): v is number => v !== null);
-      const cancelRates = rows.map((r) => r.cancellationRate).filter((v): v is number => v !== null);
+
+      let compWeightedSum = 0;
+      let compWeightTotal = 0;
+      let onTimeWeightedSum = 0;
+      let onTimeWeightTotal = 0;
+      let cancelledEstTotal = 0;
+      for (const r of rows) {
+        if (r.completionRate !== null) {
+          const w = r.acceptedTasks !== null && r.acceptedTasks > 0 ? r.acceptedTasks : 1;
+          compWeightedSum += r.completionRate * w;
+          compWeightTotal += w;
+        }
+        if (r.onTimeRate !== null) {
+          const w = r.deliveredTasks !== null && r.deliveredTasks > 0 ? r.deliveredTasks : 1;
+          onTimeWeightedSum += r.onTimeRate * w;
+          onTimeWeightTotal += w;
+        }
+        if (r.cancellationRate !== null && r.acceptedTasks !== null && r.acceptedTasks > 0) {
+          cancelledEstTotal += (r.cancellationRate / 100) * r.acceptedTasks;
+        }
+      }
 
       const summaryKey = `keeta_${date}`;
       const summaryDoc: Omit<DailySummary, 'updatedAt'> = {
@@ -506,15 +615,15 @@ export async function recomputeSummariesForDates(params: {
         completedOrders,
         acceptedOrders,
         rejectedOrders,
-        cancelledOrders: cancelRates.length ? Math.round((cancelRates.reduce((a, b) => a + b, 0) / 100 / cancelRates.length) * acceptedOrders) : 0,
+        cancelledOrders: Math.round(cancelledEstTotal),
         workingHours: Number(workingHours.toFixed(2)),
         validHours: Number(validHours.toFixed(2)),
         totalKm: Number(dist.totalKm.toFixed(2)),
         payableKm: Number(dist.payableKm.toFixed(2)),
         overdueOrders,
         avgAcceptanceRate: acceptedOrders + rejectedOrders > 0 ? Number(((acceptedOrders / (acceptedOrders + rejectedOrders)) * 100).toFixed(2)) : 0,
-        avgCompletionRate: compRates.length ? Number((compRates.reduce((a, b) => a + b, 0) / compRates.length).toFixed(2)) : 0,
-        avgOnTimeRate: onTimeRates.length ? Number((onTimeRates.reduce((a, b) => a + b, 0) / onTimeRates.length).toFixed(2)) : 0,
+        avgCompletionRate: compWeightTotal > 0 ? Number((compWeightedSum / compWeightTotal).toFixed(2)) : 0,
+        avgOnTimeRate: onTimeWeightTotal > 0 ? Number((onTimeWeightedSum / onTimeWeightTotal).toFixed(2)) : 0,
         avgAttendanceRate: uniqueRiders.size > 0 ? Number(((rows.filter((r) => (r.onShift || '').toLowerCase() === 'yes' || (r.onShift || '') === '1' || (r.onShift || '').toLowerCase() === 'true').length / uniqueRiders.size) * 100).toFixed(2)) : 0,
         createdByUid,
         allowedUids,
@@ -541,8 +650,23 @@ export async function recomputeSummariesForDates(params: {
       const totalKm = mVda.reduce((s, v) => s + (v.totalDeliveryDistance ?? 0), 0);
       const payableKm = mVda.reduce((s, v) => s + (v.payableDistance ?? 0), 0);
       const overdueOrders = mRows.reduce((s, r) => s + (r.overdueOrderTasks ?? 0), 0);
-      const compRates = mRows.map((r) => r.completionRate).filter((v): v is number => v !== null);
-      const onTimeRates = mRows.map((r) => r.onTimeRate).filter((v): v is number => v !== null);
+
+      let compWeightedSum = 0;
+      let compWeightTotal = 0;
+      let onTimeWeightedSum = 0;
+      let onTimeWeightTotal = 0;
+      for (const r of mRows) {
+        if (r.completionRate !== null) {
+          const w = r.acceptedTasks !== null && r.acceptedTasks > 0 ? r.acceptedTasks : 1;
+          compWeightedSum += r.completionRate * w;
+          compWeightTotal += w;
+        }
+        if (r.onTimeRate !== null) {
+          const w = r.deliveredTasks !== null && r.deliveredTasks > 0 ? r.deliveredTasks : 1;
+          onTimeWeightedSum += r.onTimeRate * w;
+          onTimeWeightTotal += w;
+        }
+      }
 
       const mKey = `keeta_${month}`;
       const mDoc: Omit<MonthlySummary, 'updatedAt'> = {
@@ -557,8 +681,8 @@ export async function recomputeSummariesForDates(params: {
         payableKm: Number(payableKm.toFixed(2)),
         overdueOrders,
         avgAcceptanceRate: acceptedOrders + rejectedOrders > 0 ? Number(((acceptedOrders / (acceptedOrders + rejectedOrders)) * 100).toFixed(2)) : 0,
-        avgCompletionRate: compRates.length ? Number((compRates.reduce((a, b) => a + b, 0) / compRates.length).toFixed(2)) : 0,
-        avgOnTimeRate: onTimeRates.length ? Number((onTimeRates.reduce((a, b) => a + b, 0) / onTimeRates.length).toFixed(2)) : 0,
+        avgCompletionRate: compWeightTotal > 0 ? Number((compWeightedSum / compWeightTotal).toFixed(2)) : 0,
+        avgOnTimeRate: onTimeWeightTotal > 0 ? Number((onTimeWeightedSum / onTimeWeightTotal).toFixed(2)) : 0,
         avgAttendanceRate: mRows.length > 0 ? Number(((mRows.filter((r) => (r.onShift || '').toLowerCase() === 'yes' || (r.onShift || '') === '1' || (r.onShift || '').toLowerCase() === 'true').length / mRows.length) * 100).toFixed(2)) : 0,
         createdByUid,
         allowedUids,

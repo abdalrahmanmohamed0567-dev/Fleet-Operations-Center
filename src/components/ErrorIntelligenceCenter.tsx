@@ -51,6 +51,21 @@ import type {
 import { ConfirmModal } from './ConfirmModal';
 import { DataTable, type TableColumn } from './DataTable';
 import { KpiCard } from './KpiCard';
+import {
+  Button,
+  Card,
+  EmptyState,
+  FormField,
+  Input,
+  PageHeader,
+  SectionHeader,
+  Select,
+  StatusBadge,
+  Tabs,
+  Textarea,
+  ToastBanner,
+  type BadgeTone,
+} from './ui/EnterpriseUI';
 
 type SubTab = 'dashboard' | 'detail' | 'correlation' | 'traceability' | 'dictionary';
 
@@ -77,12 +92,11 @@ const SEVERITY_LABELS: Record<ErrorCodeSeverity, string> = {
   unknown: 'غير محدد (Unknown)',
 };
 
-function severityTextClass(sev: ErrorCodeSeverity): string {
-  if (sev === 'critical') return 'text-red-700 dark:text-red-400 font-bold';
-  if (sev === 'high') return 'text-orange-700 dark:text-orange-400 font-semibold';
-  if (sev === 'medium') return 'text-amber-700 dark:text-amber-400 font-semibold';
-  if (sev === 'low') return 'text-emerald-700 dark:text-emerald-400 font-medium';
-  return 'text-slate-500 dark:text-slate-400 font-medium';
+function severityBadgeTone(sev: ErrorCodeSeverity): BadgeTone {
+  if (sev === 'critical') return 'danger';
+  if (sev === 'high' || sev === 'medium') return 'warning';
+  if (sev === 'low') return 'success';
+  return 'neutral';
 }
 
 const CASE_STATUS_LABELS: Record<string, string> = {
@@ -412,7 +426,7 @@ export function ErrorIntelligenceCenter({
       key: 'sev',
       header: 'الخطورة',
       sortValue: (r) => r.severity,
-      render: (r) => <span className={`text-xs ${severityTextClass(r.severity)}`}>{SEVERITY_LABELS[r.severity]}</span>,
+      render: (r) => <StatusBadge label={SEVERITY_LABELS[r.severity]} tone={severityBadgeTone(r.severity)} />,
     },
     {
       key: 'occ',
@@ -466,9 +480,10 @@ export function ErrorIntelligenceCenter({
       header: 'المستوى',
       sortValue: (r) => r.severity,
       render: (r) => (
-        <span className={`text-xs font-bold ${r.severity === 'critical' ? 'text-red-700 dark:text-red-400' : 'text-amber-700 dark:text-amber-400'}`}>
-          {r.severity === 'critical' ? 'حرج' : 'تحذير'}
-        </span>
+        <StatusBadge
+          label={r.severity === 'critical' ? 'حرج' : 'تحذير'}
+          tone={r.severity === 'critical' ? 'danger' : 'warning'}
+        />
       ),
     },
     { key: 'cat', header: 'نوع التنبيه', sortValue: (r) => r.category, render: (r) => <span className="font-semibold text-slate-800 dark:text-slate-200">{r.category}</span> },
@@ -511,23 +526,25 @@ export function ErrorIntelligenceCenter({
               const existingOp = openOpCaseRiders.get(`hungerstation:${r.riderId}`);
               if (existingOp) {
                 return (
-                  <button
-                    type="button"
+                  <Button
+                    size="sm"
+                    variant="secondary"
                     onClick={(e) => {
                       e.stopPropagation();
                       onGoToOperations?.();
                     }}
-                    className="rounded border border-blue-200 dark:border-blue-800 bg-blue-50 dark:bg-blue-950/50 px-2 py-1 text-[11px] font-semibold text-blue-700 dark:text-blue-400"
                   >
                     حالة مفتوحة
-                  </button>
+                  </Button>
                 );
               }
               const busyKey = `detail_${r.riderId}`;
               return (
-                <button
-                  type="button"
-                  disabled={opCaseBusyKey === busyKey}
+                <Button
+                  size="sm"
+                  variant="secondary"
+                  loading={opCaseBusyKey === busyKey}
+                  icon={<ClipboardPlus className="h-3.5 w-3.5" />}
                   onClick={(e) => {
                     e.stopPropagation();
                     if (!activeDetail) return;
@@ -542,11 +559,9 @@ export function ErrorIntelligenceCenter({
                       recommendedAction: activeDetail.recommendedAction,
                     });
                   }}
-                  className="inline-flex items-center gap-1 rounded border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 px-2 py-1 text-[11px] font-semibold text-slate-800 dark:text-slate-200 hover:bg-slate-900 hover:text-white dark:hover:bg-blue-600 disabled:opacity-50"
                 >
-                  <ClipboardPlus className="h-3 w-3" />
-                  <span>{opCaseBusyKey === busyKey ? 'جاري الإنشاء...' : 'إنشاء حالة متابعة'}</span>
-                </button>
+                  إنشاء حالة متابعة
+                </Button>
               );
             },
           } as TableColumn<AffectedRiderCodeSummary>,
@@ -634,22 +649,24 @@ export function ErrorIntelligenceCenter({
               const existingOp = openOpCaseRiders.get(`hungerstation:${r.riderId}`);
               if (existingOp) {
                 return (
-                  <button
-                    type="button"
+                  <Button
+                    size="sm"
+                    variant="secondary"
                     onClick={(e) => {
                       e.stopPropagation();
                       onGoToOperations?.();
                     }}
-                    className="rounded border border-blue-200 dark:border-blue-800 bg-blue-50 dark:bg-blue-950/50 px-2 py-1 text-[11px] font-semibold text-blue-700 dark:text-blue-400"
                   >
                     حالة مفتوحة
-                  </button>
+                  </Button>
                 );
               }
               return (
-                <button
-                  type="button"
-                  disabled={opCaseBusyKey === r.eventKey}
+                <Button
+                  size="sm"
+                  variant="secondary"
+                  loading={opCaseBusyKey === r.eventKey}
+                  icon={<ClipboardPlus className="h-3.5 w-3.5" />}
                   onClick={(e) => {
                     e.stopPropagation();
                     void handleCreateOperationalCaseFromError({
@@ -663,11 +680,9 @@ export function ErrorIntelligenceCenter({
                       recommendedAction: r.dictionaryEntry?.recommendedAction,
                     });
                   }}
-                  className="inline-flex items-center gap-1 rounded border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 px-2 py-1 text-[11px] font-semibold text-slate-800 dark:text-slate-200 hover:bg-slate-900 hover:text-white dark:hover:bg-blue-600 disabled:opacity-50"
                 >
-                  <ClipboardPlus className="h-3 w-3" />
-                  <span>{opCaseBusyKey === r.eventKey ? 'جاري الإنشاء...' : 'إنشاء حالة متابعة'}</span>
-                </button>
+                  إنشاء حالة متابعة
+                </Button>
               );
             },
           } as TableColumn<HungerErrorEvent>,
@@ -679,16 +694,17 @@ export function ErrorIntelligenceCenter({
     { key: 'code', header: 'الكود الموحد', sortValue: (r) => r.normalizedCode, render: (r) => <span className="font-mono-num font-bold text-slate-900 dark:text-slate-100">{r.normalizedCode}</span> },
     { key: 'ar', header: 'الوصف العربي المعتمد', render: (r) => <span className="font-semibold text-slate-900 dark:text-slate-100">{r.arabicDescription}</span> },
     { key: 'cat', header: 'التصنيف', sortValue: (r) => r.category, render: (r) => <span className="text-xs text-slate-700 dark:text-slate-300">{r.category || '-'}</span> },
-    { key: 'sev', header: 'الشدة', sortValue: (r) => r.severity, render: (r) => <span className={`text-xs ${severityTextClass(r.severity)}`}>{SEVERITY_LABELS[r.severity]}</span> },
+    { key: 'sev', header: 'الشدة', sortValue: (r) => r.severity, render: (r) => <StatusBadge label={SEVERITY_LABELS[r.severity]} tone={severityBadgeTone(r.severity)} /> },
     {
       key: 'status',
       header: 'حالة التحقق',
       align: 'center',
       sortValue: (r) => r.verifiedStatus,
       render: (r) => (
-        <span className={`text-xs font-semibold ${r.verifiedStatus === 'verified' ? 'text-emerald-700 dark:text-emerald-400' : 'text-amber-700 dark:text-amber-400'}`}>
-          {r.verifiedStatus === 'verified' ? 'موثق' : 'غير موثق'}
-        </span>
+        <StatusBadge
+          label={r.verifiedStatus === 'verified' ? 'موثق' : 'غير موثق'}
+          tone={r.verifiedStatus === 'verified' ? 'success' : 'warning'}
+        />
       ),
     },
     { key: 'action', header: 'الإجراء التشغيلي المقترح', render: (r) => <span className="text-xs text-slate-600 dark:text-slate-300 whitespace-normal block max-w-xs">{r.recommendedAction || '-'}</span> },
@@ -698,16 +714,16 @@ export function ErrorIntelligenceCenter({
       render: (r) => (
         <div className="flex items-center gap-2">
           {canEditDict && (
-            <button
-              type="button"
+            <Button
+              size="sm"
+              variant="secondary"
               onClick={(e) => {
                 e.stopPropagation();
                 editDictionaryEntry(r);
               }}
-              className="rounded border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 px-2 py-1 text-xs font-semibold text-slate-800 dark:text-slate-200 hover:bg-slate-900 hover:text-white dark:hover:bg-blue-600"
             >
               تعديل
-            </button>
+            </Button>
           )}
           {canDeleteDict && (
             <button
@@ -716,7 +732,7 @@ export function ErrorIntelligenceCenter({
                 e.stopPropagation();
                 setDeleteTarget(r);
               }}
-              className="text-red-600 dark:text-red-400 hover:text-red-800"
+              className="rounded-lg p-1.5 text-red-600 dark:text-red-400 hover:bg-red-50 dark:hover:bg-red-950/40"
               title="حذف"
             >
               <Trash2 className="h-3.5 w-3.5" />
@@ -740,73 +756,45 @@ export function ErrorIntelligenceCenter({
 
   return (
     <div className="space-y-6">
-      {/* Module Header & Sub-tabs */}
-      <div className="rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 p-5 space-y-4">
-        <div className="flex flex-wrap items-start justify-between gap-4">
-          <div>
-            <div className="text-xs font-mono-num font-bold tracking-wider text-slate-500 dark:text-slate-400">
-              HUNGERSTATION ERROR CODE INTELLIGENCE CENTER
-            </div>
-            <h2 className="mt-1 text-lg font-bold text-slate-900 dark:text-slate-100">
-              مركز تحليل ومراقبة أكواد أخطاء هنقرستيشن
-            </h2>
-            <p className="mt-0.5 text-xs text-slate-500 dark:text-slate-400">
-              تحليل حتمي لعمود <span className="font-mono-num font-semibold">Error Codes</span> في <span className="font-mono-num">Hunger-Daily</span> مع حفظ القيمة الأصلية وتوحيد الأكواد دون افتراض معانٍ غير موثقة.
-            </p>
+      <PageHeader
+        title="مركز تحليل ومراقبة أكواد أخطاء هنقرستيشن"
+        subtitle="تحليل حتمي لعمود Error Codes في Hunger-Daily مع حفظ القيمة الأصلية وتوحيد الأكواد دون افتراض معانٍ غير موثقة."
+        actions={
+          <div className="flex flex-wrap items-center gap-2">
+            <StatusBadge tone="success" className="font-mono-num" label={`موثق: ${report.verifiedCodesCount}`} />
+            <StatusBadge tone={report.unknownCodesCount > 0 ? 'warning' : 'neutral'} className="font-mono-num" label={`غير موثق: ${report.unknownCodesCount}`} />
+            <StatusBadge
+              tone="info"
+              className="font-mono-num"
+              label={
+                report.delimiterProfile.detectedDelimiters.length > 0
+                  ? `فواصل: ${report.delimiterProfile.detectedDelimiters.join(', ')}`
+                  : 'تنسيق مفرد'
+              }
+            />
           </div>
+        }
+      />
 
-          <div className="text-xs text-slate-600 dark:text-slate-300 bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-800 rounded-lg px-3 py-2 space-y-0.5">
-            <div className="font-semibold text-slate-800 dark:text-slate-200">حالة القاموس والفصل الذكي</div>
-            <div className="font-mono-num">
-              موثق: {report.verifiedCodesCount} · Unknown Code: {report.unknownCodesCount}
-            </div>
-            <div className="font-mono-num text-[11px] text-slate-500 dark:text-slate-400">
-              فواصل مكتشفة: {report.delimiterProfile.detectedDelimiters.length > 0 ? report.delimiterProfile.detectedDelimiters.join(', ') : 'كود مفرد / قياسي'}
-            </div>
-          </div>
-        </div>
-
-        <div className="flex flex-wrap gap-1.5 border-t border-slate-100 dark:border-slate-800 pt-3">
-          {(
-            [
-              { key: 'dashboard', label: 'لوحة مراقبة الأخطاء', icon: ShieldAlert },
-              { key: 'detail', label: 'تفاصيل كود الخطأ', icon: AlertTriangle },
-              { key: 'correlation', label: 'التحليل والارتباط التشغيلي', icon: GitCompare },
-              { key: 'traceability', label: `تتبع السجلات الخام (${report.events.length})`, icon: FileSearch },
-              { key: 'dictionary', label: `قاموس الأكواد (${dictionaryEntries.length})`, icon: BookOpen },
-            ] as const
-          ).map((t) => {
-            const Icon = t.icon;
-            const active = subTab === t.key;
-            return (
-              <button
-                key={t.key}
-                type="button"
-                onClick={() => setSubTab(t.key)}
-                className={`inline-flex items-center gap-1.5 rounded-lg px-3.5 py-2 text-xs font-semibold transition-colors whitespace-nowrap ${
-                  active
-                    ? 'bg-slate-900 dark:bg-blue-600 text-white'
-                    : 'bg-slate-50 dark:bg-slate-800 text-slate-700 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-700'
-                }`}
-              >
-                <Icon className="h-3.5 w-3.5" />
-                <span>{t.label}</span>
-              </button>
-            );
-          })}
-        </div>
-      </div>
+      <Tabs<SubTab>
+        variant="underline"
+        activeKey={subTab}
+        onChange={setSubTab}
+        items={[
+          { key: 'dashboard', label: 'لوحة مراقبة الأخطاء', icon: <ShieldAlert className="h-3.5 w-3.5" /> },
+          { key: 'detail', label: 'تفاصيل كود الخطأ', icon: <AlertTriangle className="h-3.5 w-3.5" /> },
+          { key: 'correlation', label: 'التحليل والارتباط التشغيلي', icon: <GitCompare className="h-3.5 w-3.5" /> },
+          { key: 'traceability', label: 'تتبع السجلات الخام', count: report.events.length, icon: <FileSearch className="h-3.5 w-3.5" /> },
+          { key: 'dictionary', label: 'قاموس الأكواد', count: dictionaryEntries.length, icon: <BookOpen className="h-3.5 w-3.5" /> },
+        ]}
+      />
 
       {opCaseMsg && (
-        <div
-          className={`rounded-xl border p-3 text-sm ${
-            opCaseMsg.type === 'ok'
-              ? 'border-emerald-200 dark:border-emerald-800 bg-emerald-50 dark:bg-emerald-950/50 text-emerald-800 dark:text-emerald-200'
-              : 'border-red-200 dark:border-red-800 bg-red-50 dark:bg-red-950/50 text-red-800 dark:text-red-200'
-          }`}
-        >
-          {opCaseMsg.text}
-        </div>
+        <ToastBanner
+          type={opCaseMsg.type}
+          message={opCaseMsg.text}
+          onDismiss={() => setOpCaseMsg(null)}
+        />
       )}
 
       {/* SUBTAB 1: ERROR INTELLIGENCE DASHBOARD */}
@@ -846,48 +834,50 @@ export function ErrorIntelligenceCenter({
             />
           </div>
 
-          <div className="rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 p-5">
-            <div className="flex flex-wrap items-center justify-between gap-3">
-              <div>
-                <h3 className="text-sm font-bold text-slate-900 dark:text-slate-100">مقارنة معدلات الأخطاء بين الفترات</h3>
-                <p className="text-xs text-slate-500 dark:text-slate-400">
-                  {report.periodComparison.hasComparison
-                    ? `مقارنة (${report.periodComparison.currentLabel}) مقابل (${report.periodComparison.previousLabel})`
-                    : 'يلزم توفر يومين أو شهرين على الأقل في بيانات Hunger-Daily لإجراء مقارنة فترية.'}
-                </p>
-              </div>
-              {report.periodComparison.hasComparison && (
-                <div className="flex flex-wrap items-center gap-6 font-mono-num text-xs">
-                  <div>
-                    <div className="text-slate-500 dark:text-slate-400">حالات الفترة الحالية / السابقة</div>
-                    <div className="text-sm font-bold text-slate-900 dark:text-slate-100">
-                      {fmtNum(report.periodComparison.currentErrors)} / {fmtNum(report.periodComparison.previousErrors)}
-                      {report.periodComparison.errorDeltaPct !== null && (
-                        <span className={`mr-2 ${report.periodComparison.errorDeltaPct > 0 ? 'text-red-700 dark:text-red-400' : 'text-emerald-700 dark:text-emerald-400'}`}>
-                          ({report.periodComparison.errorDeltaPct > 0 ? '+' : ''}{report.periodComparison.errorDeltaPct}%)
-                        </span>
-                      )}
+          <Card>
+            <SectionHeader
+              title="مقارنة معدلات الأخطاء بين الفترات"
+              subtitle={
+                report.periodComparison.hasComparison
+                  ? `مقارنة (${report.periodComparison.currentLabel}) مقابل (${report.periodComparison.previousLabel})`
+                  : 'يلزم توفر يومين أو شهرين على الأقل في بيانات Hunger-Daily لإجراء مقارنة فترية.'
+              }
+              actions={
+                report.periodComparison.hasComparison && (
+                  <div className="flex flex-wrap items-center gap-6 font-mono-num text-xs">
+                    <div>
+                      <div className="text-slate-500 dark:text-slate-400">حالات الفترة الحالية / السابقة</div>
+                      <div className="text-sm font-bold text-slate-900 dark:text-slate-100 flex items-center gap-2">
+                        <span>{fmtNum(report.periodComparison.currentErrors)} / {fmtNum(report.periodComparison.previousErrors)}</span>
+                        {report.periodComparison.errorDeltaPct !== null && (
+                          <StatusBadge
+                            tone={report.periodComparison.errorDeltaPct > 0 ? 'danger' : 'success'}
+                            label={`${report.periodComparison.errorDeltaPct > 0 ? '+' : ''}${report.periodComparison.errorDeltaPct}%`}
+                          />
+                        )}
+                      </div>
+                    </div>
+                    <div>
+                      <div className="text-slate-500 dark:text-slate-400">معدل الأيام المتأثرة (الحالي / السابق)</div>
+                      <div className="text-sm font-bold text-slate-900 dark:text-slate-100 flex items-center gap-2">
+                        <span>{fmtPct(report.periodComparison.currentErrorRatePct)} / {fmtPct(report.periodComparison.previousErrorRatePct)}</span>
+                        <StatusBadge
+                          tone={report.periodComparison.rateDeltaPts > 0 ? 'danger' : 'success'}
+                          label={`${report.periodComparison.rateDeltaPts > 0 ? '+' : ''}${report.periodComparison.rateDeltaPts} نقطة`}
+                        />
+                      </div>
                     </div>
                   </div>
-                  <div>
-                    <div className="text-slate-500 dark:text-slate-400">معدل الأيام المتأثرة (الحالي / السابق)</div>
-                    <div className="text-sm font-bold text-slate-900 dark:text-slate-100">
-                      {fmtPct(report.periodComparison.currentErrorRatePct)} / {fmtPct(report.periodComparison.previousErrorRatePct)}
-                      <span className={`mr-2 ${report.periodComparison.rateDeltaPts > 0 ? 'text-red-700 dark:text-red-400' : 'text-emerald-700 dark:text-emerald-400'}`}>
-                        ({report.periodComparison.rateDeltaPts > 0 ? '+' : ''}{report.periodComparison.rateDeltaPts} نقطة)
-                      </span>
-                    </div>
-                  </div>
-                </div>
-              )}
-            </div>
-          </div>
+                )
+              }
+            />
+          </Card>
 
           <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">
-            <div className="rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 p-5">
-              <h3 className="mb-3 text-sm font-bold text-slate-900 dark:text-slate-100">أكثر 10 أكواد خطأ تكرارًا</h3>
+            <Card className="space-y-4">
+              <SectionHeader title="أكثر 10 أكواد خطأ تكرارًا" />
               {topChartData.length === 0 ? (
-                <div className="py-12 text-center text-xs text-slate-500 dark:text-slate-400">لا توجد أكواد أخطاء مسجلة في النطاق المحدد.</div>
+                <EmptyState title="لا توجد أكواد أخطاء مسجلة في النطاق المحدد" />
               ) : (
                 <div className="h-72 w-full" dir="ltr">
                   <ResponsiveContainer width="100%" height="100%">
@@ -897,18 +887,18 @@ export function ErrorIntelligenceCenter({
                       <YAxis tick={{ fontSize: 11, fill: '#64748b' }} />
                       <Tooltip />
                       <Legend />
-                      <Bar dataKey="occurrences" name="مرات الظهور" fill="#1d4ed8" radius={[4, 4, 0, 0]} />
+                      <Bar dataKey="occurrences" name="مرات الظهور" fill="#2563eb" radius={[4, 4, 0, 0]} />
                       <Bar dataKey="riders" name="المندوبون" fill="#0d9488" radius={[4, 4, 0, 0]} />
                     </BarChart>
                   </ResponsiveContainer>
                 </div>
               )}
-            </div>
+            </Card>
 
-            <div className="rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 p-5">
-              <h3 className="mb-3 text-sm font-bold text-slate-900 dark:text-slate-100">التوزيع اليومي لحالات الأخطاء</h3>
+            <Card className="space-y-4">
+              <SectionHeader title="التوزيع اليومي لحالات الأخطاء" />
               {report.dailyDistribution.length === 0 ? (
-                <div className="py-12 text-center text-xs text-slate-500 dark:text-slate-400">لا توجد بيانات يومية متاحة.</div>
+                <EmptyState title="لا توجد بيانات يومية متاحة" />
               ) : (
                 <div className="h-72 w-full" dir="ltr">
                   <ResponsiveContainer width="100%" height="100%">
@@ -919,37 +909,32 @@ export function ErrorIntelligenceCenter({
                       <Tooltip />
                       <Legend />
                       <Line type="monotone" dataKey="errors" name="حالات الأخطاء" stroke="#dc2626" strokeWidth={2} />
-                      <Line type="monotone" dataKey="affectedRows" name="السجلات المتأثرة" stroke="#1d4ed8" strokeWidth={2} />
+                      <Line type="monotone" dataKey="affectedRows" name="السجلات المتأثرة" stroke="#2563eb" strokeWidth={2} />
                     </LineChart>
                   </ResponsiveContainer>
                 </div>
               )}
-            </div>
+            </Card>
           </div>
 
           <div className="grid grid-cols-1 gap-6 lg:grid-cols-3">
-            <div className="lg:col-span-2 rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 p-5 space-y-3">
-              <div className="flex items-center justify-between">
-                <h3 className="text-sm font-bold text-slate-900 dark:text-slate-100">توزيع الأخطاء حسب المدينة والفرع</h3>
-                <div className="flex gap-1 rounded-lg bg-slate-100 dark:bg-slate-800 p-1 text-xs">
-                  <button
-                    type="button"
-                    onClick={() => setGeoView('city')}
-                    className={`rounded px-2.5 py-1 font-semibold ${geoView === 'city' ? 'bg-white dark:bg-slate-700 text-slate-900 dark:text-white' : 'text-slate-600 dark:text-slate-400'}`}
-                  >
-                    حسب المدينة
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => setGeoView('branch')}
-                    className={`rounded px-2.5 py-1 font-semibold ${geoView === 'branch' ? 'bg-white dark:bg-slate-700 text-slate-900 dark:text-white' : 'text-slate-600 dark:text-slate-400'}`}
-                  >
-                    حسب الفرع (المربوط بـ Master)
-                  </button>
-                </div>
-              </div>
+            <Card className="lg:col-span-2 space-y-4">
+              <SectionHeader
+                title="توزيع الأخطاء حسب المدينة والفرع"
+                actions={
+                  <Tabs
+                    variant="segmented"
+                    activeKey={geoView}
+                    onChange={setGeoView}
+                    items={[
+                      { key: 'city', label: 'حسب المدينة' },
+                      { key: 'branch', label: 'حسب الفرع (Master)' },
+                    ]}
+                  />
+                }
+              />
               {geoChartData.length === 0 ? (
-                <div className="py-10 text-center text-xs text-slate-500 dark:text-slate-400">لا توجد بيانات توزيع جغرافي.</div>
+                <EmptyState title="لا توجد بيانات توزيع جغرافي" />
               ) : (
                 <div className="h-64 w-full" dir="ltr">
                   <ResponsiveContainer width="100%" height="100%">
@@ -959,30 +944,32 @@ export function ErrorIntelligenceCenter({
                       <YAxis tick={{ fontSize: 11, fill: '#64748b' }} />
                       <Tooltip />
                       <Legend />
-                      <Bar dataKey="errors" name="حالات الأخطاء" fill="#334155" radius={[4, 4, 0, 0]} />
-                      <Bar dataKey="riders" name="المندوبون" fill="#f59e0b" radius={[4, 4, 0, 0]} />
+                      <Bar dataKey="errors" name="حالات الأخطاء" fill="#0f1e36" radius={[4, 4, 0, 0]} />
+                      <Bar dataKey="riders" name="المندوبون" fill="#d97706" radius={[4, 4, 0, 0]} />
                     </BarChart>
                   </ResponsiveContainer>
                 </div>
               )}
-            </div>
+            </Card>
 
-            <div className="rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 p-5 space-y-4">
+            <Card className="space-y-4">
               <div>
-                <h3 className="text-sm font-bold text-slate-900 dark:text-slate-100">الأكواد الجديدة / غير الموثقة ({report.newCodes.length})</h3>
-                <div className="mt-2 max-h-28 overflow-y-auto divide-y divide-slate-100 dark:divide-slate-800 text-xs">
+                <h3 className="text-sm font-bold text-slate-900 dark:text-slate-100">
+                  الأكواد الجديدة / غير الموثقة ({report.newCodes.length})
+                </h3>
+                <div className="mt-2 max-h-32 overflow-y-auto erp-scroll divide-y divide-slate-100 dark:divide-slate-800 text-xs">
                   {report.newCodes.length === 0 ? (
-                    <div className="py-2 text-slate-400">جميع الأكواد المرصودة موثقة ومستقرة.</div>
+                    <div className="py-3 text-slate-400">جميع الأكواد المرصودة موثقة ومستقرة.</div>
                   ) : (
                     report.newCodes.slice(0, 8).map((c) => (
                       <button
                         key={c.codeKey}
                         type="button"
                         onClick={() => openCodeDetail(c.codeKey)}
-                        className="flex w-full items-center justify-between py-1.5 text-right hover:bg-slate-50 dark:hover:bg-slate-800"
+                        className="flex w-full items-center justify-between py-2 px-1.5 text-right rounded hover:bg-slate-50 dark:hover:bg-slate-800"
                       >
                         <span className="font-mono-num font-bold text-slate-900 dark:text-slate-100">{c.normalizedCode}</span>
-                        <span className="text-amber-700 dark:text-amber-400 font-mono-num">{c.occurrenceCount}×</span>
+                        <StatusBadge tone="warning" className="font-mono-num" label={`${c.occurrenceCount}×`} />
                       </button>
                     ))
                   )}
@@ -990,33 +977,35 @@ export function ErrorIntelligenceCenter({
               </div>
 
               <div className="border-t border-slate-100 dark:border-slate-800 pt-3">
-                <h3 className="text-sm font-bold text-slate-900 dark:text-slate-100">الأكواد المتكررة لنفس المندوب ({report.repeatedCodes.length})</h3>
-                <div className="mt-2 max-h-28 overflow-y-auto divide-y divide-slate-100 dark:divide-slate-800 text-xs">
+                <h3 className="text-sm font-bold text-slate-900 dark:text-slate-100">
+                  الأكواد المتكررة لنفس المندوب ({report.repeatedCodes.length})
+                </h3>
+                <div className="mt-2 max-h-32 overflow-y-auto erp-scroll divide-y divide-slate-100 dark:divide-slate-800 text-xs">
                   {report.repeatedCodes.length === 0 ? (
-                    <div className="py-2 text-slate-400">لا توجد أكواد متكررة لنفس المندوب.</div>
+                    <div className="py-3 text-slate-400">لا توجد أكواد متكررة لنفس المندوب.</div>
                   ) : (
                     report.repeatedCodes.slice(0, 8).map((c) => (
                       <button
                         key={c.codeKey}
                         type="button"
                         onClick={() => openCodeDetail(c.codeKey)}
-                        className="flex w-full items-center justify-between py-1.5 text-right hover:bg-slate-50 dark:hover:bg-slate-800"
+                        className="flex w-full items-center justify-between py-2 px-1.5 text-right rounded hover:bg-slate-50 dark:hover:bg-slate-800"
                       >
                         <span className="font-mono-num font-bold text-slate-900 dark:text-slate-100">{c.normalizedCode}</span>
-                        <span className="text-red-700 dark:text-red-400 font-mono-num">{c.repeatedRidersCount} مندوب</span>
+                        <StatusBadge tone="danger" className="font-mono-num" label={`${c.repeatedRidersCount} مندوب`} />
                       </button>
                     ))
                   )}
                 </div>
               </div>
-            </div>
+            </Card>
           </div>
 
-          <div className="space-y-2">
-            <div className="flex items-center justify-between">
-              <h3 className="text-sm font-bold text-slate-900 dark:text-slate-100">جدول جميع أكواد الأخطاء (اضغط على أي صف لعرض صفحة التفاصيل)</h3>
-              <span className="text-xs text-slate-500 dark:text-slate-400">الأكواد غير المسجلة في القاموس تظهر كـ Unknown Code</span>
-            </div>
+          <div className="space-y-3">
+            <SectionHeader
+              title="جدول جميع أكواد الأخطاء (اضغط على أي صف لعرض صفحة التفاصيل)"
+              actions={<span className="text-xs text-slate-500 dark:text-slate-400">الأكواد غير المسجلة في القاموس تظهر كـ Unknown Code</span>}
+            />
             <DataTable
               rows={report.codes}
               columns={codeSummaryCols}
@@ -1029,20 +1018,16 @@ export function ErrorIntelligenceCenter({
             />
           </div>
 
-          <div className="space-y-2">
-            <div className="flex flex-wrap items-center justify-between gap-2">
-              <div>
-                <h3 className="text-sm font-bold text-slate-900 dark:text-slate-100">التنبيهات الذكية لأكواد الأخطاء ({smartAlerts.length})</h3>
-                <p className="text-xs text-slate-500 dark:text-slate-400">تُحتسب تلقائيًا وفق عتبات إعدادات النظام (التكرار، القفزة اليومية، الانتشار، التركز، والأكواد الجديدة).</p>
-              </div>
-              <button
-                type="button"
-                onClick={onGoToSettings}
-                className="rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 px-3 py-1.5 text-xs font-semibold text-slate-800 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-700"
-              >
-                ضبط حدود تنبيهات الأخطاء
-              </button>
-            </div>
+          <div className="space-y-3">
+            <SectionHeader
+              title={`التنبيهات الذكية لأكواد الأخطاء (${smartAlerts.length})`}
+              subtitle="تُحتسب تلقائيًا وفق عتبات إعدادات النظام (التكرار، القفزة اليومية، الانتشار، التركز، والأكواد الجديدة)."
+              actions={
+                <Button size="sm" variant="secondary" onClick={onGoToSettings}>
+                  ضبط حدود تنبيهات الأخطاء
+                </Button>
+              }
+            />
             <DataTable
               rows={smartAlerts}
               columns={alertCols}
@@ -1064,20 +1049,20 @@ export function ErrorIntelligenceCenter({
       {/* SUBTAB 2: ERROR CODE DETAIL VIEW */}
       {subTab === 'detail' && (
         <div className="space-y-6">
-          <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 p-4">
-            <div className="flex items-center gap-3">
-              <button
-                type="button"
+          <Card padding="sm" className="flex flex-wrap items-center justify-between gap-3">
+            <div className="flex flex-wrap items-center gap-3">
+              <Button
+                size="sm"
+                variant="secondary"
+                icon={<ArrowRight className="h-3.5 w-3.5" />}
                 onClick={() => setSubTab('dashboard')}
-                className="inline-flex items-center gap-1 rounded-lg border border-slate-200 dark:border-slate-700 px-3 py-1.5 text-xs font-semibold text-slate-700 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-800"
               >
-                <ArrowRight className="h-3.5 w-3.5" />
-                <span>العودة للوحة الأكواد</span>
-              </button>
-              <select
+                العودة للوحة الأكواد
+              </Button>
+              <Select
                 value={activeDetail?.codeKey || ''}
                 onChange={(e) => setSelectedCodeKey(e.target.value)}
-                className="rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-950 px-3 py-1.5 text-xs font-mono-num font-semibold text-slate-900 dark:text-slate-100"
+                className="min-w-[260px] font-mono-num font-semibold"
               >
                 {report.codes.length === 0 ? (
                   <option value="">لا توجد أكواد</option>
@@ -1088,37 +1073,34 @@ export function ErrorIntelligenceCenter({
                     </option>
                   ))
                 )}
-              </select>
+              </Select>
             </div>
             {activeDetail && canEditDict && (
-              <button
-                type="button"
+              <Button
+                size="sm"
+                variant="primary"
+                icon={<BookOpen className="h-3.5 w-3.5" />}
                 onClick={() => openCodeInDictionary(activeDetail)}
-                className="inline-flex items-center gap-1.5 rounded-lg bg-slate-900 dark:bg-blue-600 px-3.5 py-2 text-xs font-semibold text-white hover:bg-slate-800 dark:hover:bg-blue-700"
               >
-                <BookOpen className="h-3.5 w-3.5" />
-                <span>{activeDetail.isVerified ? 'تعديل تعريف الكود' : 'توثيق وتصنيف في القاموس'}</span>
-              </button>
+                {activeDetail.isVerified ? 'تعديل تعريف الكود' : 'توثيق وتصنيف في القاموس'}
+              </Button>
             )}
-          </div>
+          </Card>
 
           {!activeDetail ? (
-            <div className="rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 p-10 text-center text-sm text-slate-500 dark:text-slate-400">
-              لا توجد أكواد أخطاء مسجلة حاليًا لعرض تفاصيلها.
-            </div>
+            <EmptyState title="لا توجد أكواد أخطاء مسجلة حاليًا لعرض تفاصيلها" />
           ) : (
             <>
-              <div className="rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 p-5 space-y-4">
+              <Card className="space-y-4">
                 <div className="flex flex-wrap items-start justify-between gap-4">
-                  <div className="space-y-1">
-                    <div className="flex flex-wrap items-center gap-3">
+                  <div className="space-y-1.5">
+                    <div className="flex flex-wrap items-center gap-2.5">
                       <span className="text-xl font-bold font-mono-num text-slate-900 dark:text-slate-100">{activeDetail.normalizedCode}</span>
-                      <span className={`text-xs ${severityTextClass(activeDetail.severity)}`}>
-                        {SEVERITY_LABELS[activeDetail.severity]}
-                      </span>
-                      <span className={`text-xs font-semibold ${activeDetail.isVerified ? 'text-emerald-700 dark:text-emerald-400' : 'text-amber-700 dark:text-amber-400'}`}>
-                        {activeDetail.isVerified ? 'تعريف موثق' : 'Unknown Code (بانتظار التوثيق)'}
-                      </span>
+                      <StatusBadge label={SEVERITY_LABELS[activeDetail.severity]} tone={severityBadgeTone(activeDetail.severity)} />
+                      <StatusBadge
+                        label={activeDetail.isVerified ? 'تعريف موثق' : 'Unknown Code (بانتظار التوثيق)'}
+                        tone={activeDetail.isVerified ? 'success' : 'warning'}
+                      />
                     </div>
                     <div className="text-base font-bold text-slate-800 dark:text-slate-200">{activeDetail.displayTitle}</div>
                     {activeDetail.dictionary?.englishDescription && (
@@ -1130,17 +1112,13 @@ export function ErrorIntelligenceCenter({
                     </div>
                   </div>
 
-                  <div className="flex items-center gap-2 text-xs font-semibold">
+                  <div>
                     {activeDetail.trendDirection === 'up' ? (
-                      <span className="inline-flex items-center gap-1 text-red-700 dark:text-red-400">
-                        <TrendingUp className="h-4 w-4" /> اتجاه متصاعد
-                      </span>
+                      <StatusBadge tone="danger" icon={<TrendingUp className="h-3.5 w-3.5" />} label="اتجاه متصاعد" />
                     ) : activeDetail.trendDirection === 'down' ? (
-                      <span className="inline-flex items-center gap-1 text-emerald-700 dark:text-emerald-400">
-                        <TrendingDown className="h-4 w-4" /> اتجاه متناقص
-                      </span>
+                      <StatusBadge tone="success" icon={<TrendingDown className="h-3.5 w-3.5" />} label="اتجاه متناقص" />
                     ) : (
-                      <span className="text-slate-600 dark:text-slate-400">اتجاه مستقر</span>
+                      <StatusBadge tone="neutral" label="اتجاه مستقر" />
                     )}
                   </div>
                 </div>
@@ -1151,7 +1129,7 @@ export function ErrorIntelligenceCenter({
                     {activeDetail.recommendedAction || 'لم يُحدد إجراء تشغيلي بعد — يُنصح بالتحقق من معنى الكود وتوثيقه في القاموس.'}
                   </div>
                 </div>
-              </div>
+              </Card>
 
               <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-6">
                 <KpiCard label="عدد مرات الظهور" value={fmtNum(activeDetail.occurrenceCount)} />
@@ -1167,8 +1145,8 @@ export function ErrorIntelligenceCenter({
               </div>
 
               <div className="grid grid-cols-1 gap-6 lg:grid-cols-3">
-                <div className="lg:col-span-2 rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 p-5">
-                  <h3 className="mb-3 text-sm font-bold text-slate-900 dark:text-slate-100">اتجاه تكرار الكود يوميًا ({activeDetail.normalizedCode})</h3>
+                <Card className="lg:col-span-2 space-y-4">
+                  <SectionHeader title={`اتجاه تكرار الكود يوميًا (${activeDetail.normalizedCode})`} />
                   <div className="h-64 w-full" dir="ltr">
                     <ResponsiveContainer width="100%" height="100%">
                       <LineChart data={activeDetail.dailySeries}>
@@ -1177,14 +1155,14 @@ export function ErrorIntelligenceCenter({
                         <YAxis tick={{ fontSize: 11, fill: '#64748b' }} />
                         <Tooltip />
                         <Legend />
-                        <Line type="monotone" dataKey="count" name="عدد الحالات" stroke="#1d4ed8" strokeWidth={2} />
+                        <Line type="monotone" dataKey="count" name="عدد الحالات" stroke="#2563eb" strokeWidth={2} />
                         <Line type="monotone" dataKey="riders" name="المندوبون" stroke="#0d9488" strokeWidth={2} />
                       </LineChart>
                     </ResponsiveContainer>
                   </div>
-                </div>
+                </Card>
 
-                <div className="rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 p-5 space-y-4 text-xs">
+                <Card className="space-y-4 text-xs">
                   <div>
                     <h4 className="font-bold text-slate-900 dark:text-slate-100 mb-1.5">أكثر المدن تأثرًا</h4>
                     <div className="space-y-1">
@@ -1224,13 +1202,11 @@ export function ErrorIntelligenceCenter({
                       ))}
                     </div>
                   </div>
-                </div>
+                </Card>
               </div>
 
-              <div className="space-y-2">
-                <h3 className="text-sm font-bold text-slate-900 dark:text-slate-100">
-                  قائمة المندوبين المتأثرين بالكود {activeDetail.normalizedCode} (اضغط لفتح Rider 360°)
-                </h3>
+              <div className="space-y-3">
+                <SectionHeader title={`قائمة المندوبين المتأثرين بالكود ${activeDetail.normalizedCode} (اضغط لفتح Rider 360°)`} />
                 <DataTable
                   rows={activeDetail.affectedRiders}
                   columns={detailRiderCols}
@@ -1248,18 +1224,23 @@ export function ErrorIntelligenceCenter({
       {/* SUBTAB 3: OPERATIONAL CORRELATION */}
       {subTab === 'correlation' && (
         <div className="space-y-6">
-          <div className="rounded-xl border border-amber-200 dark:border-amber-800 bg-amber-50 dark:bg-amber-950/40 p-4 text-xs text-amber-900 dark:text-amber-200">
-            <strong>ملاحظة تحليلية (ارتباط وليس سببية مطلقة):</strong> يقارن هذا القسم مؤشرات الأداء اليومية لنفس (المندوب + التاريخ) في الأيام التي ظهر بها كود خطأ مقارنة بالأيام الخالية من الأخطاء. يعكس التحليل <strong>تزامنًا إحصائيًا</strong> يُسترشد به تشغيليًا ولا يُثبت علاقة سببية منفردة دون فحص الحالة.
-          </div>
+          <ToastBanner
+            type="warn"
+            message="ملاحظة تحليلية (ارتباط وليس سببية مطلقة): يقارن هذا القسم مؤشرات الأداء اليومية لنفس (المندوب + التاريخ) في الأيام التي ظهر بها كود خطأ مقارنة بالأيام الخالية من الأخطاء."
+          />
 
           <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
-            <div className="rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 p-5 space-y-3">
-              <div className="flex items-center justify-between">
-                <h3 className="text-sm font-bold text-red-700 dark:text-red-400">أيام ظهرت فيها أكواد أخطاء</h3>
-                <span className="font-mono-num text-xs text-slate-500 dark:text-slate-400">
-                  {fmtNum(report.correlation.withErrors.rowCount)} سجل · {fmtNum(report.correlation.withErrors.riderCount)} مندوب
-                </span>
-              </div>
+            <Card className="space-y-3">
+              <SectionHeader
+                title="أيام ظهرت فيها أكواد أخطاء"
+                actions={
+                  <StatusBadge
+                    tone="danger"
+                    className="font-mono-num"
+                    label={`${fmtNum(report.correlation.withErrors.rowCount)} سجل · ${fmtNum(report.correlation.withErrors.riderCount)} مندوب`}
+                  />
+                }
+              />
               <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 text-xs">
                 <div className="rounded-lg bg-slate-50 dark:bg-slate-950 p-3">
                   <div className="text-slate-500 dark:text-slate-400">متوسط الطلبات المكتملة</div>
@@ -1298,15 +1279,19 @@ export function ErrorIntelligenceCenter({
                   </div>
                 </div>
               </div>
-            </div>
+            </Card>
 
-            <div className="rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 p-5 space-y-3">
-              <div className="flex items-center justify-between">
-                <h3 className="text-sm font-bold text-emerald-700 dark:text-emerald-400">أيام خالية من أكواد الأخطاء (الأساس المرجعي)</h3>
-                <span className="font-mono-num text-xs text-slate-500 dark:text-slate-400">
-                  {fmtNum(report.correlation.withoutErrors.rowCount)} سجل · {fmtNum(report.correlation.withoutErrors.riderCount)} مندوب
-                </span>
-              </div>
+            <Card className="space-y-3">
+              <SectionHeader
+                title="أيام خالية من أكواد الأخطاء (الأساس المرجعي)"
+                actions={
+                  <StatusBadge
+                    tone="success"
+                    className="font-mono-num"
+                    label={`${fmtNum(report.correlation.withoutErrors.rowCount)} سجل · ${fmtNum(report.correlation.withoutErrors.riderCount)} مندوب`}
+                  />
+                }
+              />
               <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 text-xs">
                 <div className="rounded-lg bg-slate-50 dark:bg-slate-950 p-3">
                   <div className="text-slate-500 dark:text-slate-400">متوسط الطلبات المكتملة</div>
@@ -1345,7 +1330,7 @@ export function ErrorIntelligenceCenter({
                   </div>
                 </div>
               </div>
-            </div>
+            </Card>
           </div>
 
           <DataTable
@@ -1363,9 +1348,10 @@ export function ErrorIntelligenceCenter({
       {/* SUBTAB 4: RAW ERROR EVENTS TRACEABILITY */}
       {subTab === 'traceability' && (
         <div className="space-y-4">
-          <div className="rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 p-4 text-xs text-slate-600 dark:text-slate-300">
-            سجل التدقيق الكامل للأخطاء الخام (Raw Error Events): يعرض القيمة النصية الكاملة للخلية في Excel، الكود المفصول، اسم الملف، اسم الشيت، ورقم الصف الأصلي، مع إمكانية فتح حالة متابعة تشغيلية بنقرة واحدة.
-          </div>
+          <ToastBanner
+            type="info"
+            message="سجل التدقيق الكامل للأخطاء الخام (Raw Error Events): يعرض القيمة النصية الكاملة للخلية في Excel، الكود المفصول، اسم الملف، اسم الشيت، ورقم الصف الأصلي، مع إمكانية فتح حالة متابعة تشغيلية بنقرة واحدة."
+          />
           <DataTable
             rows={report.events}
             columns={traceCols}
@@ -1382,19 +1368,15 @@ export function ErrorIntelligenceCenter({
       {subTab === 'dictionary' && (
         <div className="space-y-6">
           {dictMsg && (
-            <div
-              className={`rounded-xl border p-3 text-sm ${
-                dictMsg.type === 'ok'
-                  ? 'border-emerald-200 dark:border-emerald-800 bg-emerald-50 dark:bg-emerald-950/50 text-emerald-800 dark:text-emerald-200'
-                  : 'border-red-200 dark:border-red-800 bg-red-50 dark:bg-red-950/50 text-red-800 dark:text-red-200'
-              }`}
-            >
-              {dictMsg.text}
-            </div>
+            <ToastBanner
+              type={dictMsg.type}
+              message={dictMsg.text}
+              onDismiss={() => setDictMsg(null)}
+            />
           )}
 
           {report.codes.some((c) => !c.isVerified) && (
-            <div className="rounded-xl border border-amber-200 dark:border-amber-800 bg-amber-50/70 dark:bg-amber-950/40 p-4 space-y-2">
+            <Card padding="sm" className="space-y-2.5 border-amber-200 dark:border-amber-800/80 bg-amber-50/60 dark:bg-amber-950/30">
               <div className="flex items-center gap-2 text-xs font-bold text-amber-900 dark:text-amber-300">
                 <AlertTriangle className="h-4 w-4" />
                 <span>أكواد مكتشفة في البيانات بحالة Unknown Code وتحتاج توثيقًا بعد التحقق من معناها:</span>
@@ -1403,144 +1385,126 @@ export function ErrorIntelligenceCenter({
                 {report.codes
                   .filter((c) => !c.isVerified)
                   .map((c) => (
-                    <button
+                    <Button
                       key={c.codeKey}
-                      type="button"
+                      size="sm"
+                      variant="secondary"
+                      icon={<Plus className="h-3 w-3" />}
                       onClick={() => openCodeInDictionary(c)}
-                      className="inline-flex items-center gap-1.5 rounded-lg border border-amber-300 dark:border-amber-700 bg-white dark:bg-slate-900 px-2.5 py-1 text-xs font-mono-num font-semibold text-slate-900 dark:text-slate-100 hover:bg-slate-900 hover:text-white dark:hover:bg-blue-600"
+                      className="font-mono-num"
                     >
-                      <Plus className="h-3 w-3" />
-                      <span>{c.normalizedCode} ({c.occurrenceCount})</span>
-                    </button>
+                      {c.normalizedCode} ({c.occurrenceCount})
+                    </Button>
                   ))}
               </div>
-            </div>
+            </Card>
           )}
 
           {canEditDict && (
-            <form onSubmit={handleSaveDictionary} className="rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 p-5 space-y-4">
-              <div className="flex items-center justify-between">
-                <h3 className="text-sm font-bold text-slate-900 dark:text-slate-100">إضافة / تحديث تعريف كود في القاموس (Error Code Dictionary)</h3>
-                <span className="text-xs text-slate-500 dark:text-slate-400">لا يتم تخمين المعنى تلقائيًا — يُوثّق الوصف بعد التحقق التشغيلي.</span>
-              </div>
+            <Card>
+              <form onSubmit={handleSaveDictionary} className="space-y-4">
+                <SectionHeader
+                  title="إضافة / تحديث تعريف كود في القاموس (Error Code Dictionary)"
+                  subtitle="لا يتم تخمين المعنى تلقائيًا — يُوثّق الوصف بعد التحقق التشغيلي."
+                />
 
-              <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-4">
-                <div>
-                  <label className="mb-1 block text-xs font-semibold text-slate-700 dark:text-slate-300">الكود الموحد (Normalized Code) *</label>
-                  <input
-                    type="text"
-                    required
-                    value={dictForm.normalizedCode}
-                    onChange={(e) => setDictForm((p) => ({ ...p, normalizedCode: e.target.value }))}
-                    placeholder="مثال: ERR-101"
-                    className="w-full rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-950 px-3 py-2 text-xs font-mono-num text-slate-900 dark:text-slate-100 focus:bg-white dark:focus:bg-slate-900 focus:outline-none"
-                  />
+                <div className="grid grid-cols-1 gap-3.5 sm:grid-cols-2 lg:grid-cols-4">
+                  <FormField label="الكود الموحد (Normalized Code)" required>
+                    <Input
+                      required
+                      value={dictForm.normalizedCode}
+                      onChange={(e) => setDictForm((p) => ({ ...p, normalizedCode: e.target.value }))}
+                      placeholder="مثال: ERR-101"
+                      className="font-mono-num"
+                    />
+                  </FormField>
+                  <FormField label="أمثلة القيم الخام (Raw Examples)">
+                    <Input
+                      value={dictForm.rawExamples}
+                      onChange={(e) => setDictForm((p) => ({ ...p, rawExamples: e.target.value }))}
+                      placeholder="err-101, ERR-101"
+                      className="font-mono-num"
+                    />
+                  </FormField>
+                  <FormField label="التصنيف (Category)">
+                    <Input
+                      value={dictForm.category}
+                      onChange={(e) => setDictForm((p) => ({ ...p, category: e.target.value }))}
+                      placeholder="التأخير / التطبيق / المركبة"
+                    />
+                  </FormField>
+                  <FormField label="مستوى الخطورة (Severity)">
+                    <Select
+                      value={dictForm.severity}
+                      onChange={(e) => setDictForm((p) => ({ ...p, severity: e.target.value as ErrorCodeSeverity }))}
+                    >
+                      <option value="critical">حرج (Critical)</option>
+                      <option value="high">مرتفع (High)</option>
+                      <option value="medium">متوسط (Medium)</option>
+                      <option value="low">منخفض (Low)</option>
+                      <option value="unknown">غير محدد (Unknown)</option>
+                    </Select>
+                  </FormField>
                 </div>
-                <div>
-                  <label className="mb-1 block text-xs font-semibold text-slate-700 dark:text-slate-300">أمثلة القيم الخام (Raw Examples)</label>
-                  <input
-                    type="text"
-                    value={dictForm.rawExamples}
-                    onChange={(e) => setDictForm((p) => ({ ...p, rawExamples: e.target.value }))}
-                    placeholder="err-101, ERR-101"
-                    className="w-full rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-950 px-3 py-2 text-xs font-mono-num text-slate-900 dark:text-slate-100 focus:bg-white dark:focus:bg-slate-900 focus:outline-none"
-                  />
+
+                <div className="grid grid-cols-1 gap-3.5 sm:grid-cols-2 lg:grid-cols-3">
+                  <FormField label="الوصف العربي المعتمد" required>
+                    <Input
+                      required
+                      value={dictForm.arabicDescription}
+                      onChange={(e) => setDictForm((p) => ({ ...p, arabicDescription: e.target.value }))}
+                      placeholder="الوصف التشغيلي المعتمد بعد التحقق"
+                    />
+                  </FormField>
+                  <FormField label="الوصف الإنجليزي (اختياري)">
+                    <Input
+                      value={dictForm.englishDescription}
+                      onChange={(e) => setDictForm((p) => ({ ...p, englishDescription: e.target.value }))}
+                      placeholder="English verified description"
+                    />
+                  </FormField>
+                  <FormField label="حالة التحقق">
+                    <Select
+                      value={dictForm.verifiedStatus}
+                      onChange={(e) => setDictForm((p) => ({ ...p, verifiedStatus: e.target.value as 'verified' | 'unverified' }))}
+                    >
+                      <option value="verified">موثق (Verified)</option>
+                      <option value="unverified">غير موثق (Unverified)</option>
+                    </Select>
+                  </FormField>
                 </div>
-                <div>
-                  <label className="mb-1 block text-xs font-semibold text-slate-700 dark:text-slate-300">التصنيف (Category)</label>
-                  <input
-                    type="text"
-                    value={dictForm.category}
-                    onChange={(e) => setDictForm((p) => ({ ...p, category: e.target.value }))}
-                    placeholder="التأخير / التطبيق / المركبة / غير مصنف"
-                    className="w-full rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-950 px-3 py-2 text-xs text-slate-900 dark:text-slate-100 focus:bg-white dark:focus:bg-slate-900 focus:outline-none"
-                  />
+
+                <div className="grid grid-cols-1 gap-3.5 sm:grid-cols-2">
+                  <FormField label="الإجراء التشغيلي المقترح">
+                    <Textarea
+                      rows={2}
+                      value={dictForm.recommendedAction}
+                      onChange={(e) => setDictForm((p) => ({ ...p, recommendedAction: e.target.value }))}
+                      placeholder="الخطوات الواجب اتخاذها عند ظهور هذا الكود..."
+                    />
+                  </FormField>
+                  <FormField label="ملاحظات إضافية">
+                    <Textarea
+                      rows={2}
+                      value={dictForm.notes}
+                      onChange={(e) => setDictForm((p) => ({ ...p, notes: e.target.value }))}
+                      placeholder="مصدر التحقق أو ملاحظات الفريق..."
+                    />
+                  </FormField>
                 </div>
-                <div>
-                  <label className="mb-1 block text-xs font-semibold text-slate-700 dark:text-slate-300">مستوى الخطورة (Severity)</label>
-                  <select
-                    value={dictForm.severity}
-                    onChange={(e) => setDictForm((p) => ({ ...p, severity: e.target.value as ErrorCodeSeverity }))}
-                    className="w-full rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-950 px-3 py-2 text-xs text-slate-900 dark:text-slate-100 focus:bg-white dark:focus:bg-slate-900 focus:outline-none"
+
+                <div className="flex items-center justify-end gap-3 border-t border-slate-100 dark:border-slate-800 pt-3">
+                  <Button
+                    type="submit"
+                    variant="primary"
+                    loading={dictBusy}
+                    icon={<Save className="h-3.5 w-3.5" />}
                   >
-                    <option value="critical">حرج (Critical)</option>
-                    <option value="high">مرتفع (High)</option>
-                    <option value="medium">متوسط (Medium)</option>
-                    <option value="low">منخفض (Low)</option>
-                    <option value="unknown">غير محدد (Unknown)</option>
-                  </select>
+                    حفظ في قاموس الأكواد
+                  </Button>
                 </div>
-              </div>
-
-              <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
-                <div>
-                  <label className="mb-1 block text-xs font-semibold text-slate-700 dark:text-slate-300">الوصف العربي المعتمد *</label>
-                  <input
-                    type="text"
-                    required
-                    value={dictForm.arabicDescription}
-                    onChange={(e) => setDictForm((p) => ({ ...p, arabicDescription: e.target.value }))}
-                    placeholder="الوصف التشغيلي المعتمد بعد التحقق"
-                    className="w-full rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-950 px-3 py-2 text-xs text-slate-900 dark:text-slate-100 focus:bg-white dark:focus:bg-slate-900 focus:outline-none"
-                  />
-                </div>
-                <div>
-                  <label className="mb-1 block text-xs font-semibold text-slate-700 dark:text-slate-300">الوصف الإنجليزي (اختياري)</label>
-                  <input
-                    type="text"
-                    value={dictForm.englishDescription}
-                    onChange={(e) => setDictForm((p) => ({ ...p, englishDescription: e.target.value }))}
-                    placeholder="English verified description"
-                    className="w-full rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-950 px-3 py-2 text-xs text-slate-900 dark:text-slate-100 focus:bg-white dark:focus:bg-slate-900 focus:outline-none"
-                  />
-                </div>
-                <div>
-                  <label className="mb-1 block text-xs font-semibold text-slate-700 dark:text-slate-300">حالة التحقق</label>
-                  <select
-                    value={dictForm.verifiedStatus}
-                    onChange={(e) => setDictForm((p) => ({ ...p, verifiedStatus: e.target.value as 'verified' | 'unverified' }))}
-                    className="w-full rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-950 px-3 py-2 text-xs text-slate-900 dark:text-slate-100 focus:bg-white dark:focus:bg-slate-900 focus:outline-none"
-                  >
-                    <option value="verified">موثق (Verified)</option>
-                    <option value="unverified">غير موثق (Unverified)</option>
-                  </select>
-                </div>
-              </div>
-
-              <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-                <div>
-                  <label className="mb-1 block text-xs font-semibold text-slate-700 dark:text-slate-300">الإجراء التشغيلي المقترح</label>
-                  <textarea
-                    rows={2}
-                    value={dictForm.recommendedAction}
-                    onChange={(e) => setDictForm((p) => ({ ...p, recommendedAction: e.target.value }))}
-                    placeholder="الخطوات الواجب اتخاذها عند ظهور هذا الكود..."
-                    className="w-full rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-950 px-3 py-2 text-xs text-slate-900 dark:text-slate-100 focus:bg-white dark:focus:bg-slate-900 focus:outline-none"
-                  />
-                </div>
-                <div>
-                  <label className="mb-1 block text-xs font-semibold text-slate-700 dark:text-slate-300">ملاحظات إضافية</label>
-                  <textarea
-                    rows={2}
-                    value={dictForm.notes}
-                    onChange={(e) => setDictForm((p) => ({ ...p, notes: e.target.value }))}
-                    placeholder="مصدر التحقق أو ملاحظات الفريق..."
-                    className="w-full rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-950 px-3 py-2 text-xs text-slate-900 dark:text-slate-100 focus:bg-white dark:focus:bg-slate-900 focus:outline-none"
-                  />
-                </div>
-              </div>
-
-              <div className="flex items-center justify-end gap-3 border-t border-slate-100 dark:border-slate-800 pt-3">
-                <button
-                  type="submit"
-                  disabled={dictBusy}
-                  className="inline-flex items-center gap-1.5 rounded-lg bg-slate-900 dark:bg-blue-600 px-4 py-2 text-xs font-semibold text-white hover:bg-slate-800 dark:hover:bg-blue-700 disabled:opacity-50"
-                >
-                  <Save className="h-3.5 w-3.5" />
-                  <span>{dictBusy ? 'جاري الحفظ...' : 'حفظ في قاموس الأكواد'}</span>
-                </button>
-              </div>
-            </form>
+              </form>
+            </Card>
           )}
 
           <DataTable

@@ -7,7 +7,6 @@ import {
   TrendingDown,
   TrendingUp,
   Upload,
-  X,
 } from 'lucide-react';
 import { useMemo, useState } from 'react';
 import {
@@ -39,13 +38,24 @@ import {
   KPI_DEFINITIONS,
   type PeriodWindowSummary,
 } from '../lib/smartAnalytics';
+import { isKeetaActive } from '../shared/rbacCore';
 import type {
   ErrorCodeDictionaryEntry,
   OperationalCase,
   OperationalSettings,
   Platform,
+  PlatformCatalogEntry,
 } from '../types/fleet';
 import { KpiCard } from './KpiCard';
+import {
+  Button,
+  Card,
+  EmptyState,
+  SectionHeader,
+  SlideDrawer,
+  StatusBadge,
+  Tabs,
+} from './ui/EnterpriseUI';
 
 interface OverviewDashboardProps {
   dataset: FleetDataset;
@@ -53,10 +63,12 @@ interface OverviewDashboardProps {
   dictionaryEntries: ErrorCodeDictionaryEntry[];
   operationalCases: OperationalCase[];
   settings: OperationalSettings;
+  platformCatalog?: PlatformCatalogEntry[];
   onGoToImport: () => void;
   onGoToOperations: () => void;
   onGoToErrors: () => void;
   onSelectRider: (platform: Platform, riderId: string) => void;
+  onOpenPlatformWorkspace?: (platform: Platform) => void;
 }
 
 type DrilldownKey =
@@ -80,18 +92,35 @@ export function OverviewDashboard({
   filteredRows,
   operationalCases,
   settings,
+  platformCatalog = [],
   onGoToImport,
   onGoToOperations,
   onGoToErrors,
   onSelectRider,
+  onOpenPlatformWorkspace,
 }: OverviewDashboardProps) {
   const [periodTab, setPeriodTab] = useState<'daily' | 'weekly' | 'monthly'>('daily');
   const [drilldownKey, setDrilldownKey] = useState<DrilldownKey | null>(null);
+  const keetaActive = isKeetaActive(settings, platformCatalog);
 
   const metrics = useMemo(
     () => computeOverviewMetrics(filteredRows, settings),
     [filteredRows, settings]
   );
+
+  const platformComparison = useMemo(() => {
+    const hsRows = filteredRows.filter((r) => r.platform === 'hungerstation');
+    const ktRows = filteredRows.filter((r) => r.platform === 'keeta');
+    const hsMetrics = computeOverviewMetrics(hsRows, settings);
+    const ktMetrics = computeOverviewMetrics(ktRows, settings);
+    const hsCasesOpen = operationalCases.filter(
+      (c) => c.platform === 'hungerstation' && c.status !== 'closed' && c.status !== 'resolved'
+    ).length;
+    const ktCasesOpen = operationalCases.filter(
+      (c) => c.platform === 'keeta' && c.status !== 'closed' && c.status !== 'resolved'
+    ).length;
+    return { hsMetrics, ktMetrics, hsCasesOpen, ktCasesOpen };
+  }, [filteredRows, settings, operationalCases]);
 
   const periods = useMemo(
     () => computePeriodComparisons(filteredRows, settings),
@@ -280,67 +309,68 @@ export function OverviewDashboard({
 
   if (filteredRows.length === 0) {
     return (
-      <div className="rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 p-12 text-center">
-        <h3 className="text-base font-bold text-slate-900 dark:text-slate-100">لا توجد بيانات تشغيلية مطابقة للفلاتر الحالية</h3>
-        <p className="mt-2 text-sm text-slate-500 dark:text-slate-400">
-          قم برفع تقارير HungerStation أو Keeta من مركز الاستيراد لعرض مؤشرات القيادة والبيانات التحليلية.
-        </p>
-        <button
-          type="button"
-          onClick={onGoToImport}
-          className="mt-5 inline-flex items-center gap-2 rounded-lg bg-slate-900 dark:bg-blue-600 px-5 py-2.5 text-sm font-semibold text-white hover:bg-slate-800 dark:hover:bg-blue-700 whitespace-nowrap shrink-0"
-        >
-          <Upload className="h-4 w-4" />
-          <span>الانتقال إلى مركز الاستيراد</span>
-        </button>
-      </div>
+      <EmptyState
+        title="لا توجد بيانات تشغيلية مطابقة للفلاتر الحالية"
+        subtitle={
+          keetaActive
+            ? 'قم برفع تقارير HungerStation أو Keeta من مركز الاستيراد لعرض مؤشرات القيادة والبيانات التحليلية.'
+            : 'قم برفع تقارير HungerStation من مركز الاستيراد لعرض مؤشرات القيادة والبيانات التحليلية.'
+        }
+        icon={<Upload className="h-5 w-5" />}
+        action={
+          <Button variant="primary" icon={<Upload className="h-4 w-4" />} onClick={onGoToImport}>
+            الانتقال إلى مركز الاستيراد
+          </Button>
+        }
+      />
     );
   }
 
   return (
     <div className="space-y-6">
       {/* Executive Command Summary Strip (Answers 4 Executive Questions) */}
-      <div className="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-4">
-        <div className="rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 p-4">
+      <div className="grid grid-cols-1 gap-3.5 md:grid-cols-2 xl:grid-cols-4">
+        <Card padding="sm" className="space-y-1.5">
           <div className="flex items-center justify-between text-xs font-semibold text-slate-500 dark:text-slate-400">
             <span>1. الوضع التشغيلي الآن</span>
             <CheckCircle2 className="h-4 w-4 text-emerald-600 dark:text-emerald-400" />
           </div>
-          <div className="mt-2 text-lg font-bold text-slate-900 dark:text-slate-100 font-mono-num">
+          <div className="text-lg font-bold text-slate-900 dark:text-slate-100 font-mono-num">
             {fmtNum(metrics.activeRiders)} نشط · {fmtNum(metrics.completedOrders)} طلب
           </div>
-          <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">
-            نسبة الإنجاز {fmtPct(metrics.completionRate)} · الحضور {fmtPct(metrics.attendanceRate)}
+          <p className="text-xs text-slate-500 dark:text-slate-400">
+            نسبة الإنجاز <span className="font-mono-num font-semibold text-slate-700 dark:text-slate-300">{fmtPct(metrics.completionRate)}</span> · الحضور{' '}
+            <span className="font-mono-num font-semibold text-slate-700 dark:text-slate-300">{fmtPct(metrics.attendanceRate)}</span>
           </p>
-        </div>
+        </Card>
 
-        <div className="rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 p-4">
+        <Card padding="sm" className="space-y-1.5">
           <div className="flex items-center justify-between text-xs font-semibold text-slate-500 dark:text-slate-400">
             <span>2. الالتزام بالأهداف</span>
             <TrendingUp className="h-4 w-4 text-blue-600 dark:text-blue-400" />
           </div>
-          <div className="mt-2 text-lg font-bold text-slate-900 dark:text-slate-100 font-mono-num">
+          <div className="text-lg font-bold text-slate-900 dark:text-slate-100 font-mono-num">
             {fmtNum(riderScores.filter((r) => (r.totalScore ?? 0) >= 72).length)} متفوق ·{' '}
             <span className="text-red-700 dark:text-red-400">{fmtNum(metrics.lowPerformanceRidersCount)} دون الهدف</span>
           </div>
-          <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">
-            الفروع: {branches.filter((b) => b.healthStatus === 'يحتاج تدخل').length} فرع/مدينة تتطلب تدخلًا
+          <p className="text-xs text-slate-500 dark:text-slate-400">
+            الفروع: <span className="font-mono-num font-semibold">{branches.filter((b) => b.healthStatus === 'يحتاج تدخل').length}</span> فرع/مدينة تتطلب تدخلًا
           </p>
-        </div>
+        </Card>
 
         <button
           type="button"
           onClick={onGoToErrors}
-          className="text-right rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 p-4 hover:border-slate-300 dark:hover:border-slate-700 transition-colors"
+          className="text-right rounded-xl border border-slate-200/90 dark:border-slate-800 bg-white dark:bg-slate-900 p-4 hover:border-blue-400/70 dark:hover:border-blue-600/70 transition-colors space-y-1.5"
         >
           <div className="flex items-center justify-between text-xs font-semibold text-slate-500 dark:text-slate-400">
             <span>3. مواطن الخلل والشذوذ</span>
             <AlertTriangle className="h-4 w-4 text-amber-600 dark:text-amber-400" />
           </div>
-          <div className="mt-2 text-lg font-bold text-slate-900 dark:text-slate-100 font-mono-num">
+          <div className="text-lg font-bold text-slate-900 dark:text-slate-100 font-mono-num">
             {fmtNum(anomalies.length)} هبوط حاد · {fmtNum(metrics.overdueOrders)} متأخر
           </div>
-          <p className="mt-1 text-xs text-blue-700 dark:text-blue-400 inline-flex items-center gap-1">
+          <p className="text-xs font-semibold text-blue-700 dark:text-blue-400 inline-flex items-center gap-1">
             <span>فحص مركز أكواد الأخطاء</span>
             <ArrowUpLeft className="h-3 w-3" />
           </p>
@@ -349,59 +379,152 @@ export function OverviewDashboard({
         <button
           type="button"
           onClick={onGoToOperations}
-          className="text-right rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 p-4 hover:border-slate-300 dark:hover:border-slate-700 transition-colors"
+          className="text-right rounded-xl border border-slate-200/90 dark:border-slate-800 bg-white dark:bg-slate-900 p-4 hover:border-blue-400/70 dark:hover:border-blue-600/70 transition-colors space-y-1.5"
         >
           <div className="flex items-center justify-between text-xs font-semibold text-slate-500 dark:text-slate-400">
             <span>4. تدخل الإدارة اليوم</span>
             <ClipboardList className="h-4 w-4 text-red-600 dark:text-red-400" />
           </div>
-          <div className="mt-2 text-lg font-bold text-slate-900 dark:text-slate-100 font-mono-num">
+          <div className="text-lg font-bold text-slate-900 dark:text-slate-100 font-mono-num">
             {fmtNum(openCasesCount)} حالة مفتوحة ({fmtNum(criticalCasesCount)} حرجة)
           </div>
-          <p className="mt-1 text-xs text-blue-700 dark:text-blue-400 inline-flex items-center gap-1">
+          <p className="text-xs font-semibold text-blue-700 dark:text-blue-400 inline-flex items-center gap-1">
             <span>إدارة طابور التدخل والحالات</span>
             <ArrowUpLeft className="h-3 w-3" />
           </p>
         </button>
       </div>
 
-      {/* Period Comparisons with Strict Completeness Guard */}
-      <div className="rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 p-5 space-y-4">
-        <div className="flex flex-wrap items-center justify-between gap-3">
-          <div>
-            <h3 className="text-sm font-bold text-slate-900 dark:text-slate-100">مقارنات الفترات المرجعية</h3>
-            <p className="text-xs text-slate-500 dark:text-slate-400">
-              تظهر المقارنة فقط عند اكتمال نافذتي المقارنة لحماية الإدارة من قراءة نسب مضللة على فترات ناقصة.
-            </p>
-          </div>
-          <div className="flex items-center gap-1.5 rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-950 p-1">
-            {[
-              { id: 'daily', label: 'يوم مقابل يوم' },
-              { id: 'weekly', label: 'أسبوع مقابل أسبوع' },
-              { id: 'monthly', label: 'شهر مقابل شهر' },
-            ].map((t) => (
-              <button
-                key={t.id}
-                type="button"
-                onClick={() => setPeriodTab(t.id as 'daily' | 'weekly' | 'monthly')}
-                className={`rounded-md px-3 py-1.5 text-xs font-semibold transition-colors whitespace-nowrap ${
-                  periodTab === t.id
-                    ? 'bg-slate-900 dark:bg-blue-600 text-white'
-                    : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-slate-100'
-                }`}
-              >
-                {t.label}
-              </button>
-            ))}
-          </div>
+      {/* Exclusive Global Platform-to-Platform Executive Comparison */}
+      <Card className="space-y-4">
+        <SectionHeader
+          title={
+            keetaActive
+              ? 'مقارنة المنصتين التنفيذية (HungerStation vs Keeta)'
+              : 'ملخص الأداء التنفيذي لمنصة HungerStation'
+          }
+          subtitle={
+            keetaActive
+              ? 'متاحة حصريًا في المركز التنفيذي العام لمدير التشغيل دون أي خلط للمعرفات أو السجلات بين المنصتين.'
+              : 'عرض المؤشرات التشغيلية المجمعة للمنصات المفعّلة حاليًا.'
+          }
+          actions={
+            onOpenPlatformWorkspace && (
+              <>
+                <Button
+                  size="sm"
+                  variant="secondary"
+                  onClick={() => onOpenPlatformWorkspace('hungerstation')}
+                >
+                  <span>فتح مساحة HungerStation</span>
+                  <ArrowUpLeft className="h-3.5 w-3.5" />
+                </Button>
+                {keetaActive && (
+                  <Button
+                    size="sm"
+                    variant="accent"
+                    onClick={() => onOpenPlatformWorkspace('keeta')}
+                  >
+                    <span>فتح مساحة Keeta</span>
+                    <ArrowUpLeft className="h-3.5 w-3.5" />
+                  </Button>
+                )}
+              </>
+            )
+          }
+        />
+
+        <div className="overflow-x-auto rounded-lg border border-slate-200/80 dark:border-slate-800">
+          <table className="w-full text-xs">
+            <thead className="border-b border-slate-200 dark:border-slate-800 bg-slate-50/90 dark:bg-slate-950/70 text-slate-600 dark:text-slate-400">
+              <tr>
+                <th className="px-3.5 py-2.5 text-right font-semibold">المؤشر المقارن</th>
+                <th className="px-3.5 py-2.5 text-center font-semibold text-amber-800 dark:text-amber-300">HungerStation</th>
+                {keetaActive && <th className="px-3.5 py-2.5 text-center font-semibold text-blue-800 dark:text-blue-300">Keeta</th>}
+                <th className="px-3.5 py-2.5 text-center font-semibold">إجمالي الشركة / المجمع</th>
+                <th className="px-3.5 py-2.5 text-right font-semibold">تطابق التعريف</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-slate-100 dark:divide-slate-800/80">
+              <tr className="h-[42px] hover:bg-slate-50/70 dark:hover:bg-slate-800/40">
+                <td className="px-3.5 py-2 font-semibold text-slate-900 dark:text-slate-100">المندوبون (النشطون / الإجمالي)</td>
+                <td className="px-3.5 py-2 text-center font-mono-num">{fmtNum(platformComparison.hsMetrics.activeRiders)} / {fmtNum(platformComparison.hsMetrics.totalRiders)}</td>
+                {keetaActive && <td className="px-3.5 py-2 text-center font-mono-num">{fmtNum(platformComparison.ktMetrics.activeRiders)} / {fmtNum(platformComparison.ktMetrics.totalRiders)}</td>}
+                <td className="px-3.5 py-2 text-center font-mono-num font-bold text-slate-900 dark:text-slate-100">{fmtNum(metrics.activeRiders)} / {fmtNum(metrics.totalRiders)}</td>
+                <td className="px-3.5 py-2 text-slate-500 dark:text-slate-400">معرف منفصل لكل منصة</td>
+              </tr>
+              <tr className="h-[42px] hover:bg-slate-50/70 dark:hover:bg-slate-800/40">
+                <td className="px-3.5 py-2 font-semibold text-slate-900 dark:text-slate-100">الطلبات المكتملة / المسلمة</td>
+                <td className="px-3.5 py-2 text-center font-mono-num font-semibold text-emerald-700 dark:text-emerald-400">{fmtNum(platformComparison.hsMetrics.completedOrders)}</td>
+                {keetaActive && <td className="px-3.5 py-2 text-center font-mono-num font-semibold text-emerald-700 dark:text-emerald-400">{fmtNum(platformComparison.ktMetrics.completedOrders)}</td>}
+                <td className="px-3.5 py-2 text-center font-mono-num font-bold text-slate-900 dark:text-slate-100">{fmtNum(metrics.completedOrders)}</td>
+                <td className="px-3.5 py-2 text-slate-500 dark:text-slate-400">{keetaActive ? 'Completed Deliveries ⇄ Delivered Tasks' : 'Completed Deliveries'}</td>
+              </tr>
+              <tr className="h-[42px] hover:bg-slate-50/70 dark:hover:bg-slate-800/40">
+                <td className="px-3.5 py-2 font-semibold text-slate-900 dark:text-slate-100">ساعات العمل / الاتصال</td>
+                <td className="px-3.5 py-2 text-center font-mono-num">{fmtHours(platformComparison.hsMetrics.workingHours)}</td>
+                {keetaActive && <td className="px-3.5 py-2 text-center font-mono-num">{fmtHours(platformComparison.ktMetrics.workingHours)}</td>}
+                <td className="px-3.5 py-2 text-center font-mono-num font-bold text-slate-900 dark:text-slate-100">{fmtHours(metrics.workingHours)}</td>
+                <td className="px-3.5 py-2 text-slate-500 dark:text-slate-400">{keetaActive ? 'Actual Working Hours ⇄ Shift Online Hours' : 'Actual Working Hours'}</td>
+              </tr>
+              <tr className="h-[42px] hover:bg-slate-50/70 dark:hover:bg-slate-800/40">
+                <td className="px-3.5 py-2 font-semibold text-slate-900 dark:text-slate-100">معدل الحضور والالتزام %</td>
+                <td className="px-3.5 py-2 text-center font-mono-num">{fmtPct(platformComparison.hsMetrics.attendanceRate)}</td>
+                {keetaActive && <td className="px-3.5 py-2 text-center font-mono-num">{fmtPct(platformComparison.ktMetrics.attendanceRate)}</td>}
+                <td className="px-3.5 py-2 text-center font-mono-num font-bold">{fmtPct(metrics.attendanceRate)}</td>
+                <td className="px-3.5 py-2 text-slate-500 dark:text-slate-400">{keetaActive ? 'HS Attendance% ⇄ Keeta On-Shift?' : 'HS Attendance %'}</td>
+              </tr>
+              <tr className="h-[42px] hover:bg-slate-50/70 dark:hover:bg-slate-800/40">
+                <td className="px-3.5 py-2 font-semibold text-slate-900 dark:text-slate-100">معدل القبول / الإنجاز %</td>
+                <td className="px-3.5 py-2 text-center font-mono-num">{fmtPct(platformComparison.hsMetrics.acceptanceRate)} / {fmtPct(platformComparison.hsMetrics.completionRate)}</td>
+                {keetaActive && <td className="px-3.5 py-2 text-center font-mono-num">{fmtPct(platformComparison.ktMetrics.acceptanceRate)} / {fmtPct(platformComparison.ktMetrics.completionRate)}</td>}
+                <td className="px-3.5 py-2 text-center font-mono-num font-bold">{fmtPct(metrics.acceptanceRate)} / {fmtPct(metrics.completionRate)}</td>
+                <td className="px-3.5 py-2 text-slate-500 dark:text-slate-400">متكافئ</td>
+              </tr>
+              <tr className="h-[42px] hover:bg-slate-50/70 dark:hover:bg-slate-800/40">
+                <td className="px-3.5 py-2 font-semibold text-slate-900 dark:text-slate-100">المسافة المستحقة (Payable KM)</td>
+                <td className="px-3.5 py-2 text-center font-mono-num">{fmtKm(platformComparison.hsMetrics.payableKm)}</td>
+                {keetaActive && <td className="px-3.5 py-2 text-center font-mono-num">{fmtKm(platformComparison.ktMetrics.payableKm)}</td>}
+                <td className="px-3.5 py-2 text-center font-mono-num font-bold">{fmtKm(metrics.payableKm)}</td>
+                <td className="px-3.5 py-2 text-slate-500 dark:text-slate-400">{keetaActive ? 'Riders Distance ⇄ Keeta VDA' : 'Riders Distance'}</td>
+              </tr>
+              <tr className="h-[42px] hover:bg-slate-50/70 dark:hover:bg-slate-800/40">
+                <td className="px-3.5 py-2 font-semibold text-slate-900 dark:text-slate-100">الحالات التشغيلية المفتوحة</td>
+                <td className="px-3.5 py-2 text-center font-mono-num text-amber-700 dark:text-amber-400">{fmtNum(platformComparison.hsCasesOpen)}</td>
+                {keetaActive && <td className="px-3.5 py-2 text-center font-mono-num text-amber-700 dark:text-amber-400">{fmtNum(platformComparison.ktCasesOpen)}</td>}
+                <td className="px-3.5 py-2 text-center font-mono-num font-bold">{fmtNum(openCasesCount)}</td>
+                <td className="px-3.5 py-2 text-slate-500 dark:text-slate-400">معزولة حسب المنصة</td>
+              </tr>
+            </tbody>
+          </table>
         </div>
+      </Card>
+
+      {/* Period Comparisons with Strict Completeness Guard */}
+      <Card className="space-y-4">
+        <SectionHeader
+          title="مقارنات الفترات المرجعية"
+          subtitle="تظهر المقارنة فقط عند اكتمال نافذتي المقارنة لحماية الإدارة من قراءة نسب مضللة على فترات ناقصة."
+          actions={
+            <Tabs
+              variant="segmented"
+              activeKey={periodTab}
+              onChange={(k) => setPeriodTab(k)}
+              items={[
+                { key: 'daily', label: 'يوم مقابل يوم' },
+                { key: 'weekly', label: 'أسبوع مقابل أسبوع' },
+                { key: 'monthly', label: 'شهر مقابل شهر' },
+              ]}
+            />
+          }
+        />
 
         {activePeriod.status === 'incomplete' ? (
           <div className="flex items-start gap-3 rounded-lg border border-amber-200 dark:border-amber-800/70 bg-amber-50 dark:bg-amber-950/40 p-4 text-xs text-amber-900 dark:text-amber-200">
             <ShieldAlert className="h-4 w-4 shrink-0 mt-0.5" />
             <div>
               <div className="font-bold">فترة مرجعية غير مكتملة — تم حجب المقارنة الإجمالية</div>
-              <p className="mt-1">{activePeriod.incompleteReason}</p>
+              <p className="mt-1 leading-relaxed">{activePeriod.incompleteReason}</p>
               <div className="mt-1.5 font-mono-num text-[11px] opacity-80">
                 النطاق الحالي: {activePeriod.currentRangeLabel} ({activePeriod.currentDaysCount} يوم) · المرجعي:{' '}
                 {activePeriod.previousRangeLabel} ({activePeriod.previousDaysCount} يوم)
@@ -448,13 +571,13 @@ export function OverviewDashboard({
             />
           </div>
         )}
-      </div>
+      </Card>
 
       {/* 14 Clickable Executive KPIs */}
-      <div>
-        <div className="mb-2 flex items-center justify-between text-xs text-slate-500 dark:text-slate-400">
-          <span className="font-semibold text-slate-700 dark:text-slate-300">المؤشرات التشغيلية التنفيذية (اضغط على أي مؤشر للتنقيب والتفاصيل)</span>
-          <span>14 مؤشرًا فعليًا</span>
+      <div className="space-y-2.5">
+        <div className="flex items-center justify-between text-xs text-slate-500 dark:text-slate-400">
+          <span className="font-bold text-slate-800 dark:text-slate-200">المؤشرات التشغيلية التنفيذية (اضغط على أي مؤشر للتنقيب والتفاصيل)</span>
+          <StatusBadge label="14 مؤشرًا فعليًا" tone="neutral" className="font-mono-num" />
         </div>
         <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-7">
           <KpiCard
@@ -544,11 +667,11 @@ export function OverviewDashboard({
 
       {/* Charts */}
       <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">
-        <div className="rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 p-5">
-          <div className="mb-4 flex items-center justify-between">
-            <h3 className="text-sm font-bold text-slate-900 dark:text-slate-100">الطلبات المكتملة اليومية حسب المنصة</h3>
-            <span className="text-xs text-slate-500 dark:text-slate-400">HungerStation · Keeta</span>
-          </div>
+        <Card className="space-y-4">
+          <SectionHeader
+            title="الطلبات المكتملة اليومية حسب المنصة"
+            actions={<span className="text-xs text-slate-500 dark:text-slate-400">{keetaActive ? 'HungerStation · Keeta' : 'HungerStation'}</span>}
+          />
           <div className="h-72 w-full" dir="ltr">
             <ResponsiveContainer width="100%" height="100%">
               <BarChart data={dailySeries}>
@@ -558,17 +681,17 @@ export function OverviewDashboard({
                 <Tooltip />
                 <Legend />
                 <Bar dataKey="hungerOrders" name="HungerStation" fill="#d97706" radius={[4, 4, 0, 0]} />
-                <Bar dataKey="keetaOrders" name="Keeta" fill="#1d4ed8" radius={[4, 4, 0, 0]} />
+                {keetaActive && <Bar dataKey="keetaOrders" name="Keeta" fill="#2563eb" radius={[4, 4, 0, 0]} />}
               </BarChart>
             </ResponsiveContainer>
           </div>
-        </div>
+        </Card>
 
-        <div className="rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 p-5">
-          <div className="mb-4 flex items-center justify-between">
-            <h3 className="text-sm font-bold text-slate-900 dark:text-slate-100">اتجاه ساعات العمل والاتصال اليومية</h3>
-            <span className="text-xs text-slate-500 dark:text-slate-400">الساعات المسجلة يوميًا</span>
-          </div>
+        <Card className="space-y-4">
+          <SectionHeader
+            title="اتجاه ساعات العمل والاتصال اليومية"
+            actions={<span className="text-xs text-slate-500 dark:text-slate-400">الساعات المسجلة يوميًا</span>}
+          />
           <div className="h-72 w-full" dir="ltr">
             <ResponsiveContainer width="100%" height="100%">
               <LineChart data={dailySeries}>
@@ -578,30 +701,29 @@ export function OverviewDashboard({
                 <Tooltip />
                 <Legend />
                 <Line type="monotone" dataKey="hungerHours" name="HungerStation (س)" stroke="#d97706" strokeWidth={2} dot={false} />
-                <Line type="monotone" dataKey="keetaHours" name="Keeta (س)" stroke="#16a34a" strokeWidth={2} dot={false} />
+                {keetaActive && <Line type="monotone" dataKey="keetaHours" name="Keeta (س)" stroke="#0d9488" strokeWidth={2} dot={false} />}
               </LineChart>
             </ResponsiveContainer>
           </div>
-        </div>
+        </Card>
       </div>
 
-      {/* Top & Bottom Riders + Branch Health */}
+      {/* Top & Bottom Riders */}
       <div className="grid grid-cols-1 gap-6 xl:grid-cols-2">
-        {/* Top Performers */}
-        <div className="rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 p-5 space-y-3">
-          <div className="flex items-center justify-between">
-            <h3 className="text-sm font-bold text-slate-900 dark:text-slate-100">أعلى المندوبين أداءً (وفق النتيجة الموزونة)</h3>
-            <span className="text-xs text-emerald-700 dark:text-emerald-400 font-semibold">أفضل {topPerformers.length}</span>
-          </div>
-          <div className="overflow-x-auto">
+        <Card className="space-y-3">
+          <SectionHeader
+            title="أعلى المندوبين أداءً (وفق النتيجة الموزونة)"
+            actions={<StatusBadge tone="success" label={`أفضل ${topPerformers.length}`} />}
+          />
+          <div className="overflow-x-auto rounded-lg border border-slate-200/80 dark:border-slate-800">
             <table className="w-full text-xs">
-              <thead className="border-b border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-950/60 text-slate-600 dark:text-slate-400">
+              <thead className="border-b border-slate-200 dark:border-slate-800 bg-slate-50/90 dark:bg-slate-950/70 text-slate-600 dark:text-slate-400">
                 <tr>
-                  <th className="px-3 py-2 text-right">المندوب</th>
-                  <th className="px-3 py-2 text-right">المنصة</th>
-                  <th className="px-3 py-2 text-center">الطلبات</th>
-                  <th className="px-3 py-2 text-center">متوسط/يوم</th>
-                  <th className="px-3 py-2 text-center">التقييم</th>
+                  <th className="px-3 py-2 text-right font-semibold">المندوب</th>
+                  <th className="px-3 py-2 text-right font-semibold">المنصة</th>
+                  <th className="px-3 py-2 text-center font-semibold">الطلبات</th>
+                  <th className="px-3 py-2 text-center font-semibold">متوسط/يوم</th>
+                  <th className="px-3 py-2 text-center font-semibold">التقييم</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
@@ -609,7 +731,7 @@ export function OverviewDashboard({
                   <tr
                     key={`top:${r.platform}:${r.riderId}`}
                     onClick={() => onSelectRider(r.platform, r.riderId)}
-                    className="cursor-pointer hover:bg-slate-50 dark:hover:bg-slate-800/60"
+                    className="h-[42px] cursor-pointer hover:bg-slate-50 dark:hover:bg-slate-800/60"
                   >
                     <td className="px-3 py-2">
                       <div className="font-semibold text-slate-900 dark:text-slate-100">{r.riderName}</div>
@@ -626,23 +748,22 @@ export function OverviewDashboard({
               </tbody>
             </table>
           </div>
-        </div>
+        </Card>
 
-        {/* Bottom Performers */}
-        <div className="rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 p-5 space-y-3">
-          <div className="flex items-center justify-between">
-            <h3 className="text-sm font-bold text-slate-900 dark:text-slate-100">الأقل أداءً (يتطلبون متابعة إشرافية)</h3>
-            <span className="text-xs text-red-700 dark:text-red-400 font-semibold">أولوية المتابعة</span>
-          </div>
-          <div className="overflow-x-auto">
+        <Card className="space-y-3">
+          <SectionHeader
+            title="الأقل أداءً (يتطلبون متابعة إشرافية)"
+            actions={<StatusBadge tone="danger" label="أولوية المتابعة" />}
+          />
+          <div className="overflow-x-auto rounded-lg border border-slate-200/80 dark:border-slate-800">
             <table className="w-full text-xs">
-              <thead className="border-b border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-950/60 text-slate-600 dark:text-slate-400">
+              <thead className="border-b border-slate-200 dark:border-slate-800 bg-slate-50/90 dark:bg-slate-950/70 text-slate-600 dark:text-slate-400">
                 <tr>
-                  <th className="px-3 py-2 text-right">المندوب</th>
-                  <th className="px-3 py-2 text-right">المنصة</th>
-                  <th className="px-3 py-2 text-center">الطلبات</th>
-                  <th className="px-3 py-2 text-center">متوسط/يوم</th>
-                  <th className="px-3 py-2 text-center">التقييم</th>
+                  <th className="px-3 py-2 text-right font-semibold">المندوب</th>
+                  <th className="px-3 py-2 text-right font-semibold">المنصة</th>
+                  <th className="px-3 py-2 text-center font-semibold">الطلبات</th>
+                  <th className="px-3 py-2 text-center font-semibold">متوسط/يوم</th>
+                  <th className="px-3 py-2 text-center font-semibold">التقييم</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
@@ -650,7 +771,7 @@ export function OverviewDashboard({
                   <tr
                     key={`bot:${r.platform}:${r.riderId}`}
                     onClick={() => onSelectRider(r.platform, r.riderId)}
-                    className="cursor-pointer hover:bg-slate-50 dark:hover:bg-slate-800/60"
+                    className="h-[42px] cursor-pointer hover:bg-slate-50 dark:hover:bg-slate-800/60"
                   >
                     <td className="px-3 py-2">
                       <div className="font-semibold text-slate-900 dark:text-slate-100">{r.riderName}</div>
@@ -667,49 +788,48 @@ export function OverviewDashboard({
               </tbody>
             </table>
           </div>
-        </div>
+        </Card>
       </div>
 
       {/* Branches Scorecards + Anomalies */}
       <div className="grid grid-cols-1 gap-6 xl:grid-cols-2">
-        <div className="rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 p-5 space-y-3">
-          <div className="flex items-center justify-between">
-            <h3 className="text-sm font-bold text-slate-900 dark:text-slate-100">أداء الفروع والمدن الفعلية</h3>
-            <span className="text-xs text-slate-500 dark:text-slate-400">{branches.length} فرع / مدينة</span>
-          </div>
+        <Card className="space-y-3">
+          <SectionHeader
+            title="أداء الفروع والمدن الفعلية"
+            actions={<span className="font-mono-num text-xs text-slate-500 dark:text-slate-400">{branches.length} فرع / مدينة</span>}
+          />
           {branches.length === 0 ? (
-            <p className="text-xs text-slate-500 dark:text-slate-400 py-4">لا توجد بيانات فروع مسجلة في هذا النطاق.</p>
+            <EmptyState title="لا توجد بيانات فروع مسجلة في هذا النطاق" />
           ) : (
-            <div className="overflow-x-auto">
+            <div className="overflow-x-auto rounded-lg border border-slate-200/80 dark:border-slate-800">
               <table className="w-full text-xs">
-                <thead className="border-b border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-950/60 text-slate-600 dark:text-slate-400">
+                <thead className="border-b border-slate-200 dark:border-slate-800 bg-slate-50/90 dark:bg-slate-950/70 text-slate-600 dark:text-slate-400">
                   <tr>
-                    <th className="px-3 py-2 text-right">الفرع / المدينة</th>
-                    <th className="px-3 py-2 text-center">المندوبون</th>
-                    <th className="px-3 py-2 text-center">الطلبات</th>
-                    <th className="px-3 py-2 text-center">الإنجاز %</th>
-                    <th className="px-3 py-2 text-center">الوضع</th>
+                    <th className="px-3 py-2 text-right font-semibold">الفرع / المدينة</th>
+                    <th className="px-3 py-2 text-center font-semibold">المندوبون</th>
+                    <th className="px-3 py-2 text-center font-semibold">الطلبات</th>
+                    <th className="px-3 py-2 text-center font-semibold">الإنجاز %</th>
+                    <th className="px-3 py-2 text-center font-semibold">الوضع</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
                   {branches.slice(0, 8).map((b) => (
-                    <tr key={b.branchName}>
+                    <tr key={b.branchName} className="h-[42px] hover:bg-slate-50/60 dark:hover:bg-slate-800/40">
                       <td className="px-3 py-2 font-semibold text-slate-900 dark:text-slate-100">{b.branchName}</td>
                       <td className="px-3 py-2 text-center font-mono-num">{b.activeRidersCount}/{b.ridersCount}</td>
                       <td className="px-3 py-2 text-center font-mono-num font-semibold">{fmtNum(b.completedOrders)}</td>
                       <td className="px-3 py-2 text-center font-mono-num">{fmtPct(b.completionRate)}</td>
                       <td className="px-3 py-2 text-center">
-                        <span
-                          className={`font-semibold ${
+                        <StatusBadge
+                          label={b.healthStatus}
+                          tone={
                             b.healthStatus === 'يحتاج تدخل'
-                              ? 'text-red-700 dark:text-red-400'
+                              ? 'danger'
                               : b.healthStatus === 'ممتاز'
-                                ? 'text-emerald-700 dark:text-emerald-400'
-                                : 'text-slate-600 dark:text-slate-300'
-                          }`}
-                        >
-                          {b.healthStatus}
-                        </span>
+                                ? 'success'
+                                : 'info'
+                          }
+                        />
                       </td>
                     </tr>
                   ))}
@@ -717,60 +837,58 @@ export function OverviewDashboard({
               </table>
             </div>
           )}
-        </div>
+        </Card>
 
-        <div className="rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 p-5 space-y-3">
-          <div className="flex items-center justify-between">
-            <h3 className="text-sm font-bold text-slate-900 dark:text-slate-100">رصد التراجع المفاجئ والانخفاض المتتالي</h3>
-            <TrendingDown className="h-4 w-4 text-amber-600 dark:text-amber-400" />
-          </div>
+        <Card className="space-y-3">
+          <SectionHeader
+            title="رصد التراجع المفاجئ والانخفاض المتتالي"
+            actions={<TrendingDown className="h-4 w-4 text-amber-600 dark:text-amber-400" />}
+          />
           {anomalies.length === 0 ? (
-            <p className="text-xs text-slate-500 dark:text-slate-400 py-4">لا توجد أنماط هبوط حاد أو تراجع متتالي خلال هذا النطاق.</p>
+            <EmptyState title="لا توجد أنماط هبوط حاد أو تراجع متتالي خلال هذا النطاق" />
           ) : (
-            <div className="space-y-2 max-h-64 overflow-y-auto">
+            <div className="space-y-2 max-h-72 overflow-y-auto erp-scroll">
               {anomalies.slice(0, 8).map((a) => (
                 <button
                   key={a.id}
                   type="button"
                   onClick={() => onSelectRider(a.platform, a.riderId)}
-                  className="w-full text-right rounded-lg border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-950/60 p-3 hover:border-slate-300 dark:hover:border-slate-700 transition-colors"
+                  className="w-full text-right rounded-lg border border-slate-200 dark:border-slate-800 bg-slate-50/80 dark:bg-slate-950/60 p-3 hover:border-blue-400/70 dark:hover:border-blue-600/70 transition-colors"
                 >
                   <div className="flex items-center justify-between gap-2 text-xs">
-                    <span className={`font-bold ${a.severity === 'critical' ? 'text-red-700 dark:text-red-400' : 'text-amber-700 dark:text-amber-400'}`}>
-                      {a.title}
-                    </span>
-                    <span className="font-mono-num text-slate-500 dark:text-slate-400">
+                    <StatusBadge
+                      label={a.title}
+                      tone={a.severity === 'critical' ? 'danger' : 'warning'}
+                    />
+                    <span className="font-mono-num text-[11px] text-slate-500 dark:text-slate-400">
                       {a.platform === 'hungerstation' ? 'HS' : 'Keeta'} · {a.riderId}
                     </span>
                   </div>
-                  <p className="mt-1 text-xs text-slate-600 dark:text-slate-300">{a.description}</p>
+                  <p className="mt-1.5 text-xs text-slate-600 dark:text-slate-300 leading-relaxed">{a.description}</p>
                 </button>
               ))}
             </div>
           )}
-        </div>
+        </Card>
       </div>
 
-      {/* KPI Drilldown Drawer / Modal */}
-      {drilldownData && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/65 p-4" role="dialog" aria-modal="true">
-          <div className="w-full max-w-4xl max-h-[85vh] flex flex-col rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 shadow-2xl overflow-hidden">
-            <div className="flex items-center justify-between border-b border-slate-200 dark:border-slate-800 px-5 py-4">
-              <div>
-                <h3 className="text-base font-bold text-slate-900 dark:text-slate-100">{drilldownData.title}</h3>
-                <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5">{drilldownData.note}</p>
-              </div>
-              <button
-                type="button"
-                onClick={() => setDrilldownKey(null)}
-                className="rounded-lg p-1.5 text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-800 hover:text-slate-700 dark:hover:text-slate-200"
-              >
-                <X className="h-5 w-5" />
-              </button>
-            </div>
-
+      {/* KPI Drilldown RTL SlideDrawer */}
+      <SlideDrawer
+        open={Boolean(drilldownData)}
+        onClose={() => setDrilldownKey(null)}
+        title={drilldownData?.title || 'تفاصيل المؤشر'}
+        subtitle={drilldownData?.note}
+        size="xl"
+        footer={
+          <Button variant="secondary" onClick={() => setDrilldownKey(null)}>
+            إغلاق
+          </Button>
+        }
+      >
+        {drilldownData && (
+          <div className="space-y-4">
             {drilldownData.def && (
-              <div className="border-b border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-950/60 px-5 py-3 text-xs space-y-1">
+              <div className="rounded-xl border border-slate-200 dark:border-slate-800 bg-slate-50/80 dark:bg-slate-950/60 p-4 text-xs space-y-1.5">
                 <div>
                   <span className="font-bold text-slate-700 dark:text-slate-300">الحقول المصدرية: </span>
                   <span className="font-mono-num text-slate-600 dark:text-slate-400">{drilldownData.def.exactFields}</span>
@@ -786,18 +904,18 @@ export function OverviewDashboard({
               </div>
             )}
 
-            <div className="flex-1 overflow-auto p-5">
+            <div className="overflow-x-auto rounded-lg border border-slate-200 dark:border-slate-800">
               <table className="w-full text-xs">
-                <thead className="border-b border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-950/60 text-slate-600 dark:text-slate-400">
+                <thead className="border-b border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-950/70 text-slate-600 dark:text-slate-400">
                   <tr>
-                    <th className="px-3 py-2 text-right">التاريخ</th>
-                    <th className="px-3 py-2 text-right">المنصة</th>
-                    <th className="px-3 py-2 text-right">المندوب</th>
-                    <th className="px-3 py-2 text-center">الطلبات</th>
-                    <th className="px-3 py-2 text-center">الساعات</th>
-                    <th className="px-3 py-2 text-center">الحضور %</th>
-                    <th className="px-3 py-2 text-center">الإنجاز %</th>
-                    <th className="px-3 py-2 text-center">المسافة</th>
+                    <th className="px-3 py-2.5 text-right font-semibold">التاريخ</th>
+                    <th className="px-3 py-2.5 text-right font-semibold">المنصة</th>
+                    <th className="px-3 py-2.5 text-right font-semibold">المندوب</th>
+                    <th className="px-3 py-2.5 text-center font-semibold">الطلبات</th>
+                    <th className="px-3 py-2.5 text-center font-semibold">الساعات</th>
+                    <th className="px-3 py-2.5 text-center font-semibold">الحضور %</th>
+                    <th className="px-3 py-2.5 text-center font-semibold">الإنجاز %</th>
+                    <th className="px-3 py-2.5 text-center font-semibold">المسافة</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
@@ -808,7 +926,7 @@ export function OverviewDashboard({
                         setDrilldownKey(null);
                         onSelectRider(r.platform, r.riderId);
                       }}
-                      className="cursor-pointer hover:bg-slate-50 dark:hover:bg-slate-800/60"
+                      className="h-[42px] cursor-pointer hover:bg-slate-50 dark:hover:bg-slate-800/60"
                     >
                       <td className="px-3 py-2 font-mono-num">{r.date}</td>
                       <td className="px-3 py-2">{r.platform === 'hungerstation' ? 'HungerStation' : 'Keeta'}</td>
@@ -824,15 +942,16 @@ export function OverviewDashboard({
                   ))}
                 </tbody>
               </table>
-              {drilldownData.rows.length > 60 && (
-                <div className="mt-3 text-center text-xs text-slate-500 dark:text-slate-400">
-                  يتم عرض أول 60 سجلًا من أصل {drilldownData.rows.length}. استخدم التبويبات التشغيلية لعرض السجل الكامل.
-                </div>
-              )}
             </div>
+
+            {drilldownData.rows.length > 60 && (
+              <div className="text-center text-xs text-slate-500 dark:text-slate-400">
+                يتم عرض أول 60 سجلًا من أصل <span className="font-mono-num font-semibold">{drilldownData.rows.length}</span>. استخدم التبويبات التشغيلية لعرض السجل الكامل.
+              </div>
+            )}
           </div>
-        </div>
-      )}
+        )}
+      </SlideDrawer>
     </div>
   );
 }
@@ -853,16 +972,14 @@ function PeriodMetricCell({
   range?: string;
 }) {
   return (
-    <div className="rounded-lg border border-slate-200 dark:border-slate-800 bg-slate-50/70 dark:bg-slate-950/60 p-3">
-      <div className="text-[11px] font-medium text-slate-500 dark:text-slate-400">{label}</div>
-      <div className="mt-1 flex items-baseline justify-between gap-2">
+    <div className="rounded-lg border border-slate-200 dark:border-slate-800 bg-slate-50/70 dark:bg-slate-950/60 p-3 space-y-1">
+      <div className="text-[11px] font-semibold text-slate-500 dark:text-slate-400">{label}</div>
+      <div className="flex items-baseline justify-between gap-2">
         <span className="text-base font-bold font-mono-num text-slate-900 dark:text-slate-100">{current}</span>
-        <span className={`text-xs font-mono-num font-semibold ${positive ? 'text-emerald-700 dark:text-emerald-400' : 'text-red-700 dark:text-red-400'}`}>
-          {delta}
-        </span>
+        <StatusBadge label={delta} tone={positive ? 'success' : 'danger'} className="font-mono-num" />
       </div>
-      <div className="mt-1 text-[11px] font-mono-num text-slate-500 dark:text-slate-400">السابق: {previous}</div>
-      {range && <div className="mt-0.5 text-[10px] font-mono-num text-slate-400 dark:text-slate-500 truncate">{range}</div>}
+      <div className="text-[11px] font-mono-num text-slate-500 dark:text-slate-400">السابق: {previous}</div>
+      {range && <div className="text-[10px] font-mono-num text-slate-400 dark:text-slate-500 truncate">{range}</div>}
     </div>
   );
 }

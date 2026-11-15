@@ -23,12 +23,14 @@ import type {
   KeetaDashboardDaily,
   KeetaVdaDaily,
   MonthlySummary,
+  Platform,
   UserProfile,
 } from '../types/fleet';
 import {
   BOOTSTRAPPED_OWNER_EMAIL,
   db,
   getDriveAccessToken,
+  getUserAllowedPlatforms,
   handleFirestoreError,
   OperationType,
   refreshDriveTokenWithPopup,
@@ -174,10 +176,12 @@ export async function previewExcelInBrowser(params: {
   localFiles: File[];
   driveFiles: Array<{ id: string; name: string }>;
   user: UserProfile;
+  expectedPlatform?: Platform;
 }): Promise<{ previewId: string; files: ImportPreviewResult[] }> {
   const ExcelJSClass = await getBrowserExcelJS();
   const isBootOwner = params.user.email.trim().toLowerCase() === BOOTSTRAPPED_OWNER_EMAIL;
   const allowedUids = await getAllowedTeamUids(params.user.uid, isBootOwner);
+  const userPlatforms = getUserAllowedPlatforms(params.user);
 
   const items: Array<{ data: ArrayBuffer; fileName: string; sourceType: 'local' | 'google_drive'; driveFileId?: string }> = [];
 
@@ -229,6 +233,17 @@ export async function previewExcelInBrowser(params: {
       createWorkbook: () => new ExcelJSClass.Workbook(),
       sha256: sha256Hex,
     });
+    if (!userPlatforms.includes(parsed.platform)) {
+      const pName = parsed.platform === 'hungerstation' ? 'HungerStation' : 'Keeta';
+      throw new Error(`صلاحيات حسابك لا تسمح باستيراد ملفات منصة ${pName} (${parsed.fileName}).`);
+    }
+    if (params.expectedPlatform && parsed.platform !== params.expectedPlatform) {
+      const expectedLabel = params.expectedPlatform === 'hungerstation' ? 'HungerStation' : 'Keeta';
+      const detectedLabel = parsed.platform === 'hungerstation' ? 'HungerStation' : 'Keeta';
+      throw new Error(
+        `تم رفض الملف "${parsed.fileName}": أنت داخل مركز استيراد ${expectedLabel} بينما الملف ينتمي إلى منصة ${detectedLabel}. يرجى رفعه في مساحة العمل المخصصة له.`
+      );
+    }
     parsedList.push(parsed);
 
     const targetCols = new Set(parsed.records.map((r) => r.collection));
@@ -238,6 +253,7 @@ export async function previewExcelInBrowser(params: {
     let updatedCount = 0;
     let duplicateCount = 0;
     const sheetStatMap = new Map(parsed.sheetDiagnostics.map((s) => [s.sheetName, s]));
+    const previewQuotaBySheet = new Map<string, number>();
     const previewRows: ImportPreviewResult['previewRows'] = [];
 
     for (const rec of parsed.records) {
@@ -258,7 +274,9 @@ export async function previewExcelInBrowser(params: {
         if (diag) diag.updatedCount++;
       }
 
-      if (previewRows.length < 40) {
+      const sheetShown = previewQuotaBySheet.get(rec.data.sourceSheet) || 0;
+      if (previewRows.length < 80 && sheetShown < 20) {
+        previewQuotaBySheet.set(rec.data.sourceSheet, sheetShown + 1);
         const dateOrPeriod =
           'date' in rec.data
             ? rec.data.date
@@ -509,9 +527,27 @@ async function recomputeSummariesClient(params: {
       const workingHours = rows.reduce((s, r) => s + (r.shiftOnlineHours ?? 0), 0);
       const validHours = rows.reduce((s, r) => s + (r.shiftValidOnlineTime ?? 0), 0);
       const overdueOrders = rows.reduce((s, r) => s + (r.overdueOrderTasks ?? 0), 0);
-      const compRates = rows.map((r) => r.completionRate).filter((v): v is number => v !== null);
-      const onTimeRates = rows.map((r) => r.onTimeRate).filter((v): v is number => v !== null);
-      const cancelRates = rows.map((r) => r.cancellationRate).filter((v): v is number => v !== null);
+
+      let compWeightedSum = 0;
+      let compWeightTotal = 0;
+      let onTimeWeightedSum = 0;
+      let onTimeWeightTotal = 0;
+      let cancelledEstTotal = 0;
+      for (const r of rows) {
+        if (r.completionRate !== null) {
+          const w = r.acceptedTasks !== null && r.acceptedTasks > 0 ? r.acceptedTasks : 1;
+          compWeightedSum += r.completionRate * w;
+          compWeightTotal += w;
+        }
+        if (r.onTimeRate !== null) {
+          const w = r.deliveredTasks !== null && r.deliveredTasks > 0 ? r.deliveredTasks : 1;
+          onTimeWeightedSum += r.onTimeRate * w;
+          onTimeWeightTotal += w;
+        }
+        if (r.cancellationRate !== null && r.acceptedTasks !== null && r.acceptedTasks > 0) {
+          cancelledEstTotal += (r.cancellationRate / 100) * r.acceptedTasks;
+        }
+      }
 
       const summaryKey = `keeta_${date}`;
       const docData: Omit<DailySummary, 'updatedAt'> & { updatedAt: unknown } = {
@@ -524,15 +560,15 @@ async function recomputeSummariesClient(params: {
         completedOrders,
         acceptedOrders,
         rejectedOrders,
-        cancelledOrders: cancelRates.length ? Math.round((cancelRates.reduce((a, b) => a + b, 0) / 100 / cancelRates.length) * acceptedOrders) : 0,
+        cancelledOrders: Math.round(cancelledEstTotal),
         workingHours: Number(workingHours.toFixed(2)),
         validHours: Number(validHours.toFixed(2)),
         totalKm: Number(dist.totalKm.toFixed(2)),
         payableKm: Number(dist.payableKm.toFixed(2)),
         overdueOrders,
         avgAcceptanceRate: acceptedOrders + rejectedOrders > 0 ? Number(((acceptedOrders / (acceptedOrders + rejectedOrders)) * 100).toFixed(2)) : 0,
-        avgCompletionRate: compRates.length ? Number((compRates.reduce((a, b) => a + b, 0) / compRates.length).toFixed(2)) : 0,
-        avgOnTimeRate: onTimeRates.length ? Number((onTimeRates.reduce((a, b) => a + b, 0) / onTimeRates.length).toFixed(2)) : 0,
+        avgCompletionRate: compWeightTotal > 0 ? Number((compWeightedSum / compWeightTotal).toFixed(2)) : 0,
+        avgOnTimeRate: onTimeWeightTotal > 0 ? Number((onTimeWeightedSum / onTimeWeightTotal).toFixed(2)) : 0,
         avgAttendanceRate: uniqueRiders.size > 0 ? Number(((rows.filter((r) => (r.onShift || '').toLowerCase() === 'yes' || (r.onShift || '') === '1' || (r.onShift || '').toLowerCase() === 'true').length / uniqueRiders.size) * 100).toFixed(2)) : 0,
         createdByUid: user.uid,
         allowedUids,
@@ -553,8 +589,23 @@ async function recomputeSummariesClient(params: {
       const totalKm = mVda.reduce((s, v) => s + (v.totalDeliveryDistance ?? 0), 0);
       const payableKm = mVda.reduce((s, v) => s + (v.payableDistance ?? 0), 0);
       const overdueOrders = mRows.reduce((s, r) => s + (r.overdueOrderTasks ?? 0), 0);
-      const compRates = mRows.map((r) => r.completionRate).filter((v): v is number => v !== null);
-      const onTimeRates = mRows.map((r) => r.onTimeRate).filter((v): v is number => v !== null);
+
+      let compWeightedSum = 0;
+      let compWeightTotal = 0;
+      let onTimeWeightedSum = 0;
+      let onTimeWeightTotal = 0;
+      for (const r of mRows) {
+        if (r.completionRate !== null) {
+          const w = r.acceptedTasks !== null && r.acceptedTasks > 0 ? r.acceptedTasks : 1;
+          compWeightedSum += r.completionRate * w;
+          compWeightTotal += w;
+        }
+        if (r.onTimeRate !== null) {
+          const w = r.deliveredTasks !== null && r.deliveredTasks > 0 ? r.deliveredTasks : 1;
+          onTimeWeightedSum += r.onTimeRate * w;
+          onTimeWeightTotal += w;
+        }
+      }
 
       const mKey = `keeta_${month}`;
       const mDoc: Omit<MonthlySummary, 'updatedAt'> & { updatedAt: unknown } = {
@@ -569,8 +620,8 @@ async function recomputeSummariesClient(params: {
         payableKm: Number(payableKm.toFixed(2)),
         overdueOrders,
         avgAcceptanceRate: acceptedOrders + rejectedOrders > 0 ? Number(((acceptedOrders / (acceptedOrders + rejectedOrders)) * 100).toFixed(2)) : 0,
-        avgCompletionRate: compRates.length ? Number((compRates.reduce((a, b) => a + b, 0) / compRates.length).toFixed(2)) : 0,
-        avgOnTimeRate: onTimeRates.length ? Number((onTimeRates.reduce((a, b) => a + b, 0) / onTimeRates.length).toFixed(2)) : 0,
+        avgCompletionRate: compWeightTotal > 0 ? Number((compWeightedSum / compWeightTotal).toFixed(2)) : 0,
+        avgOnTimeRate: onTimeWeightTotal > 0 ? Number((onTimeWeightedSum / onTimeWeightTotal).toFixed(2)) : 0,
         avgAttendanceRate: mRows.length > 0 ? Number(((mRows.filter((r) => (r.onShift || '').toLowerCase() === 'yes' || (r.onShift || '') === '1' || (r.onShift || '').toLowerCase() === 'true').length / mRows.length) * 100).toFixed(2)) : 0,
         createdByUid: user.uid,
         allowedUids,

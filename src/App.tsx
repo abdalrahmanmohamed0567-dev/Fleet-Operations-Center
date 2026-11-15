@@ -1,14 +1,21 @@
 import { collection, getDocs, query, where } from 'firebase/firestore';
-import { lazy, Suspense, useCallback, useEffect, useMemo, useState } from 'react';
+import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { AuthGate } from './components/AuthGate';
-import { EnterpriseShell, type NavKey } from './components/EnterpriseShell';
+import { EnterpriseShell, getNavItemsForWorkspace, type NavKey } from './components/EnterpriseShell';
 import { EMPTY_FILTERS, FilterBar } from './components/FilterBar';
+import { PlatformSelectorHome } from './components/PlatformSelectorHome';
+import type { HrSubTab } from './components/HrManagementModule';
+import type { AppsSubTab } from './components/ApplicationsModule';
+import type { FleetSubTab } from './components/FleetManagementModule';
+import type { RbacSubTab } from './components/RbacManagementModule';
 import {
   BOOTSTRAPPED_OWNER_EMAIL,
+  canAccessGlobalHub,
   db,
   DEFAULT_OPERATIONAL_SETTINGS,
   ensureOperationalSettings,
   ensureUserProfile,
+  getUserAllowedPlatforms,
   handleFirestoreError,
   logoutUser,
   OperationType,
@@ -19,10 +26,20 @@ import {
   buildUnifiedDailyRows,
   extractFilterOptions,
   filterUnifiedRows,
+  scopeDatasetToPlatform,
   type FleetDataset,
 } from './lib/fleetAnalytics';
+import {
+  getDefaultErpNavForUser,
+  hasPermission,
+  isKeetaActive,
+  matchesDataScope,
+  resolveDataScope,
+} from './shared/rbacCore';
 import type {
   AuditLog,
+  DocumentTypeConfig,
+  EntityNoteTask,
   ErrorCodeDictionaryEntry,
   FilterState,
   HungerDailyRecord,
@@ -37,14 +54,37 @@ import type {
   OperationalCase,
   OperationalSettings,
   Platform,
+  PlatformAccount,
+  PlatformCatalogEntry,
+  PrivateDocumentRecord,
   RiderErrorCase,
   RiderIdentityMapping,
   RiderMaster,
   RiderNote,
+  RoleTemplate,
   UserProfile,
+  VehicleAssignment,
+  VehicleMaintenanceRecord,
+  VehicleMaster,
+  WorkspaceMode,
 } from './types/fleet';
 
-// Route-level code splitting for heavy analytical & reporting modules
+// Route-level code splitting for heavy analytical & ERP modules
+const ExecutiveAdminModule = lazy(() =>
+  import('./components/ExecutiveAdminModule').then((m) => ({ default: m.ExecutiveAdminModule }))
+);
+const HrManagementModule = lazy(() =>
+  import('./components/HrManagementModule').then((m) => ({ default: m.HrManagementModule }))
+);
+const ApplicationsModule = lazy(() =>
+  import('./components/ApplicationsModule').then((m) => ({ default: m.ApplicationsModule }))
+);
+const FleetManagementModule = lazy(() =>
+  import('./components/FleetManagementModule').then((m) => ({ default: m.FleetManagementModule }))
+);
+const RbacManagementModule = lazy(() =>
+  import('./components/RbacManagementModule').then((m) => ({ default: m.RbacManagementModule }))
+);
 const OverviewDashboard = lazy(() =>
   import('./components/OverviewDashboard').then((m) => ({ default: m.OverviewDashboard }))
 );
@@ -93,9 +133,6 @@ const ImportCenter = lazy(() =>
 const SystemSettingsView = lazy(() =>
   import('./components/SettingsAndUsers').then((m) => ({ default: m.SystemSettingsView }))
 );
-const UserManagementView = lazy(() =>
-  import('./components/SettingsAndUsers').then((m) => ({ default: m.UserManagementView }))
-);
 
 const EMPTY_DATASET: FleetDataset = {
   hungerDaily: [],
@@ -120,6 +157,34 @@ async function safeGetCollection<T>(colName: string, profile: UserProfile): Prom
   } catch (err) {
     handleFirestoreError(err, OperationType.LIST, colName);
   }
+}
+
+function normalizeResolvedNav(rawNav: string, keetaActive: boolean): NavKey {
+  if (rawNav === 'reports_executive') return 'reports';
+  if (rawNav === 'keeta' && !keetaActive) return 'hungerstation';
+  return rawNav as NavKey;
+}
+
+function defaultNavForWorkspace(mode: Exclude<WorkspaceMode, 'selector'>, keetaActive = true): NavKey {
+  if (mode === 'hungerstation') return 'hungerstation';
+  if (mode === 'keeta' && keetaActive) return 'keeta';
+  return 'executive_admin';
+}
+
+function computeCanAccessGlobal(profile: UserProfile | null, roles: RoleTemplate[]): boolean {
+  if (!profile || !profile.active) return false;
+  if (canAccessGlobalHub(profile)) return true;
+  return (
+    hasPermission(profile, roles, 'executive', 'view') ||
+    hasPermission(profile, roles, 'hr', 'view') ||
+    hasPermission(profile, roles, 'fleet', 'view') ||
+    hasPermission(profile, roles, 'applications', 'view') ||
+    hasPermission(profile, roles, 'reports', 'view') ||
+    hasPermission(profile, roles, 'users', 'view') ||
+    hasPermission(profile, roles, 'roles', 'view') ||
+    hasPermission(profile, roles, 'settings', 'view') ||
+    hasPermission(profile, roles, 'audit', 'view')
+  );
 }
 
 function RouteFallbackSkeleton() {
@@ -161,7 +226,9 @@ export default function App() {
     }
   }, [theme]);
 
-  const [activeNav, setActiveNav] = useState<NavKey>('overview');
+  const didInitRouteRef = useRef<string | null>(null);
+  const [workspaceMode, setWorkspaceMode] = useState<WorkspaceMode>('global');
+  const [activeNav, setActiveNav] = useState<NavKey>('executive_admin');
   const [filters, setFilters] = useState<FilterState>(EMPTY_FILTERS);
   const [selectedRider, setSelectedRider] = useState<{ platform: Platform; riderId: string } | null>(null);
 
@@ -175,6 +242,18 @@ export default function App() {
   const [importBatches, setImportBatches] = useState<ImportBatch[]>([]);
   const [auditLogs, setAuditLogs] = useState<AuditLog[]>([]);
   const [usersList, setUsersList] = useState<UserProfile[]>([]);
+
+  // ERP Collections State
+  const [roleTemplates, setRoleTemplates] = useState<RoleTemplate[]>([]);
+  const [documentTypes, setDocumentTypes] = useState<DocumentTypeConfig[]>([]);
+  const [privateDocs, setPrivateDocs] = useState<PrivateDocumentRecord[]>([]);
+  const [platformCatalog, setPlatformCatalog] = useState<PlatformCatalogEntry[]>([]);
+  const [platformAccounts, setPlatformAccounts] = useState<PlatformAccount[]>([]);
+  const [vehicles, setVehicles] = useState<VehicleMaster[]>([]);
+  const [vehicleAssignments, setVehicleAssignments] = useState<VehicleAssignment[]>([]);
+  const [vehicleMaintenance, setVehicleMaintenance] = useState<VehicleMaintenanceRecord[]>([]);
+  const [entityNotesTasks, setEntityNotesTasks] = useState<EntityNoteTask[]>([]);
+
   const [settings, setSettings] = useState<OperationalSettings>({
     ...DEFAULT_OPERATIONAL_SETTINGS,
     createdByUid: '',
@@ -187,8 +266,22 @@ export default function App() {
     try {
       const canCreateSettings =
         profile.role === 'owner' || profile.role === 'admin' || profile.role === 'operations_manager';
-      const opSettings = await ensureOperationalSettings(profile.uid, profile.email, canCreateSettings);
+
+      const [opSettings, loadedRoles, loadedCatalog] = await Promise.all([
+        ensureOperationalSettings(profile.uid, profile.email, canCreateSettings),
+        safeGetCollection<RoleTemplate>('roleTemplates', profile),
+        safeGetCollection<PlatformCatalogEntry>('platformCatalog', profile),
+      ]);
+
       setSettings(opSettings);
+      setRoleTemplates(loadedRoles);
+      setPlatformCatalog(loadedCatalog);
+
+      const keetaActiveNow = isKeetaActive(opSettings, loadedCatalog);
+      const userAllowed = getUserAllowedPlatforms(profile);
+      const effectiveAllowedNow = keetaActiveNow ? userAllowed : userAllowed.filter((p) => p !== 'keeta');
+      const allowHs = effectiveAllowedNow.includes('hungerstation');
+      const allowKt = keetaActiveNow && effectiveAllowedNow.includes('keeta');
 
       const [
         hungerDaily,
@@ -207,25 +300,40 @@ export default function App() {
         errCases,
         opCases,
         notes,
+        docTypes,
+        privDocs,
+        platAccounts,
+        vehList,
+        vehAssignments,
+        vehMaint,
+        notesTasks,
       ] = await Promise.all([
-        safeGetCollection<HungerDailyRecord>('hungerDaily', profile),
-        safeGetCollection<HungerDistanceDailyRecord>('hungerDistanceDaily', profile),
-        safeGetCollection<HungerWalletSnapshot>('hungerWalletSnapshots', profile),
-        safeGetCollection<HungerQualityMonthly>('hungerQualityMonthly', profile),
-        safeGetCollection<KeetaDashboardDaily>('keetaDashboardDaily', profile),
-        safeGetCollection<KeetaVdaDaily>('keetaVdaDaily', profile),
-        safeGetCollection<KeetaRankSnapshot>('keetaRankSnapshots', profile),
-        safeGetCollection<KeetaFacialRecognitionDaily>('keetaFacialRecognitionDaily', profile),
+        allowHs ? safeGetCollection<HungerDailyRecord>('hungerDaily', profile) : Promise.resolve([]),
+        allowHs ? safeGetCollection<HungerDistanceDailyRecord>('hungerDistanceDaily', profile) : Promise.resolve([]),
+        allowHs ? safeGetCollection<HungerWalletSnapshot>('hungerWalletSnapshots', profile) : Promise.resolve([]),
+        allowHs ? safeGetCollection<HungerQualityMonthly>('hungerQualityMonthly', profile) : Promise.resolve([]),
+        allowKt ? safeGetCollection<KeetaDashboardDaily>('keetaDashboardDaily', profile) : Promise.resolve([]),
+        allowKt ? safeGetCollection<KeetaVdaDaily>('keetaVdaDaily', profile) : Promise.resolve([]),
+        allowKt ? safeGetCollection<KeetaRankSnapshot>('keetaRankSnapshots', profile) : Promise.resolve([]),
+        allowKt ? safeGetCollection<KeetaFacialRecognitionDaily>('keetaFacialRecognitionDaily', profile) : Promise.resolve([]),
         safeGetCollection<RiderMaster>('riderMaster', profile),
         safeGetCollection<RiderIdentityMapping>('riderIdentityMapping', profile),
         safeGetCollection<ImportBatch>('importBatches', profile),
         safeGetCollection<AuditLog>('auditLogs', profile),
-        safeGetCollection<ErrorCodeDictionaryEntry>('hungerErrorDictionary', profile),
-        safeGetCollection<RiderErrorCase>('hungerRiderErrorCases', profile),
+        allowHs ? safeGetCollection<ErrorCodeDictionaryEntry>('hungerErrorDictionary', profile) : Promise.resolve([]),
+        allowHs ? safeGetCollection<RiderErrorCase>('hungerRiderErrorCases', profile) : Promise.resolve([]),
         safeGetCollection<OperationalCase>('operationalCases', profile),
         safeGetCollection<RiderNote>('riderNotes', profile),
+        safeGetCollection<DocumentTypeConfig>('documentTypes', profile),
+        safeGetCollection<PrivateDocumentRecord>('privateDocuments', profile),
+        safeGetCollection<PlatformAccount>('platformAccounts', profile),
+        safeGetCollection<VehicleMaster>('vehicles', profile),
+        safeGetCollection<VehicleAssignment>('vehicleAssignments', profile),
+        safeGetCollection<VehicleMaintenanceRecord>('vehicleMaintenance', profile),
+        safeGetCollection<EntityNoteTask>('entityNotesTasks', profile),
       ]);
 
+      const allowedSet = new Set<Platform>(effectiveAllowedNow);
       setDataset({
         hungerDaily,
         hungerDistanceDaily,
@@ -236,16 +344,30 @@ export default function App() {
         keetaRankSnapshots,
         keetaFacialRecognitionDaily,
         riderMaster,
-        riderMappings,
+        riderMappings: riderMappings.filter((m) => allowedSet.has(m.platform)),
       });
-      setImportBatches(batches);
+      setImportBatches(batches.filter((b) => allowedSet.has(b.platform)));
       setAuditLogs(logs);
       setErrorDictionary(dictEntries);
       setRiderErrorCases(errCases);
-      setOperationalCases(opCases);
-      setRiderNotes(notes);
+      setOperationalCases(opCases.filter((c) => allowedSet.has(c.platform)));
+      setRiderNotes(notes.filter((n) => allowedSet.has(n.platform)));
 
-      if (profile.role === 'owner' || profile.role === 'admin') {
+      setDocumentTypes(docTypes);
+      setPrivateDocs(privDocs);
+      setPlatformAccounts(platAccounts);
+      setVehicles(vehList);
+      setVehicleAssignments(vehAssignments);
+      setVehicleMaintenance(vehMaint);
+      setEntityNotesTasks(notesTasks);
+
+      const canLoadUsersList =
+        profile.role === 'owner' ||
+        profile.role === 'admin' ||
+        profile.role === 'operations_manager' ||
+        hasPermission(profile, loadedRoles, 'users', 'view');
+
+      if (canLoadUsersList) {
         try {
           const isBootOwner = profile.email.trim().toLowerCase() === BOOTSTRAPPED_OWNER_EMAIL;
           const usersRef = collection(db, 'users');
@@ -261,6 +383,28 @@ export default function App() {
       } else {
         setUsersList([profile]);
       }
+
+      // Role-based automatic landing route on initial sign-in
+      if (didInitRouteRef.current !== profile.uid) {
+        didInitRouteRef.current = profile.uid;
+        const canGlobalNow = computeCanAccessGlobal(profile, loadedRoles);
+        const resolvedNav = normalizeResolvedNav(
+          getDefaultErpNavForUser(profile, loadedRoles),
+          keetaActiveNow
+        );
+
+        if (resolvedNav === 'hungerstation' && !canGlobalNow) {
+          setWorkspaceMode('hungerstation');
+          setActiveNav('hungerstation');
+        } else if (canGlobalNow) {
+          setWorkspaceMode('global');
+          setActiveNav(resolvedNav);
+        } else {
+          const fallbackPlatform = effectiveAllowedNow[0] || 'hungerstation';
+          setWorkspaceMode(fallbackPlatform);
+          setActiveNav(defaultNavForWorkspace(fallbackPlatform, keetaActiveNow));
+        }
+      }
     } catch (err) {
       setDataError(err instanceof Error ? err.message : 'تعذر تحميل بيانات التشغيل من Firestore.');
     } finally {
@@ -271,6 +415,7 @@ export default function App() {
   useEffect(() => {
     const unsub = subscribeAuth(async (firebaseUser) => {
       if (!firebaseUser) {
+        didInitRouteRef.current = null;
         setUserProfile(null);
         setAuthReady(true);
         return;
@@ -304,15 +449,224 @@ export default function App() {
 
   const handleSignOut = async () => {
     await logoutUser();
+    didInitRouteRef.current = null;
     setUserProfile(null);
+    setWorkspaceMode('global');
+    setActiveNav('executive_admin');
+    setSelectedRider(null);
+    setFilters(EMPTY_FILTERS);
     setDataset(EMPTY_DATASET);
     setOperationalCases([]);
     setRiderNotes([]);
+    setErrorDictionary([]);
+    setRiderErrorCases([]);
+    setImportBatches([]);
+    setRoleTemplates([]);
+    setDocumentTypes([]);
+    setPrivateDocs([]);
+    setPlatformCatalog([]);
+    setPlatformAccounts([]);
+    setVehicles([]);
+    setVehicleAssignments([]);
+    setVehicleMaintenance([]);
+    setEntityNotesTasks([]);
   };
 
-  const unifiedRows = useMemo(() => buildUnifiedDailyRows(dataset), [dataset]);
-  const filterOptions = useMemo(() => extractFilterOptions(unifiedRows), [unifiedRows]);
-  const filteredRows = useMemo(() => filterUnifiedRows(unifiedRows, filters), [unifiedRows, filters]);
+  const keetaActive = useMemo(() => isKeetaActive(settings, platformCatalog), [settings, platformCatalog]);
+
+  const allowedPlatforms = useMemo(() => {
+    const raw = getUserAllowedPlatforms(userProfile);
+    return keetaActive ? raw : raw.filter((p) => p !== 'keeta');
+  }, [userProfile, keetaActive]);
+
+  const canAccessGlobal = useMemo(
+    () => computeCanAccessGlobal(userProfile, roleTemplates),
+    [userProfile, roleTemplates]
+  );
+
+  const effectiveScope: Exclude<WorkspaceMode, 'selector'> = useMemo(() => {
+    if (workspaceMode === 'hungerstation' && allowedPlatforms.includes('hungerstation')) return 'hungerstation';
+    if (workspaceMode === 'keeta' && keetaActive && allowedPlatforms.includes('keeta')) return 'keeta';
+    if (workspaceMode === 'global' && canAccessGlobal) return 'global';
+    if (canAccessGlobal) return 'global';
+    return allowedPlatforms[0] || 'hungerstation';
+  }, [workspaceMode, allowedPlatforms, canAccessGlobal, keetaActive]);
+
+  const isWorkspaceAuthorized = useMemo(() => {
+    if (workspaceMode === 'selector') return true;
+    if (workspaceMode === 'hungerstation') return allowedPlatforms.includes('hungerstation');
+    if (workspaceMode === 'keeta') return keetaActive && allowedPlatforms.includes('keeta');
+    if (workspaceMode === 'global') return canAccessGlobal;
+    return false;
+  }, [workspaceMode, allowedPlatforms, canAccessGlobal, keetaActive]);
+
+  const lockedPlatform: Platform | undefined =
+    effectiveScope === 'hungerstation' || effectiveScope === 'keeta' ? effectiveScope : undefined;
+
+  // DataScope Row-Level Filtering
+  const userDataScope = useMemo(() => resolveDataScope(userProfile), [userProfile]);
+
+  const dataScopedDataset = useMemo<FleetDataset>(() => {
+    const hsDaily = dataset.hungerDaily.filter((r) =>
+      matchesDataScope({ city: r.city, platform: 'hungerstation', riderId: r.riderId }, userDataScope)
+    );
+    const hsDist = dataset.hungerDistanceDaily.filter((r) =>
+      matchesDataScope({ city: r.city, platform: 'hungerstation', riderId: r.riderId }, userDataScope)
+    );
+    const hsWallet = dataset.hungerWalletSnapshots.filter((r) =>
+      matchesDataScope({ platform: 'hungerstation', riderId: r.riderId }, userDataScope)
+    );
+    const hsQual = dataset.hungerQualityMonthly.filter((r) =>
+      matchesDataScope({ city: r.city, platform: 'hungerstation', riderId: r.riderId }, userDataScope)
+    );
+    const ktDash = keetaActive
+      ? dataset.keetaDashboardDaily.filter((r) =>
+          matchesDataScope({ platform: 'keeta', riderId: r.riderId }, userDataScope)
+        )
+      : [];
+    const ktVda = keetaActive
+      ? dataset.keetaVdaDaily.filter((r) =>
+          matchesDataScope({ platform: 'keeta', riderId: r.riderId }, userDataScope)
+        )
+      : [];
+    const ktRank = keetaActive
+      ? dataset.keetaRankSnapshots.filter((r) =>
+          matchesDataScope({ platform: 'keeta', riderId: r.riderId }, userDataScope)
+        )
+      : [];
+    const ktFace = keetaActive
+      ? dataset.keetaFacialRecognitionDaily.filter((r) =>
+          matchesDataScope({ city: r.city, platform: 'keeta', riderId: r.riderId }, userDataScope)
+        )
+      : [];
+    const riders = dataset.riderMaster.filter((r) =>
+      matchesDataScope({ branch: r.branch, city: r.city, internalRiderId: r.internalRiderId }, userDataScope)
+    );
+    const mappings = dataset.riderMappings.filter((m) => (keetaActive || m.platform !== 'keeta'));
+
+    return {
+      hungerDaily: hsDaily,
+      hungerDistanceDaily: hsDist,
+      hungerWalletSnapshots: hsWallet,
+      hungerQualityMonthly: hsQual,
+      keetaDashboardDaily: ktDash,
+      keetaVdaDaily: ktVda,
+      keetaRankSnapshots: ktRank,
+      keetaFacialRecognitionDaily: ktFace,
+      riderMaster: riders,
+      riderMappings: mappings,
+    };
+  }, [dataset, userDataScope, keetaActive]);
+
+  const scopedDataset = useMemo(
+    () => scopeDatasetToPlatform(dataScopedDataset, effectiveScope),
+    [dataScopedDataset, effectiveScope]
+  );
+
+  const scopedRiderIdSet = useMemo(
+    () => new Set(scopedDataset.riderMaster.map((r) => r.internalRiderId)),
+    [scopedDataset.riderMaster]
+  );
+
+  const scopedPlatformAccounts = useMemo(
+    () =>
+      platformAccounts.filter(
+        (a) =>
+          (keetaActive || a.platformId !== 'keeta') &&
+          matchesDataScope(
+            { branch: a.branch, city: a.city, platformId: a.platformId, internalRiderId: a.companyRiderId },
+            userDataScope
+          )
+      ),
+    [platformAccounts, keetaActive, userDataScope]
+  );
+
+  const scopedVehicles = useMemo(() => {
+    if (userDataScope.allBranches && userDataScope.cities.length === 0 && userDataScope.riderIds.length === 0) {
+      return vehicles;
+    }
+    return vehicles.filter((v) => !v.currentRiderId || scopedRiderIdSet.has(v.currentRiderId));
+  }, [vehicles, userDataScope, scopedRiderIdSet]);
+
+  const scopedVehicleIdSet = useMemo(
+    () => new Set(scopedVehicles.map((v) => v.vehicleInternalId)),
+    [scopedVehicles]
+  );
+
+  const scopedVehicleAssignments = useMemo(() => {
+    if (userDataScope.allBranches && userDataScope.cities.length === 0 && userDataScope.riderIds.length === 0) {
+      return vehicleAssignments;
+    }
+    return vehicleAssignments.filter(
+      (a) => scopedRiderIdSet.has(a.companyRiderId) || scopedVehicleIdSet.has(a.vehicleInternalId)
+    );
+  }, [vehicleAssignments, userDataScope, scopedRiderIdSet, scopedVehicleIdSet]);
+
+  const scopedVehicleMaintenance = useMemo(() => {
+    if (userDataScope.allBranches && userDataScope.cities.length === 0 && userDataScope.riderIds.length === 0) {
+      return vehicleMaintenance;
+    }
+    return vehicleMaintenance.filter((m) => scopedVehicleIdSet.has(m.vehicleInternalId));
+  }, [vehicleMaintenance, userDataScope, scopedVehicleIdSet]);
+
+  const scopedPrivateDocs = useMemo(() => {
+    if (userDataScope.allBranches && userDataScope.cities.length === 0 && userDataScope.riderIds.length === 0) {
+      return privateDocs;
+    }
+    return privateDocs.filter((d) =>
+      d.entityType === 'vehicle'
+        ? scopedVehicleIdSet.has(d.entityId)
+        : scopedRiderIdSet.has(d.entityId)
+    );
+  }, [privateDocs, userDataScope, scopedVehicleIdSet, scopedRiderIdSet]);
+
+  const effectiveFilters: FilterState = useMemo(
+    () => (lockedPlatform ? { ...filters, platform: lockedPlatform } : filters),
+    [filters, lockedPlatform]
+  );
+
+  const scopedUnifiedRows = useMemo(() => buildUnifiedDailyRows(scopedDataset), [scopedDataset]);
+  const scopedFilterOptions = useMemo(() => extractFilterOptions(scopedUnifiedRows), [scopedUnifiedRows]);
+  const scopedFilteredRows = useMemo(
+    () => filterUnifiedRows(scopedUnifiedRows, effectiveFilters),
+    [scopedUnifiedRows, effectiveFilters]
+  );
+
+  const allBranchOptions = useMemo(() => {
+    const set = new Set<string>([
+      ...(settings.configuredBranches || []),
+      ...scopedFilterOptions.branches,
+      ...dataset.riderMaster.map((r) => r.branch || '').filter(Boolean),
+    ]);
+    return Array.from(set).sort();
+  }, [settings.configuredBranches, scopedFilterOptions.branches, dataset.riderMaster]);
+
+  const scopedCases = useMemo(() => {
+    const base = keetaActive ? operationalCases : operationalCases.filter((c) => c.platform !== 'keeta');
+    const byPlatform = lockedPlatform ? base.filter((c) => c.platform === lockedPlatform) : base;
+    return byPlatform.filter((c) =>
+      matchesDataScope({ branch: c.branch, platform: c.platform, riderId: c.riderId }, userDataScope)
+    );
+  }, [operationalCases, lockedPlatform, keetaActive, userDataScope]);
+
+  const scopedNotes = useMemo(() => {
+    const base = keetaActive ? riderNotes : riderNotes.filter((n) => n.platform !== 'keeta');
+    return lockedPlatform ? base.filter((n) => n.platform === lockedPlatform) : base;
+  }, [riderNotes, lockedPlatform, keetaActive]);
+
+  const scopedBatches = useMemo(() => {
+    const base = keetaActive ? importBatches : importBatches.filter((b) => b.platform !== 'keeta');
+    return lockedPlatform ? base.filter((b) => b.platform === lockedPlatform) : base;
+  }, [importBatches, lockedPlatform, keetaActive]);
+
+  const scopedErrorDict = useMemo(
+    () => (effectiveScope === 'keeta' ? [] : errorDictionary),
+    [errorDictionary, effectiveScope]
+  );
+  const scopedErrorCases = useMemo(
+    () => (effectiveScope === 'keeta' ? [] : riderErrorCases),
+    [riderErrorCases, effectiveScope]
+  );
 
   const allowedUids = useMemo(() => {
     const activeUids = usersList.filter((u) => u.active).map((u) => u.uid);
@@ -320,15 +674,104 @@ export default function App() {
     return Array.from(set).slice(0, 20);
   }, [usersList, userProfile]);
 
-  const openRider360 = useCallback((platform: Platform, riderId: string) => {
-    setSelectedRider({ platform, riderId });
-    setActiveNav('riders');
-  }, []);
+  const handleSwitchWorkspace = useCallback(
+    (mode: WorkspaceMode) => {
+      if (mode === 'selector') {
+        setWorkspaceMode('selector');
+        setSelectedRider(null);
+        return;
+      }
+      if (mode === 'hungerstation' && !allowedPlatforms.includes('hungerstation')) return;
+      if (mode === 'keeta' && (!keetaActive || !allowedPlatforms.includes('keeta'))) return;
+      if (mode === 'global' && !canAccessGlobal) {
+        setWorkspaceMode('selector');
+        return;
+      }
 
-  const handleSelectNav = useCallback((nav: NavKey) => {
-    setActiveNav(nav);
-    if (nav !== 'riders') setSelectedRider(null);
-  }, []);
+      setWorkspaceMode(mode);
+      setSelectedRider(null);
+      setActiveNav(defaultNavForWorkspace(mode, keetaActive));
+      setFilters({
+        ...EMPTY_FILTERS,
+        platform: mode === 'hungerstation' ? 'hungerstation' : mode === 'keeta' ? 'keeta' : 'all',
+      });
+    },
+    [allowedPlatforms, canAccessGlobal, keetaActive]
+  );
+
+  const navItemsForCurrentScope = useMemo(
+    () =>
+      getNavItemsForWorkspace(effectiveScope, {
+        userProfile,
+        roleTemplates,
+        settings,
+        platformCatalog,
+        allowedPlatforms,
+      }),
+    [effectiveScope, userProfile, roleTemplates, settings, platformCatalog, allowedPlatforms]
+  );
+
+  const safeActiveNav: NavKey = useMemo(() => {
+    const validKeys = navItemsForCurrentScope.map((i) => i.key);
+    if (validKeys.includes(activeNav)) return activeNav;
+    return validKeys[0] || defaultNavForWorkspace(effectiveScope, keetaActive);
+  }, [navItemsForCurrentScope, activeNav, effectiveScope, keetaActive]);
+
+  const handleSelectNav = useCallback(
+    (nav: NavKey) => {
+      const validKeys = navItemsForCurrentScope.map((i) => i.key);
+      if (!validKeys.includes(nav)) return;
+      setActiveNav(nav);
+      if (nav !== 'riders') setSelectedRider(null);
+    },
+    [navItemsForCurrentScope]
+  );
+
+  const openRider360 = useCallback(
+    (platform: Platform, riderId: string) => {
+      if (platform === 'keeta' && !keetaActive) return;
+      if (lockedPlatform && platform !== lockedPlatform) return;
+      if (!allowedPlatforms.includes(platform)) return;
+      setSelectedRider({ platform, riderId });
+      setActiveNav('riders');
+    },
+    [lockedPlatform, allowedPlatforms, keetaActive]
+  );
+
+  const openRider360ByCompanyId = useCallback(
+    (internalRiderId: string) => {
+      const mapping = dataset.riderMappings.find(
+        (m) => m.internalRiderId === internalRiderId && (keetaActive || m.platform !== 'keeta')
+      );
+      if (mapping) {
+        setSelectedRider({ platform: mapping.platform, riderId: mapping.platformRiderId });
+      } else {
+        const account = platformAccounts.find(
+          (a) =>
+            a.companyRiderId === internalRiderId &&
+            (a.platformId === 'hungerstation' || (keetaActive && a.platformId === 'keeta'))
+        );
+        if (account) {
+          setSelectedRider({
+            platform: account.platformId as Platform,
+            riderId: account.platformRiderId,
+          });
+        } else {
+          setSelectedRider({ platform: 'hungerstation', riderId: internalRiderId });
+        }
+      }
+      setActiveNav('riders');
+    },
+    [dataset.riderMappings, platformAccounts, keetaActive]
+  );
+
+  const handleGoToSettings = useCallback(() => {
+    if (!canAccessGlobal) return;
+    setWorkspaceMode('global');
+    setSelectedRider(null);
+    setFilters(EMPTY_FILTERS);
+    setActiveNav('settings');
+  }, [canAccessGlobal]);
 
   if (!authReady) {
     return (
@@ -350,24 +793,65 @@ export default function App() {
     );
   }
 
-  const showFilterBar = !['import', 'settings', 'users', 'riders', 'operations', 'reports'].includes(activeNav);
+  if (workspaceMode === 'selector' || !isWorkspaceAuthorized) {
+    return (
+      <PlatformSelectorHome
+        userProfile={userProfile}
+        allowedPlatforms={allowedPlatforms}
+        canAccessGlobal={canAccessGlobal}
+        dataset={dataScopedDataset}
+        operationalCases={scopedCases}
+        settings={settings}
+        platformCatalog={platformCatalog}
+        dataLoading={dataLoading}
+        onRefreshData={() => loadAllOperationalData(userProfile)}
+        onSignOut={handleSignOut}
+        onSelectWorkspace={handleSwitchWorkspace}
+        theme={theme}
+        onToggleTheme={() => setTheme((t) => (t === 'dark' ? 'light' : 'dark'))}
+      />
+    );
+  }
+
+  const showFilterBar = [
+    'overview',
+    'hungerstation',
+    'keeta',
+    'error_intel',
+    'daily_ops',
+    'rider_perf',
+    'attendance',
+    'distance_wallet',
+    'quality',
+    'facial',
+    'alerts',
+  ].includes(safeActiveNav);
 
   return (
     <EnterpriseShell
-      activeNav={activeNav}
+      workspaceMode={effectiveScope}
+      allowedPlatforms={allowedPlatforms}
+      canAccessGlobal={canAccessGlobal}
+      onSwitchWorkspace={handleSwitchWorkspace}
+      activeNav={safeActiveNav}
       onSelectNav={handleSelectNav}
       selectedRider={selectedRider}
       onSelectRider={openRider360}
       userProfile={userProfile}
+      roleTemplates={roleTemplates}
+      platformCatalog={platformCatalog}
+      vehicles={scopedVehicles}
+      platformAccounts={scopedPlatformAccounts}
+      privateDocs={scopedPrivateDocs}
       onSignOut={handleSignOut}
       onRefreshData={() => loadAllOperationalData(userProfile)}
       dataLoading={dataLoading}
-      dataset={dataset}
-      dictionaryEntries={errorDictionary}
-      riderErrorCases={riderErrorCases}
-      operationalCases={operationalCases}
+      dataset={scopedDataset}
+      dictionaryEntries={scopedErrorDict}
+      riderErrorCases={scopedErrorCases}
+      operationalCases={scopedCases}
       settings={settings}
-      filters={filters}
+      filters={effectiveFilters}
       theme={theme}
       onToggleTheme={() => setTheme((t) => (t === 'dark' ? 'light' : 'dark'))}
     >
@@ -377,167 +861,348 @@ export default function App() {
         </div>
       )}
 
-      {showFilterBar && <FilterBar filters={filters} onChange={setFilters} options={filterOptions} />}
+      {showFilterBar && (
+        <FilterBar
+          filters={effectiveFilters}
+          onChange={(next) => setFilters(lockedPlatform ? { ...next, platform: lockedPlatform } : next)}
+          options={scopedFilterOptions}
+          lockedPlatform={lockedPlatform}
+        />
+      )}
 
       {dataLoading ? (
         <RouteFallbackSkeleton />
       ) : (
         <Suspense fallback={<RouteFallbackSkeleton />}>
-          {activeNav === 'overview' && (
-            <OverviewDashboard
-              dataset={dataset}
-              filteredRows={filteredRows}
-              dictionaryEntries={errorDictionary}
-              operationalCases={operationalCases}
+          {safeActiveNav === 'executive_admin' && effectiveScope === 'global' && (
+            <ExecutiveAdminModule
+              riders={scopedDataset.riderMaster}
+              vehicles={scopedVehicles}
+              assignments={scopedVehicleAssignments}
+              maintenance={scopedVehicleMaintenance}
+              platformAccounts={scopedPlatformAccounts}
+              platformCatalog={platformCatalog}
+              privateDocs={scopedPrivateDocs}
+              operationalCases={scopedCases}
+              entityNotesTasks={entityNotesTasks}
+              dataset={scopedDataset}
               settings={settings}
+              currentUser={userProfile}
+              roleTemplates={roleTemplates}
+              usersList={usersList}
+              allowedUids={allowedUids}
+              onNavigate={(nav) => handleSelectNav(nav as NavKey)}
+              onOpenRider360={openRider360ByCompanyId}
+              onRefresh={() => loadAllOperationalData(userProfile)}
+            />
+          )}
+
+          {(safeActiveNav === 'hr_dashboard' ||
+            safeActiveNav === 'hr_riders' ||
+            safeActiveNav === 'hr_docs' ||
+            safeActiveNav === 'hr_expiries' ||
+            safeActiveNav === 'hr_status') && (
+            <HrManagementModule
+              key={safeActiveNav}
+              riders={scopedDataset.riderMaster}
+              privateDocs={scopedPrivateDocs}
+              documentTypes={documentTypes}
+              platformAccounts={scopedPlatformAccounts}
+              vehicleAssignments={scopedVehicleAssignments}
+              vehicles={scopedVehicles}
+              settings={settings}
+              currentUser={userProfile}
+              roleTemplates={roleTemplates}
+              allowedUids={allowedUids}
+              initialSubTab={safeActiveNav as HrSubTab}
+              onOpenRider360={openRider360ByCompanyId}
+              onRefresh={() => loadAllOperationalData(userProfile)}
+            />
+          )}
+
+          {(safeActiveNav === 'apps_active' ||
+            safeActiveNav === 'apps_accounts' ||
+            safeActiveNav === 'apps_linking') && (
+            <ApplicationsModule
+              key={safeActiveNav}
+              platformCatalog={platformCatalog}
+              platformAccounts={scopedPlatformAccounts}
+              riders={scopedDataset.riderMaster}
+              dataset={scopedDataset}
+              settings={settings}
+              currentUser={userProfile}
+              roleTemplates={roleTemplates}
+              allowedUids={allowedUids}
+              initialSubTab={safeActiveNav as AppsSubTab}
+              onOpenRider360={openRider360ByCompanyId}
+              onGoToPlatformFlagSettings={() => handleSelectNav('settings')}
+              onRefresh={() => loadAllOperationalData(userProfile)}
+            />
+          )}
+
+          {(safeActiveNav === 'fleet_dashboard' ||
+            safeActiveNav === 'fleet_vehicles' ||
+            safeActiveNav === 'fleet_handover' ||
+            safeActiveNav === 'fleet_docs' ||
+            safeActiveNav === 'fleet_maintenance') && (
+            <FleetManagementModule
+              key={safeActiveNav}
+              vehicles={scopedVehicles}
+              assignments={scopedVehicleAssignments}
+              maintenance={scopedVehicleMaintenance}
+              riders={scopedDataset.riderMaster}
+              privateDocs={scopedPrivateDocs}
+              documentTypes={documentTypes}
+              settings={settings}
+              currentUser={userProfile}
+              roleTemplates={roleTemplates}
+              allowedUids={allowedUids}
+              initialSubTab={safeActiveNav as FleetSubTab}
+              onOpenRider360={openRider360ByCompanyId}
+              onRefresh={() => loadAllOperationalData(userProfile)}
+            />
+          )}
+
+          {(safeActiveNav === 'rbac_users' ||
+            safeActiveNav === 'rbac_roles' ||
+            safeActiveNav === 'rbac_audit') && (
+            <RbacManagementModule
+              key={safeActiveNav}
+              usersList={usersList}
+              roleTemplates={roleTemplates}
+              auditLogs={auditLogs}
+              riders={scopedDataset.riderMaster}
+              branches={allBranchOptions}
+              platformCatalog={platformCatalog}
+              settings={settings}
+              currentUser={userProfile}
+              allowedUids={allowedUids}
+              initialSubTab={safeActiveNav as RbacSubTab}
+              onRefresh={() => loadAllOperationalData(userProfile)}
+            />
+          )}
+
+          {safeActiveNav === 'overview' && effectiveScope === 'global' && (
+            <OverviewDashboard
+              dataset={scopedDataset}
+              filteredRows={scopedFilteredRows}
+              dictionaryEntries={scopedErrorDict}
+              operationalCases={scopedCases}
+              settings={settings}
+              platformCatalog={platformCatalog}
               onGoToImport={() => handleSelectNav('import')}
               onGoToOperations={() => handleSelectNav('operations')}
               onGoToErrors={() => handleSelectNav('error_intel')}
               onSelectRider={openRider360}
+              onOpenPlatformWorkspace={(p) => handleSwitchWorkspace(p)}
             />
           )}
-          {activeNav === 'operations' && (
-            <OperationsControlCenter
-              dataset={dataset}
-              filteredRows={filteredRows}
-              dictionaryEntries={errorDictionary}
-              operationalCases={operationalCases}
+
+          {safeActiveNav === 'hungerstation' && (
+            <HungerStationView
+              dataset={scopedDataset}
+              filters={effectiveFilters}
+              operationalCases={scopedCases}
               settings={settings}
-              usersList={usersList}
-              currentUser={userProfile}
-              allowedUids={allowedUids}
               onSelectRider={openRider360}
-              onRefresh={() => loadAllOperationalData(userProfile)}
+              onGoToErrors={() => handleSelectNav('error_intel')}
+              onGoToOperations={() => handleSelectNav('operations')}
+              onGoToImport={() => handleSelectNav('import')}
             />
           )}
-          {activeNav === 'hungerstation' && (
-            <HungerStationView dataset={dataset} filters={filters} onSelectRider={openRider360} />
+
+          {safeActiveNav === 'keeta' && keetaActive && (
+            <KeetaView
+              dataset={scopedDataset}
+              filters={effectiveFilters}
+              operationalCases={scopedCases}
+              settings={settings}
+              onSelectRider={openRider360}
+              onGoToOperations={() => handleSelectNav('operations')}
+              onGoToImport={() => handleSelectNav('import')}
+              onGoToFacial={() => handleSelectNav('facial')}
+            />
           )}
-          {activeNav === 'error_intel' && (
+
+          {safeActiveNav === 'error_intel' && (
             <ErrorIntelligenceCenter
-              dataset={dataset}
-              dictionaryEntries={errorDictionary}
-              riderErrorCases={riderErrorCases}
-              operationalCases={operationalCases}
+              dataset={scopedDataset}
+              dictionaryEntries={scopedErrorDict}
+              riderErrorCases={scopedErrorCases}
+              operationalCases={scopedCases}
               settings={settings}
-              filters={filters}
+              filters={effectiveFilters}
               currentUser={userProfile}
               allowedUids={allowedUids}
               onSelectRider={openRider360}
-              onGoToSettings={() => handleSelectNav('settings')}
+              onGoToSettings={handleGoToSettings}
               onGoToOperations={() => handleSelectNav('operations')}
               onRefresh={() => loadAllOperationalData(userProfile)}
             />
           )}
-          {activeNav === 'keeta' && (
-            <KeetaView dataset={dataset} filters={filters} onSelectRider={openRider360} />
+
+          {safeActiveNav === 'operations' && (
+            <OperationsControlCenter
+              dataset={scopedDataset}
+              filteredRows={scopedFilteredRows}
+              dictionaryEntries={scopedErrorDict}
+              operationalCases={scopedCases}
+              settings={settings}
+              usersList={usersList}
+              currentUser={userProfile}
+              allowedUids={allowedUids}
+              lockedPlatform={lockedPlatform}
+              onSelectRider={openRider360}
+              onRefresh={() => loadAllOperationalData(userProfile)}
+            />
           )}
-          {activeNav === 'riders' && (
+
+          {safeActiveNav === 'riders' && (
             <RiderManagementAnd360
-              dataset={dataset}
-              dictionaryEntries={errorDictionary}
-              riderErrorCases={riderErrorCases}
-              operationalCases={operationalCases}
-              riderNotes={riderNotes}
+              dataset={scopedDataset}
+              dictionaryEntries={scopedErrorDict}
+              riderErrorCases={scopedErrorCases}
+              operationalCases={scopedCases}
+              riderNotes={scopedNotes}
               settings={settings}
               currentUser={userProfile}
               allowedUids={allowedUids}
               selectedRider={selectedRider}
+              workspaceScope={effectiveScope}
+              platformCatalog={platformCatalog}
+              platformAccounts={scopedPlatformAccounts}
+              privateDocs={scopedPrivateDocs}
+              vehicles={scopedVehicles}
+              vehicleAssignments={scopedVehicleAssignments}
+              entityNotesTasks={entityNotesTasks}
               onSelectRider={setSelectedRider}
               onRefresh={() => loadAllOperationalData(userProfile)}
             />
           )}
-          {activeNav === 'daily_ops' && (
+
+          {safeActiveNav === 'daily_ops' && (
             <DailyOperationsView
-              dataset={dataset}
-              filteredRows={filteredRows}
-              filters={filters}
+              dataset={scopedDataset}
+              filteredRows={scopedFilteredRows}
+              filters={effectiveFilters}
+              lockedPlatform={lockedPlatform}
               onSelectRider={openRider360}
             />
           )}
-          {activeNav === 'rider_perf' && (
+
+          {safeActiveNav === 'rider_perf' && (
             <RiderPerformanceView
-              dataset={dataset}
-              filteredRows={filteredRows}
-              filters={filters}
+              dataset={scopedDataset}
+              filteredRows={scopedFilteredRows}
+              filters={effectiveFilters}
+              lockedPlatform={lockedPlatform}
               onSelectRider={openRider360}
             />
           )}
-          {activeNav === 'attendance' && (
+
+          {safeActiveNav === 'attendance' && (
             <AttendanceShiftsView
-              dataset={dataset}
-              filteredRows={filteredRows}
-              filters={filters}
+              dataset={scopedDataset}
+              filteredRows={scopedFilteredRows}
+              filters={effectiveFilters}
+              lockedPlatform={lockedPlatform}
               onSelectRider={openRider360}
             />
           )}
-          {activeNav === 'quality' && (
+
+          {safeActiveNav === 'quality' && (
             <DeliveryQualityView
-              dataset={dataset}
-              filteredRows={filteredRows}
-              filters={filters}
+              dataset={scopedDataset}
+              filteredRows={scopedFilteredRows}
+              filters={effectiveFilters}
+              lockedPlatform={lockedPlatform}
               onSelectRider={openRider360}
             />
           )}
-          {activeNav === 'distance_wallet' && (
+
+          {safeActiveNav === 'distance_wallet' && (
             <DistanceWalletView
-              dataset={dataset}
-              filteredRows={filteredRows}
-              filters={filters}
+              dataset={scopedDataset}
+              filteredRows={scopedFilteredRows}
+              filters={effectiveFilters}
+              lockedPlatform={lockedPlatform}
               onSelectRider={openRider360}
             />
           )}
-          {activeNav === 'facial' && (
+
+          {safeActiveNav === 'facial' && keetaActive && (
             <FacialRecognitionView
-              dataset={dataset}
-              filteredRows={filteredRows}
-              filters={filters}
+              dataset={scopedDataset}
+              filteredRows={scopedFilteredRows}
+              filters={effectiveFilters}
+              lockedPlatform="keeta"
               onSelectRider={openRider360}
             />
           )}
-          {activeNav === 'alerts' && (
+
+          {safeActiveNav === 'alerts' && (
             <AlertsCenterView
-              dataset={dataset}
-              dictionaryEntries={errorDictionary}
-              riderErrorCases={riderErrorCases}
+              dataset={scopedDataset}
+              dictionaryEntries={scopedErrorDict}
+              riderErrorCases={scopedErrorCases}
+              vehicles={scopedVehicles}
+              privateDocs={scopedPrivateDocs}
+              platformAccounts={scopedPlatformAccounts}
+              platformCatalog={platformCatalog}
               settings={settings}
-              filters={filters}
+              filters={effectiveFilters}
+              lockedPlatform={lockedPlatform}
               onSelectRider={openRider360}
-              onGoToSettings={() => handleSelectNav('settings')}
+              onGoToSettings={handleGoToSettings}
             />
           )}
-          {activeNav === 'reports' && (
+
+          {safeActiveNav === 'reports' && (
             <ReportsExportsView
-              dataset={dataset}
-              filteredRows={filteredRows}
-              dictionaryEntries={errorDictionary}
-              riderErrorCases={riderErrorCases}
-              operationalCases={operationalCases}
+              dataset={scopedDataset}
+              filteredRows={scopedFilteredRows}
+              dictionaryEntries={scopedErrorDict}
+              riderErrorCases={scopedErrorCases}
+              operationalCases={scopedCases}
+              vehicles={scopedVehicles}
+              vehicleAssignments={scopedVehicleAssignments}
+              vehicleMaintenance={scopedVehicleMaintenance}
+              platformAccounts={scopedPlatformAccounts}
+              privateDocs={scopedPrivateDocs}
+              auditLogs={auditLogs}
+              platformCatalog={platformCatalog}
               settings={settings}
+              lockedPlatform={lockedPlatform}
             />
           )}
-          {activeNav === 'import' && (
+
+          {safeActiveNav === 'import' && (
             <ImportCenter
               currentUser={userProfile}
-              importBatches={importBatches}
+              importBatches={scopedBatches}
               settings={settings}
+              platformCatalog={platformCatalog}
+              lockedPlatform={
+                effectiveScope === 'global'
+                  ? keetaActive
+                    ? undefined
+                    : 'hungerstation'
+                  : effectiveScope
+              }
               onCommitted={() => loadAllOperationalData(userProfile)}
             />
           )}
-          {activeNav === 'settings' && (
+
+          {safeActiveNav === 'settings' && canAccessGlobal && (
             <SystemSettingsView
               settings={settings}
               auditLogs={auditLogs}
               currentUser={userProfile}
               allowedUids={allowedUids}
-              onRefresh={() => loadAllOperationalData(userProfile)}
-            />
-          )}
-          {activeNav === 'users' && (
-            <UserManagementView
-              usersList={usersList}
-              currentUser={userProfile}
-              allowedUids={allowedUids}
+              platformCatalog={platformCatalog}
+              documentTypes={documentTypes}
+              roleTemplates={roleTemplates}
+              onOpenRbac={() => handleSelectNav('rbac_roles')}
               onRefresh={() => loadAllOperationalData(userProfile)}
             />
           )}

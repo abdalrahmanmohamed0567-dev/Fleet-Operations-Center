@@ -3,16 +3,20 @@ import {
   CheckCircle2,
   ClipboardCheck,
   Plus,
-  ShieldAlert,
-  UserCheck,
-  X,
 } from 'lucide-react';
 import { doc, serverTimestamp, setDoc } from 'firebase/firestore';
 import { useMemo, useState } from 'react';
 import { db, handleFirestoreError, OperationType } from '../lib/firebase';
 import type { FleetDataset, UnifiedDailyRow } from '../lib/fleetAnalytics';
 import { buildInterventionQueue, type InterventionCandidate } from '../lib/smartAnalytics';
+import {
+  buildEffectiveFormSchema,
+  sanitizeCustomFieldsForFirestore,
+  validateDynamicFormValues,
+} from '../lib/dynamicSchemaEngine';
 import type {
+  DynamicFieldDefinition,
+  DynamicFormDefinition,
   ErrorCodeDictionaryEntry,
   OperationalCase,
   OperationalCasePriority,
@@ -22,7 +26,21 @@ import type {
   UserProfile,
 } from '../types/fleet';
 import { DataTable, type TableColumn } from './DataTable';
+import { DynamicFieldsRenderer } from './DynamicFieldsRenderer';
 import { KpiCard } from './KpiCard';
+import {
+  Button,
+  FormField,
+  Input,
+  PageHeader,
+  Select,
+  SlideDrawer,
+  StatusBadge,
+  Tabs,
+  Textarea,
+  ToastBanner,
+  type BadgeTone,
+} from './ui/EnterpriseUI';
 
 interface OperationsControlCenterProps {
   dataset: FleetDataset;
@@ -33,6 +51,9 @@ interface OperationsControlCenterProps {
   usersList: UserProfile[];
   currentUser: UserProfile;
   allowedUids: string[];
+  dynamicFields?: DynamicFieldDefinition[];
+  dynamicForms?: DynamicFormDefinition[];
+  lockedPlatform?: Platform;
   onSelectRider: (platform: Platform, riderId: string) => void;
   onRefresh: () => Promise<void>;
 }
@@ -45,11 +66,26 @@ const STATUS_LABELS: Record<OperationalCaseStatus, string> = {
   closed: 'مغلقة',
 };
 
+const STATUS_TONES: Record<OperationalCaseStatus, BadgeTone> = {
+  new: 'warning',
+  under_review: 'info',
+  in_progress: 'info',
+  resolved: 'success',
+  closed: 'neutral',
+};
+
 const PRIORITY_LABELS: Record<OperationalCasePriority, string> = {
   critical: 'حرج',
   high: 'مرتفع',
   medium: 'متوسط',
   low: 'منخفض',
+};
+
+const PRIORITY_TONES: Record<OperationalCasePriority, BadgeTone> = {
+  critical: 'danger',
+  high: 'warning',
+  medium: 'info',
+  low: 'neutral',
 };
 
 function isCaseOverdue(c: OperationalCase, overdueDays: number): boolean {
@@ -70,6 +106,9 @@ export function OperationsControlCenter({
   usersList,
   currentUser,
   allowedUids,
+  dynamicFields = [],
+  dynamicForms = [],
+  lockedPlatform,
   onSelectRider,
   onRefresh,
 }: OperationsControlCenterProps) {
@@ -88,10 +127,12 @@ export function OperationsControlCenter({
   const [reasonFilter, setReasonFilter] = useState<string>('all');
   const [caseViewFilter, setCaseViewFilter] = useState<'all' | 'open' | 'overdue' | 'mine' | 'closed'>('open');
 
-  // Case Editor Modal State (Create or Update)
-  const [modalOpen, setModalOpen] = useState(false);
+  // Case Editor Drawer State (Create or Update)
+  const [drawerOpen, setDrawerOpen] = useState(false);
   const [editingCase, setEditingCase] = useState<OperationalCase | null>(null);
-  const [formPlatform, setFormPlatform] = useState<Platform>('hungerstation');
+  const [caseCustomValues, setCaseCustomValues] = useState<Record<string, unknown>>({});
+  const [caseCustomErrors, setCaseCustomErrors] = useState<Record<string, string>>({});
+  const [formPlatform, setFormPlatform] = useState<Platform>(lockedPlatform || 'hungerstation');
   const [formRiderId, setFormRiderId] = useState('');
   const [formRiderName, setFormRiderName] = useState('');
   const [formBranch, setFormBranch] = useState('');
@@ -110,22 +151,27 @@ export function OperationsControlCenter({
 
   const overdueDays = settings.caseOverdueDays ?? 3;
 
-  const interventionQueue = useMemo(
-    () => buildInterventionQueue(dataset, filteredRows, dictionaryEntries, settings, operationalCases),
-    [dataset, filteredRows, dictionaryEntries, settings, operationalCases]
+  const scopedCases = useMemo(
+    () => (lockedPlatform ? operationalCases.filter((c) => c.platform === lockedPlatform) : operationalCases),
+    [operationalCases, lockedPlatform]
   );
+
+  const interventionQueue = useMemo(() => {
+    const raw = buildInterventionQueue(dataset, filteredRows, dictionaryEntries, settings, scopedCases);
+    return lockedPlatform ? raw.filter((c) => c.platform === lockedPlatform) : raw;
+  }, [dataset, filteredRows, dictionaryEntries, settings, scopedCases, lockedPlatform]);
 
   const filteredQueue = useMemo(() => {
     if (reasonFilter === 'all') return interventionQueue;
     return interventionQueue.filter((c) => c.reasonType === reasonFilter);
   }, [interventionQueue, reasonFilter]);
 
-  const openCases = operationalCases.filter((c) => c.status !== 'closed' && c.status !== 'resolved');
-  const overdueCases = operationalCases.filter((c) => isCaseOverdue(c, overdueDays));
-  const resolvedClosedCases = operationalCases.filter((c) => c.status === 'resolved' || c.status === 'closed');
+  const openCases = scopedCases.filter((c) => c.status !== 'closed' && c.status !== 'resolved');
+  const overdueCases = scopedCases.filter((c) => isCaseOverdue(c, overdueDays));
+  const resolvedClosedCases = scopedCases.filter((c) => c.status === 'resolved' || c.status === 'closed');
 
   const filteredCases = useMemo(() => {
-    return operationalCases
+    return scopedCases
       .filter((c) => {
         if (caseViewFilter === 'open') return c.status !== 'closed' && c.status !== 'resolved';
         if (caseViewFilter === 'overdue') return isCaseOverdue(c, overdueDays);
@@ -134,7 +180,12 @@ export function OperationsControlCenter({
         return true;
       })
       .sort((a, b) => b.registeredDate.localeCompare(a.registeredDate));
-  }, [operationalCases, caseViewFilter, overdueDays, currentUser.email]);
+  }, [scopedCases, caseViewFilter, overdueDays, currentUser.email]);
+
+  const opCaseSchema = useMemo(
+    () => buildEffectiveFormSchema({ formId: 'ops_case', dynamicForms, dynamicFields }),
+    [dynamicForms, dynamicFields]
+  );
 
   const openNewCaseFromCandidate = (cand: InterventionCandidate) => {
     if (cand.existingCase) {
@@ -144,6 +195,8 @@ export function OperationsControlCenter({
     const today = new Date().toISOString().slice(0, 10);
     const dueDt = new Date(Date.now() + overdueDays * 86400000).toISOString().slice(0, 10);
     setEditingCase(null);
+    setCaseCustomValues({});
+    setCaseCustomErrors({});
     setFormPlatform(cand.platform);
     setFormRiderId(cand.riderId);
     setFormRiderName(cand.riderName);
@@ -158,14 +211,16 @@ export function OperationsControlCenter({
     setFormNotes('');
     setFormDueDate(dueDt);
     setFormSourceRef(`${cand.platform}:${cand.riderId}:${today}`);
-    setModalOpen(true);
+    setDrawerOpen(true);
     setMsg(null);
   };
 
   const openBlankCase = () => {
     const dueDt = new Date(Date.now() + overdueDays * 86400000).toISOString().slice(0, 10);
     setEditingCase(null);
-    setFormPlatform('hungerstation');
+    setCaseCustomValues({});
+    setCaseCustomErrors({});
+    setFormPlatform(lockedPlatform || 'hungerstation');
     setFormRiderId('');
     setFormRiderName('');
     setFormBranch('');
@@ -179,12 +234,14 @@ export function OperationsControlCenter({
     setFormNotes('');
     setFormDueDate(dueDt);
     setFormSourceRef('manual');
-    setModalOpen(true);
+    setDrawerOpen(true);
     setMsg(null);
   };
 
   const openEditCase = (c: OperationalCase) => {
     setEditingCase(c);
+    setCaseCustomValues(c.customFields ? { ...c.customFields } : {});
+    setCaseCustomErrors({});
     setFormPlatform(c.platform);
     setFormRiderId(c.riderId);
     setFormRiderName(c.riderName || '');
@@ -199,19 +256,33 @@ export function OperationsControlCenter({
     setFormNotes(c.notes || '');
     setFormDueDate(c.dueDate || '');
     setFormSourceRef(c.sourceRef || '');
-    setModalOpen(true);
+    setDrawerOpen(true);
     setMsg(null);
   };
 
   const handleSaveCase = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!canManage || !formRiderId.trim() || !formTitle.trim()) return;
+    const dynErrs = validateDynamicFormValues(
+      Array.from(opCaseSchema.fieldsById.values()),
+      opCaseSchema.placements,
+      caseCustomValues,
+      currentUser
+    );
+    if (Object.keys(dynErrs).length > 0) {
+      setCaseCustomErrors(dynErrs);
+      setMsg({ type: 'err', text: Object.values(dynErrs)[0] || 'يرجى استكمال الحقول المخصصة المطلوبة.' });
+      return;
+    }
+    setCaseCustomErrors({});
+
     setBusy(true);
     setMsg(null);
     const today = new Date().toISOString().slice(0, 10);
     const caseId =
       editingCase?.caseId ||
       `opcase_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+    const sanitizedCustom = sanitizeCustomFieldsForFirestore(caseCustomValues);
 
     const payload: Record<string, unknown> = {
       caseId,
@@ -237,6 +308,9 @@ export function OperationsControlCenter({
       createdAt: editingCase?.createdAt ? editingCase.createdAt : serverTimestamp(),
       updatedAt: serverTimestamp(),
     };
+    if (Object.keys(sanitizedCustom).length > 0 || editingCase?.customFields) {
+      payload.customFields = sanitizedCustom;
+    }
 
     try {
       await setDoc(doc(db, 'operationalCases', caseId), payload, { merge: Boolean(editingCase) });
@@ -252,7 +326,7 @@ export function OperationsControlCenter({
         allowedUids: payload.allowedUids,
         createdAt: serverTimestamp(),
       });
-      setModalOpen(false);
+      setDrawerOpen(false);
       setMsg({ type: 'ok', text: `تم حفظ الحالة التشغيلية (${caseId}) بنجاح.` });
       await onRefresh();
     } catch (err) {
@@ -272,17 +346,10 @@ export function OperationsControlCenter({
       header: 'الأولوية',
       sortValue: (r) => (r.severity === 'critical' ? 3 : r.severity === 'high' ? 2 : 1),
       render: (r) => (
-        <span
-          className={`font-semibold ${
-            r.severity === 'critical'
-              ? 'text-red-700 dark:text-red-400'
-              : r.severity === 'high'
-                ? 'text-amber-700 dark:text-amber-400'
-                : 'text-slate-700 dark:text-slate-300'
-          }`}
-        >
-          {r.severity === 'critical' ? 'حرج' : r.severity === 'high' ? 'مرتفع' : 'متوسط'}
-        </span>
+        <StatusBadge
+          label={r.severity === 'critical' ? 'حرج' : r.severity === 'high' ? 'مرتفع' : 'متوسط'}
+          tone={r.severity === 'critical' ? 'danger' : r.severity === 'high' ? 'warning' : 'neutral'}
+        />
       ),
     },
     {
@@ -304,7 +371,7 @@ export function OperationsControlCenter({
       key: 'platform',
       header: 'المنصة / الفرع',
       render: (r) => (
-        <span>
+        <span className="text-xs text-slate-700 dark:text-slate-300">
           {r.platform === 'hungerstation' ? 'HungerStation' : 'Keeta'} · {r.branchOrCity}
         </span>
       ),
@@ -318,13 +385,13 @@ export function OperationsControlCenter({
     {
       key: 'metric',
       header: 'المؤشر المرصود',
-      render: (r) => <span className="font-mono-num text-xs">{r.metricSummary}</span>,
+      render: (r) => <span className="font-mono-num text-xs text-slate-700 dark:text-slate-300">{r.metricSummary}</span>,
     },
     {
       key: 'date',
       header: 'آخر تاريخ',
       sortValue: (r) => r.latestDate,
-      render: (r) => <span className="font-mono-num">{r.latestDate}</span>,
+      render: (r) => <span className="font-mono-num text-xs">{r.latestDate}</span>,
     },
     {
       key: 'action',
@@ -332,17 +399,13 @@ export function OperationsControlCenter({
       align: 'center',
       render: (r) =>
         canManage ? (
-          <button
-            type="button"
+          <Button
+            size="sm"
+            variant={r.existingCase ? 'accent' : 'secondary'}
             onClick={() => openNewCaseFromCandidate(r)}
-            className={`rounded-md border px-2.5 py-1 text-xs font-semibold whitespace-nowrap ${
-              r.existingCase
-                ? 'border-blue-200 dark:border-blue-800 bg-blue-50 dark:bg-blue-950/50 text-blue-700 dark:text-blue-300'
-                : 'border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-slate-800 dark:text-slate-100 hover:bg-slate-900 hover:text-white dark:hover:bg-blue-600'
-            }`}
           >
             {r.existingCase ? `تحديث (${STATUS_LABELS[r.existingCase.status]})` : 'فتح حالة تشغيلية'}
-          </button>
+          </Button>
         ) : (
           <span className="text-xs text-slate-400">عرض فقط</span>
         ),
@@ -354,19 +417,7 @@ export function OperationsControlCenter({
       key: 'priority',
       header: 'الأولوية',
       sortValue: (c) => c.priority,
-      render: (c) => (
-        <span
-          className={`font-semibold ${
-            c.priority === 'critical'
-              ? 'text-red-700 dark:text-red-400'
-              : c.priority === 'high'
-                ? 'text-amber-700 dark:text-amber-400'
-                : 'text-slate-700 dark:text-slate-300'
-          }`}
-        >
-          {PRIORITY_LABELS[c.priority]}
-        </span>
-      ),
+      render: (c) => <StatusBadge label={PRIORITY_LABELS[c.priority]} tone={PRIORITY_TONES[c.priority]} />,
     },
     {
       key: 'title',
@@ -392,19 +443,9 @@ export function OperationsControlCenter({
       render: (c) => {
         const overdue = isCaseOverdue(c, overdueDays);
         return (
-          <div className="space-y-0.5">
-            <span
-              className={`font-semibold ${
-                c.status === 'resolved' || c.status === 'closed'
-                  ? 'text-emerald-700 dark:text-emerald-400'
-                  : c.status === 'in_progress'
-                    ? 'text-blue-700 dark:text-blue-400'
-                    : 'text-amber-700 dark:text-amber-400'
-              }`}
-            >
-              {STATUS_LABELS[c.status]}
-            </span>
-            {overdue && <div className="text-[10px] font-bold text-red-700 dark:text-red-400">متأخرة عن الموعد</div>}
+          <div className="flex flex-wrap items-center gap-1.5">
+            <StatusBadge label={STATUS_LABELS[c.status]} tone={STATUS_TONES[c.status]} />
+            {overdue && <StatusBadge label="متأخرة" tone="danger" />}
           </div>
         );
       },
@@ -437,50 +478,38 @@ export function OperationsControlCenter({
       align: 'center',
       render: (c) =>
         canManage ? (
-          <button
-            type="button"
-            onClick={() => openEditCase(c)}
-            className="rounded-md border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 px-2.5 py-1 text-xs font-semibold text-slate-800 dark:text-slate-100 hover:bg-slate-900 hover:text-white dark:hover:bg-blue-600"
-          >
+          <Button size="sm" variant="secondary" onClick={() => openEditCase(c)}>
             متابعة
-          </button>
+          </Button>
         ) : (
           <span className="text-xs text-slate-400">-</span>
         ),
     },
   ];
 
+  const title =
+    lockedPlatform === 'hungerstation'
+      ? 'التحكم التشغيلي والحالات — HungerStation'
+      : lockedPlatform === 'keeta'
+        ? 'التحكم التشغيلي والحالات — Keeta'
+        : 'مركز التحكم التشغيلي والحالات (Operations Control Center)';
+
   return (
     <div className="space-y-6">
-      <div className="flex flex-wrap items-center justify-between gap-4">
-        <div>
-          <h2 className="text-lg font-bold text-slate-900 dark:text-slate-100">مركز التحكم التشغيلي والحالات (Operations Control Center)</h2>
-          <p className="text-xs text-slate-500 dark:text-slate-400">
-            رصد يومي للمندوبين المتطلبين لتدخل فوري مع نظام متكامل لإدارة دورة حياة الحالات التشغيلية.
-          </p>
-        </div>
-        {canManage && (
-          <button
-            type="button"
-            onClick={openBlankCase}
-            className="inline-flex items-center gap-1.5 rounded-lg bg-slate-900 dark:bg-blue-600 px-4 py-2 text-xs font-semibold text-white hover:bg-slate-800 dark:hover:bg-blue-700 whitespace-nowrap shrink-0"
-          >
-            <Plus className="h-4 w-4" />
-            <span>فتح حالة تشغيلية يدوية</span>
-          </button>
-        )}
-      </div>
+      <PageHeader
+        title={title}
+        subtitle="رصد يومي للمندوبين المتطلبين لتدخل فوري مع نظام متكامل لإدارة دورة حياة الحالات التشغيلية."
+        actions={
+          canManage ? (
+            <Button variant="primary" icon={<Plus className="h-4 w-4" />} onClick={openBlankCase}>
+              فتح حالة تشغيلية يدوية
+            </Button>
+          ) : undefined
+        }
+      />
 
       {msg && (
-        <div
-          className={`rounded-xl border p-3 text-sm ${
-            msg.type === 'ok'
-              ? 'border-emerald-200 dark:border-emerald-800 bg-emerald-50 dark:bg-emerald-950/50 text-emerald-800 dark:text-emerald-200'
-              : 'border-red-200 dark:border-red-800 bg-red-50 dark:bg-red-950/50 text-red-800 dark:text-red-200'
-          }`}
-        >
-          {msg.text}
-        </div>
+        <ToastBanner type={msg.type} message={msg.text} onDismiss={() => setMsg(null)} />
       )}
 
       <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
@@ -504,73 +533,60 @@ export function OperationsControlCenter({
         <KpiCard label="حالات تمت معالجتها / مغلقة" value={String(resolvedClosedCases.length)} tone="good" />
       </div>
 
-      {/* Mode Switcher */}
-      <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-200 dark:border-slate-800 pb-3">
-        <div className="flex items-center gap-2">
-          <button
-            type="button"
-            onClick={() => setTab('queue')}
-            className={`inline-flex items-center gap-1.5 rounded-lg px-4 py-2 text-xs font-semibold transition-colors ${
-              tab === 'queue'
-                ? 'bg-slate-900 dark:bg-blue-600 text-white'
-                : 'border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 text-slate-700 dark:text-slate-300'
-            }`}
-          >
-            <AlertTriangle className="h-3.5 w-3.5" />
-            <span>طابور التدخل اليومي ({interventionQueue.length})</span>
-          </button>
-          <button
-            type="button"
-            onClick={() => setTab('cases')}
-            className={`inline-flex items-center gap-1.5 rounded-lg px-4 py-2 text-xs font-semibold transition-colors ${
-              tab === 'cases'
-                ? 'bg-slate-900 dark:bg-blue-600 text-white'
-                : 'border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 text-slate-700 dark:text-slate-300'
-            }`}
-          >
-            <ClipboardCheck className="h-3.5 w-3.5" />
-            <span>سجل الحالات التشغيلية ({operationalCases.length})</span>
-          </button>
-        </div>
+      {/* Mode Switcher & Sub-Filter */}
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <Tabs
+          variant="underline"
+          activeKey={tab}
+          onChange={setTab}
+          items={[
+            {
+              key: 'queue',
+              label: 'طابور التدخل اليومي',
+              count: interventionQueue.length,
+              icon: <AlertTriangle className="h-3.5 w-3.5" />,
+            },
+            {
+              key: 'cases',
+              label: 'سجل الحالات التشغيلية',
+              count: scopedCases.length,
+              icon: <ClipboardCheck className="h-3.5 w-3.5" />,
+            },
+          ]}
+        />
 
         {tab === 'queue' ? (
-          <select
-            value={reasonFilter}
-            onChange={(e) => setReasonFilter(e.target.value)}
-            className="rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 px-3 py-1.5 text-xs text-slate-800 dark:text-slate-100"
-          >
-            <option value="all">كل أسباب التدخل (7 محاور)</option>
-            <option value="low_hours">انخفاض ساعات العمل</option>
-            <option value="low_orders">انخفاض الطلبات</option>
-            <option value="high_rejection_cancel">ارتفاع الرفض أو الإلغاء</option>
-            <option value="repeated_overdue">تكرار التأخير Overdue</option>
-            <option value="poor_attendance">ضعف الالتزام بالورديات</option>
-            <option value="error_codes">أكواد أخطاء هنقرستيشن</option>
-            <option value="facial_failure">فشل التحقق من الهوية</option>
-          </select>
-        ) : (
-          <div className="flex flex-wrap items-center gap-1.5">
-            {[
-              { id: 'open', label: 'المفتوحة' },
-              { id: 'overdue', label: `المتأخرة (${overdueCases.length})` },
-              { id: 'mine', label: 'المعيّنة لي' },
-              { id: 'closed', label: 'المغلقة/المعالجة' },
-              { id: 'all', label: 'الكل' },
-            ].map((f) => (
-              <button
-                key={f.id}
-                type="button"
-                onClick={() => setCaseViewFilter(f.id as typeof caseViewFilter)}
-                className={`rounded-md px-3 py-1.5 text-xs font-semibold ${
-                  caseViewFilter === f.id
-                    ? 'bg-slate-900 dark:bg-blue-600 text-white'
-                    : 'border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 text-slate-600 dark:text-slate-300'
-                }`}
-              >
-                {f.label}
-              </button>
-            ))}
+          <div className="w-full sm:w-64">
+            <Select value={reasonFilter} onChange={(e) => setReasonFilter(e.target.value)}>
+              <option value="all">كل أسباب التدخل</option>
+              <option value="low_hours">انخفاض ساعات العمل</option>
+              <option value="low_orders">انخفاض الطلبات</option>
+              <option value="high_rejection_cancel">ارتفاع الرفض أو الإلغاء</option>
+              <option value="poor_attendance">ضعف الالتزام بالورديات</option>
+              {lockedPlatform !== 'hungerstation' && (
+                <>
+                  <option value="repeated_overdue">تكرار التأخير Overdue</option>
+                  <option value="facial_failure">فشل التحقق من الهوية</option>
+                </>
+              )}
+              {lockedPlatform !== 'keeta' && (
+                <option value="error_codes">أكواد أخطاء هنقرستيشن</option>
+              )}
+            </Select>
           </div>
+        ) : (
+          <Tabs
+            variant="segmented"
+            activeKey={caseViewFilter}
+            onChange={setCaseViewFilter}
+            items={[
+              { key: 'open', label: 'المفتوحة' },
+              { key: 'overdue', label: 'المتأخرة', count: overdueCases.length },
+              { key: 'mine', label: 'المعيّنة لي' },
+              { key: 'closed', label: 'المغلقة/المعالجة' },
+              { key: 'all', label: 'الكل' },
+            ]}
+          />
         )}
       </div>
 
@@ -596,192 +612,186 @@ export function OperationsControlCenter({
         />
       )}
 
-      {/* Case Workflow Modal */}
-      {modalOpen && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/65 p-4" role="dialog" aria-modal="true">
-          <div className="w-full max-w-2xl max-h-[90vh] overflow-y-auto rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 p-6 shadow-2xl space-y-4">
-            <div className="flex items-center justify-between border-b border-slate-200 dark:border-slate-800 pb-3">
-              <div className="flex items-center gap-2">
-                <UserCheck className="h-5 w-5 text-blue-700 dark:text-blue-400" />
-                <h3 className="text-base font-bold text-slate-900 dark:text-slate-100">
-                  {editingCase ? `إدارة الحالة: ${editingCase.caseId}` : 'فتح حالة تشغيلية جديدة'}
-                </h3>
-              </div>
-              <button
-                type="button"
-                onClick={() => setModalOpen(false)}
-                className="rounded-lg p-1.5 text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-800"
+      {/* Case Workflow SlideDrawer */}
+      <SlideDrawer
+        open={drawerOpen}
+        onClose={() => setDrawerOpen(false)}
+        size="lg"
+        title={editingCase ? `إدارة الحالة: ${editingCase.caseId}` : 'فتح حالة تشغيلية جديدة'}
+        subtitle={
+          editingCase
+            ? `${editingCase.platform === 'hungerstation' ? 'HungerStation' : 'Keeta'} · المندوب ${editingCase.riderId}`
+            : 'توثيق حالة متابعة وتعيين المسؤول وتاريخ الاستحقاق (SLA)'
+        }
+        footer={
+          <>
+            <Button variant="secondary" onClick={() => setDrawerOpen(false)}>
+              إلغاء
+            </Button>
+            <Button
+              type="submit"
+              form="opcase-workflow-form"
+              variant="primary"
+              loading={busy}
+              disabled={busy || (editingCase?.status === 'closed' && !canReopenClosed)}
+              icon={<CheckCircle2 className="h-4 w-4" />}
+            >
+              {busy ? 'جاري الحفظ...' : 'حفظ الحالة'}
+            </Button>
+          </>
+        }
+      >
+        {editingCase?.status === 'closed' && !canReopenClosed && (
+          <ToastBanner
+            type="warn"
+            message="الحالة مغلقة. إعادة فتح أو تعديل حالة مغلقة متاح فقط لمدير العمليات أو الإدارة."
+          />
+        )}
+
+        <form id="opcase-workflow-form" onSubmit={handleSaveCase} className="space-y-4">
+          <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
+            <FormField label="المنصة">
+              <Select
+                value={formPlatform}
+                disabled={Boolean(editingCase || lockedPlatform)}
+                onChange={(e) => setFormPlatform(e.target.value as Platform)}
               >
-                <X className="h-5 w-5" />
-              </button>
-            </div>
+                {(!lockedPlatform || lockedPlatform === 'hungerstation') && (
+                  <option value="hungerstation">HungerStation</option>
+                )}
+                {(!lockedPlatform || lockedPlatform === 'keeta') && (
+                  <option value="keeta">Keeta</option>
+                )}
+              </Select>
+            </FormField>
 
-            {editingCase?.status === 'closed' && !canReopenClosed && (
-              <div className="flex items-center gap-2 rounded-lg border border-amber-200 dark:border-amber-800 bg-amber-50 dark:bg-amber-950/40 p-3 text-xs text-amber-800 dark:text-amber-200">
-                <ShieldAlert className="h-4 w-4 shrink-0" />
-                <span>الحالة مغلقة. إعادة فتح أو تعديل حالة مغلقة متاح فقط لمدير العمليات أو الإدارة.</span>
-              </div>
-            )}
+            <FormField label="معرف المندوب" required>
+              <Input
+                type="text"
+                required
+                disabled={Boolean(editingCase)}
+                value={formRiderId}
+                onChange={(e) => setFormRiderId(e.target.value)}
+                className="font-mono-num"
+              />
+            </FormField>
 
-            <form onSubmit={handleSaveCase} className="space-y-4 text-xs">
-              <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
-                <div>
-                  <label className="mb-1 block font-semibold text-slate-700 dark:text-slate-300">المنصة</label>
-                  <select
-                    value={formPlatform}
-                    disabled={Boolean(editingCase)}
-                    onChange={(e) => setFormPlatform(e.target.value as Platform)}
-                    className="w-full rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-950 px-2.5 py-2 text-slate-900 dark:text-slate-100 disabled:opacity-60"
-                  >
-                    <option value="hungerstation">HungerStation</option>
-                    <option value="keeta">Keeta</option>
-                  </select>
-                </div>
-                <div>
-                  <label className="mb-1 block font-semibold text-slate-700 dark:text-slate-300">معرف المندوب</label>
-                  <input
-                    type="text"
-                    required
-                    disabled={Boolean(editingCase)}
-                    value={formRiderId}
-                    onChange={(e) => setFormRiderId(e.target.value)}
-                    className="w-full rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-950 px-2.5 py-2 font-mono-num text-slate-900 dark:text-slate-100 disabled:opacity-60"
-                  />
-                </div>
-                <div>
-                  <label className="mb-1 block font-semibold text-slate-700 dark:text-slate-300">تاريخ الاستحقاق (SLA)</label>
-                  <input
-                    type="date"
-                    value={formDueDate}
-                    onChange={(e) => setFormDueDate(e.target.value)}
-                    className="w-full rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-950 px-2.5 py-2 font-mono-num text-slate-900 dark:text-slate-100"
-                  />
-                </div>
-              </div>
-
-              <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-                <div>
-                  <label className="mb-1 block font-semibold text-slate-700 dark:text-slate-300">عنوان الحالة</label>
-                  <input
-                    type="text"
-                    required
-                    value={formTitle}
-                    onChange={(e) => setFormTitle(e.target.value)}
-                    placeholder="مثال: انخفاض عدد الطلبات أو تكرار كود خطأ"
-                    className="w-full rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-950 px-3 py-2 text-slate-900 dark:text-slate-100"
-                  />
-                </div>
-                <div>
-                  <label className="mb-1 block font-semibold text-slate-700 dark:text-slate-300">المسؤول عن المتابعة</label>
-                  <input
-                    type="text"
-                    list="ops-users-emails"
-                    value={formAssignee}
-                    onChange={(e) => setFormAssignee(e.target.value)}
-                    placeholder="البريد الإلكتروني للمشرف..."
-                    className="w-full rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-950 px-3 py-2 font-mono-num text-slate-900 dark:text-slate-100"
-                  />
-                  <datalist id="ops-users-emails">
-                    {usersList.filter((u) => u.active).map((u) => (
-                      <option key={u.uid} value={u.email} />
-                    ))}
-                  </datalist>
-                </div>
-              </div>
-
-              <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
-                <div>
-                  <label className="mb-1 block font-semibold text-slate-700 dark:text-slate-300">الأولوية</label>
-                  <select
-                    value={formPriority}
-                    onChange={(e) => setFormPriority(e.target.value as OperationalCasePriority)}
-                    className="w-full rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-950 px-2.5 py-2 text-slate-900 dark:text-slate-100"
-                  >
-                    <option value="critical">حرج (Critical)</option>
-                    <option value="high">مرتفع (High)</option>
-                    <option value="medium">متوسط (Medium)</option>
-                    <option value="low">منخفض (Low)</option>
-                  </select>
-                </div>
-                <div>
-                  <label className="mb-1 block font-semibold text-slate-700 dark:text-slate-300">مرحلة المعالجة</label>
-                  <select
-                    value={formStatus}
-                    onChange={(e) => setFormStatus(e.target.value as OperationalCaseStatus)}
-                    className="w-full rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-950 px-2.5 py-2 text-slate-900 dark:text-slate-100"
-                  >
-                    <option value="new">جديدة (New)</option>
-                    <option value="under_review">قيد المراجعة (Under Review)</option>
-                    <option value="in_progress">قيد المعالجة (In Progress)</option>
-                    <option value="resolved">تمت المعالجة (Resolved)</option>
-                    <option value="closed">مغلقة (Closed)</option>
-                  </select>
-                </div>
-                <div>
-                  <label className="mb-1 block font-semibold text-slate-700 dark:text-slate-300">الفرع / المدينة</label>
-                  <input
-                    type="text"
-                    value={formBranch}
-                    onChange={(e) => setFormBranch(e.target.value)}
-                    className="w-full rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-950 px-2.5 py-2 text-slate-900 dark:text-slate-100"
-                  />
-                </div>
-              </div>
-
-              <div>
-                <label className="mb-1 block font-semibold text-slate-700 dark:text-slate-300">وصف المؤشر / المشكلة</label>
-                <textarea
-                  rows={2}
-                  value={formDescription}
-                  onChange={(e) => setFormDescription(e.target.value)}
-                  className="w-full rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-950 px-3 py-2 text-slate-900 dark:text-slate-100"
-                />
-              </div>
-
-              <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-                <div>
-                  <label className="mb-1 block font-semibold text-slate-700 dark:text-slate-300">الإجراء المتخذ</label>
-                  <input
-                    type="text"
-                    value={formActionTaken}
-                    onChange={(e) => setFormActionTaken(e.target.value)}
-                    placeholder="التواصل الهاتفي / تنبيه المشرف / إعادة جدولة..."
-                    className="w-full rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-950 px-3 py-2 text-slate-900 dark:text-slate-100"
-                  />
-                </div>
-                <div>
-                  <label className="mb-1 block font-semibold text-slate-700 dark:text-slate-300">ملاحظات الإشراف</label>
-                  <input
-                    type="text"
-                    value={formNotes}
-                    onChange={(e) => setFormNotes(e.target.value)}
-                    placeholder="تفاصيل المتابعة أو سبب الإغلاق..."
-                    className="w-full rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-950 px-3 py-2 text-slate-900 dark:text-slate-100"
-                  />
-                </div>
-              </div>
-
-              <div className="flex items-center justify-end gap-3 border-t border-slate-200 dark:border-slate-800 pt-4">
-                <button
-                  type="button"
-                  onClick={() => setModalOpen(false)}
-                  className="rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 px-4 py-2 font-semibold text-slate-700 dark:text-slate-200"
-                >
-                  إلغاء
-                </button>
-                <button
-                  type="submit"
-                  disabled={busy || (editingCase?.status === 'closed' && !canReopenClosed)}
-                  className="inline-flex items-center gap-1.5 rounded-lg bg-slate-900 dark:bg-blue-600 px-4 py-2 font-semibold text-white hover:bg-slate-800 dark:hover:bg-blue-700 disabled:opacity-50"
-                >
-                  <CheckCircle2 className="h-4 w-4" />
-                  <span>{busy ? 'جاري الحفظ...' : 'حفظ الحالة'}</span>
-                </button>
-              </div>
-            </form>
+            <FormField label="تاريخ الاستحقاق (SLA)">
+              <Input
+                type="date"
+                value={formDueDate}
+                onChange={(e) => setFormDueDate(e.target.value)}
+                className="font-mono-num"
+              />
+            </FormField>
           </div>
-        </div>
-      )}
+
+          <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+            <FormField label="عنوان الحالة" required>
+              <Input
+                type="text"
+                required
+                value={formTitle}
+                onChange={(e) => setFormTitle(e.target.value)}
+                placeholder="مثال: انخفاض عدد الطلبات أو تكرار كود خطأ"
+              />
+            </FormField>
+
+            <FormField label="المسؤول عن المتابعة">
+              <Input
+                type="text"
+                list="ops-users-emails"
+                value={formAssignee}
+                onChange={(e) => setFormAssignee(e.target.value)}
+                placeholder="البريد الإلكتروني للمشرف..."
+                className="font-mono-num"
+              />
+              <datalist id="ops-users-emails">
+                {usersList.filter((u) => u.active).map((u) => (
+                  <option key={u.uid} value={u.email} />
+                ))}
+              </datalist>
+            </FormField>
+          </div>
+
+          <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
+            <FormField label="الأولوية">
+              <Select
+                value={formPriority}
+                onChange={(e) => setFormPriority(e.target.value as OperationalCasePriority)}
+              >
+                <option value="critical">حرج (Critical)</option>
+                <option value="high">مرتفع (High)</option>
+                <option value="medium">متوسط (Medium)</option>
+                <option value="low">منخفض (Low)</option>
+              </Select>
+            </FormField>
+
+            <FormField label="مرحلة المعالجة">
+              <Select
+                value={formStatus}
+                onChange={(e) => setFormStatus(e.target.value as OperationalCaseStatus)}
+              >
+                <option value="new">جديدة (New)</option>
+                <option value="under_review">قيد المراجعة (Under Review)</option>
+                <option value="in_progress">قيد المعالجة (In Progress)</option>
+                <option value="resolved">تمت المعالجة (Resolved)</option>
+                <option value="closed">مغلقة (Closed)</option>
+              </Select>
+            </FormField>
+
+            <FormField label="الفرع / المدينة">
+              <Input
+                type="text"
+                value={formBranch}
+                onChange={(e) => setFormBranch(e.target.value)}
+              />
+            </FormField>
+          </div>
+
+          <FormField label="وصف المؤشر / المشكلة">
+            <Textarea
+              rows={3}
+              value={formDescription}
+              onChange={(e) => setFormDescription(e.target.value)}
+            />
+          </FormField>
+
+          <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+            <FormField label="الإجراء المتخذ">
+              <Input
+                type="text"
+                value={formActionTaken}
+                onChange={(e) => setFormActionTaken(e.target.value)}
+                placeholder="التواصل الهاتفي / تنبيه المشرف / إعادة جدولة..."
+              />
+            </FormField>
+
+            <FormField label="ملاحظات الإشراف">
+              <Input
+                type="text"
+                value={formNotes}
+                onChange={(e) => setFormNotes(e.target.value)}
+                placeholder="تفاصيل المتابعة أو سبب الإغلاق..."
+              />
+            </FormField>
+          </div>
+          <DynamicFieldsRenderer
+            formId="ops_case"
+            entityId={editingCase?.caseId || 'opcase_draft'}
+            entityLabel={formTitle || formRiderId || 'حالة تشغيلية'}
+            dynamicFields={dynamicFields}
+            dynamicForms={dynamicForms}
+            values={caseCustomValues}
+            onChange={setCaseCustomValues}
+            user={currentUser}
+            mode="form"
+            errors={caseCustomErrors}
+            contextValues={{ ...caseCustomValues }}
+            title="حقول مخصصة للحالة التشغيلية"
+          />
+        </form>
+      </SlideDrawer>
     </div>
   );
 }

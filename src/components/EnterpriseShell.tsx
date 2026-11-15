@@ -1,15 +1,25 @@
 import {
   Activity,
   AlertTriangle,
+  ArrowLeftRight,
   Award,
   BarChart3,
   Bell,
   CalendarCheck,
+  Car,
+  ChevronDown,
   ChevronLeft,
   ChevronRight,
   Clock,
+  FileCheck2,
+  FileSearch,
   FileSpreadsheet,
+  FolderLock,
+  Globe,
+  Home,
+  KeyRound,
   LayoutDashboard,
+  Link2,
   LogOut,
   MapPin,
   Menu,
@@ -18,88 +28,278 @@ import {
   ScanFace,
   Search,
   Settings,
-  Shield,
   SlidersHorizontal,
+  Smartphone,
   Sun,
   Truck,
   Upload,
   User,
+  UserCheck,
   Users,
+  Wrench,
   X,
 } from 'lucide-react';
 import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
+import { computeAllDocumentExpiries } from '../lib/erpHelpers';
 import { computeErrorCodeIntelligence, generateErrorIntelligenceAlerts } from '../lib/errorIntelligence';
 import { generateOperationalAlerts, type FleetDataset } from '../lib/fleetAnalytics';
+import { hasPermission, isKeetaActive, mapLegacyRoleToTemplateId } from '../shared/rbacCore';
 import type {
   ErrorCodeDictionaryEntry,
   FilterState,
   OperationalCase,
   OperationalSettings,
+  PermissionAction,
+  PermissionModule,
   Platform,
+  PlatformAccount,
+  PlatformCatalogEntry,
+  PrivateDocumentRecord,
   RiderErrorCase,
+  RoleTemplate,
   UserProfile,
+  UserRole,
+  VehicleMaster,
+  WorkspaceMode,
 } from '../types/fleet';
 
 export type NavKey =
+  // الرئيسية
+  | 'executive_admin'
   | 'overview'
-  | 'operations'
+  | 'alerts'
+  // الموارد البشرية HR
+  | 'hr_dashboard'
+  | 'hr_riders'
+  | 'hr_docs'
+  | 'hr_expiries'
+  | 'hr_status'
+  // التطبيقات والمنصات
+  | 'apps_active'
+  | 'apps_accounts'
+  | 'apps_linking'
   | 'hungerstation'
   | 'error_intel'
   | 'keeta'
+  // الأسطول والمركبات
+  | 'fleet_dashboard'
+  | 'fleet_vehicles'
+  | 'fleet_handover'
+  | 'fleet_docs'
+  | 'fleet_maintenance'
+  // العمليات
+  | 'operations'
   | 'riders'
   | 'daily_ops'
   | 'rider_perf'
   | 'attendance'
-  | 'quality'
   | 'distance_wallet'
+  | 'quality'
   | 'facial'
-  | 'alerts'
-  | 'reports'
   | 'import'
+  // التقارير والتحليلات
+  | 'reports'
+  // إدارة النظام
   | 'settings'
-  | 'users';
+  | 'rbac_users'
+  | 'rbac_roles'
+  | 'rbac_audit';
 
 export interface NavItemDef {
   key: NavKey;
   label: string;
-  group: 'القيادة والتحكم' | 'المنصات والتشغيل' | 'التحليلات والتقارير' | 'البيانات والإدارة';
+  group: string;
   icon: typeof LayoutDashboard;
+  module?: PermissionModule;
+  action?: PermissionAction;
 }
 
-export const NAV_ITEMS: NavItemDef[] = [
-  { key: 'overview', label: 'القيادة التنفيذية', group: 'القيادة والتحكم', icon: LayoutDashboard },
-  { key: 'operations', label: 'مركز التحكم التشغيلي', group: 'القيادة والتحكم', icon: SlidersHorizontal },
-  { key: 'alerts', label: 'مركز التنبيهات', group: 'القيادة والتحكم', icon: Bell },
-  { key: 'hungerstation', label: 'أداء هنقرستيشن', group: 'المنصات والتشغيل', icon: Truck },
-  { key: 'error_intel', label: 'أكواد أخطاء هنقرستيشن', group: 'المنصات والتشغيل', icon: AlertTriangle },
-  { key: 'keeta', label: 'أداء كيتا', group: 'المنصات والتشغيل', icon: Activity },
-  { key: 'riders', label: 'المندوبون و360°', group: 'المنصات والتشغيل', icon: Users },
-  { key: 'daily_ops', label: 'العمليات اليومية', group: 'التحليلات والتقارير', icon: Clock },
-  { key: 'rider_perf', label: 'أداء المندوبين', group: 'التحليلات والتقارير', icon: BarChart3 },
-  { key: 'attendance', label: 'الحضور والشفتات', group: 'التحليلات والتقارير', icon: CalendarCheck },
-  { key: 'quality', label: 'جودة التسليم', group: 'التحليلات والتقارير', icon: Award },
-  { key: 'distance_wallet', label: 'المسافات والمحافظ', group: 'التحليلات والتقارير', icon: MapPin },
-  { key: 'facial', label: 'التحقق من الهوية', group: 'التحليلات والتقارير', icon: ScanFace },
-  { key: 'reports', label: 'التقارير والذكاء التجاري', group: 'التحليلات والتقارير', icon: FileSpreadsheet },
-  { key: 'import', label: 'مركز الاستيراد', group: 'البيانات والإدارة', icon: Upload },
-  { key: 'settings', label: 'إعدادات النظام', group: 'البيانات والإدارة', icon: Settings },
-  { key: 'users', label: 'المستخدمون والصلاحيات', group: 'البيانات والإدارة', icon: Shield },
-];
+export function getNavItemsForWorkspace(
+  workspaceMode: Exclude<WorkspaceMode, 'selector'>,
+  options?: {
+    userProfile?: UserProfile | null;
+    roleTemplates?: RoleTemplate[];
+    settings?: OperationalSettings | null;
+    platformCatalog?: PlatformCatalogEntry[];
+    allowedPlatforms?: Platform[];
+  }
+): NavItemDef[] {
+  const user = options?.userProfile;
+  const templates = options?.roleTemplates || [];
+  const keetaActive = isKeetaActive(options?.settings, options?.platformCatalog);
+  const allowedPlats = options?.allowedPlatforms || ['hungerstation'];
+  const allowHs = allowedPlats.includes('hungerstation');
+  const allowKt = keetaActive && allowedPlats.includes('keeta');
 
-const ROLE_PERMISSION_NOTES: Record<UserProfile['role'], string> = {
-  owner: 'صلاحيات كاملة: استيراد، تعديل الإعدادات، إدارة المستخدمين، إدارة الحالات والأخطاء.',
-  admin: 'إدارة النظام، استيراد البيانات، إدارة المستخدمين، والحالات التشغيلية.',
-  operations_manager: 'استيراد التقارير، إدارة الحالات التشغيلية، قاموس الأخطاء، وضبط الحدود.',
-  supervisor: 'متابعة الفرق، توثيق الحالات التشغيلية، والملاحظات الإدارية.',
-  viewer: 'عرض اللوحات والتقارير والتصدير فقط (للقراءة).',
+  const can = (mod?: PermissionModule, act: PermissionAction = 'view') => {
+    if (!mod || !user) return true;
+    return hasPermission(user, templates, mod, act);
+  };
+
+  let raw: NavItemDef[];
+
+  if (workspaceMode === 'hungerstation') {
+    raw = [
+      { key: 'hungerstation', label: 'لوحة تحكم HungerStation', group: 'القيادة والتحكم', icon: Truck, module: 'operations' },
+      { key: 'operations', label: 'التحكم والحالات', group: 'القيادة والتحكم', icon: SlidersHorizontal, module: 'operations' },
+      { key: 'alerts', label: 'تنبيهات HungerStation', group: 'القيادة والتحكم', icon: Bell, module: 'alerts' },
+      { key: 'error_intel', label: 'مركز أكواد الأخطاء', group: 'التشغيل والتحليلات', icon: AlertTriangle, module: 'operations' },
+      { key: 'riders', label: 'مندوبو هنقر و360°', group: 'التشغيل والتحليلات', icon: Users, module: 'operations' },
+      { key: 'daily_ops', label: 'العمليات اليومية', group: 'التشغيل والتحليلات', icon: Clock, module: 'operations' },
+      { key: 'rider_perf', label: 'أداء المندوبين', group: 'التشغيل والتحليلات', icon: BarChart3, module: 'operations' },
+      { key: 'attendance', label: 'الحضور والالتزام', group: 'التشغيل والتحليلات', icon: CalendarCheck, module: 'operations' },
+      { key: 'distance_wallet', label: 'المسافات والمحافظ', group: 'التشغيل والتحليلات', icon: MapPin, module: 'operations' },
+      { key: 'quality', label: 'جودة التسليم الشهرية', group: 'التشغيل والتحليلات', icon: Award, module: 'operations' },
+      { key: 'reports', label: 'تقارير HungerStation', group: 'البيانات والتقارير', icon: FileSpreadsheet, module: 'reports' },
+      { key: 'import', label: 'مركز استيراد هنقر', group: 'البيانات والتقارير', icon: Upload, module: 'operations', action: 'add' },
+    ];
+  } else if (workspaceMode === 'keeta' && keetaActive) {
+    raw = [
+      { key: 'keeta', label: 'لوحة تحكم Keeta', group: 'القيادة والتحكم', icon: Activity, module: 'operations' },
+      { key: 'operations', label: 'التحكم والحالات', group: 'القيادة والتحكم', icon: SlidersHorizontal, module: 'operations' },
+      { key: 'alerts', label: 'تنبيهات Keeta', group: 'القيادة والتحكم', icon: Bell, module: 'alerts' },
+      { key: 'riders', label: 'مندوبو كيتا و360°', group: 'التشغيل والتحليلات', icon: Users, module: 'operations' },
+      { key: 'daily_ops', label: 'العمليات اليومية', group: 'التشغيل والتحليلات', icon: Clock, module: 'operations' },
+      { key: 'rider_perf', label: 'أداء المندوبين', group: 'التشغيل والتحليلات', icon: BarChart3, module: 'operations' },
+      { key: 'attendance', label: 'VDA والشفتات', group: 'التشغيل والتحليلات', icon: CalendarCheck, module: 'operations' },
+      { key: 'distance_wallet', label: 'مسافات VDA', group: 'التشغيل والتحليلات', icon: MapPin, module: 'operations' },
+      { key: 'quality', label: 'RankPlanProcess والمكافآت', group: 'التشغيل والتحليلات', icon: Award, module: 'operations' },
+      { key: 'facial', label: 'التحقق من الهوية', group: 'التشغيل والتحليلات', icon: ScanFace, module: 'operations' },
+      { key: 'reports', label: 'تقارير Keeta', group: 'البيانات والتقارير', icon: FileSpreadsheet, module: 'reports' },
+      { key: 'import', label: 'مركز استيراد كيتا', group: 'البيانات والتقارير', icon: Upload, module: 'operations', action: 'add' },
+    ];
+  } else {
+    raw = [
+      // 1. الرئيسية
+      { key: 'executive_admin', label: 'الإدارة والتحكم التنفيذي', group: 'الرئيسية', icon: LayoutDashboard, module: 'executive' },
+      {
+        key: 'overview',
+        label: keetaActive ? 'الملخص التنفيذي ومقارنة المنصتين' : 'الملخص التنفيذي للعمليات',
+        group: 'الرئيسية',
+        icon: Globe,
+        module: 'executive',
+      },
+      { key: 'alerts', label: 'التنبيهات وانتهاء الوثائق', group: 'الرئيسية', icon: Bell, module: 'alerts' },
+
+      // 2. الموارد البشرية HR
+      { key: 'hr_dashboard', label: 'لوحة الموارد البشرية', group: 'الموارد البشرية HR', icon: Users, module: 'hr' },
+      { key: 'hr_riders', label: 'ملفات المندوبين', group: 'الموارد البشرية HR', icon: UserCheck, module: 'hr' },
+      { key: 'hr_docs', label: 'خزينة المستندات الخاصة', group: 'الموارد البشرية HR', icon: FolderLock, module: 'documents' },
+      { key: 'hr_expiries', label: 'متابعة انتهاء الإقامات والرخص', group: 'الموارد البشرية HR', icon: FileCheck2, module: 'hr' },
+      { key: 'hr_status', label: 'حالات المندوبين وسجل الحركة', group: 'الموارد البشرية HR', icon: Activity, module: 'hr' },
+
+      // 3. التطبيقات والمنصات
+      { key: 'apps_active', label: 'المنصات المفعلة والحسابات', group: 'التطبيقات والمنصات', icon: Smartphone, module: 'applications' },
+      { key: 'apps_accounts', label: 'حسابات المناديب بالتطبيقات', group: 'التطبيقات والمنصات', icon: Users, module: 'applications' },
+      { key: 'apps_linking', label: 'محرك الربط وتعارض المعرفات', group: 'التطبيقات والمنصات', icon: Link2, module: 'applications' },
+      ...(allowHs
+        ? [
+            { key: 'hungerstation' as NavKey, label: 'عمليات HungerStation', group: 'التطبيقات والمنصات', icon: Truck, module: 'operations' as PermissionModule },
+            { key: 'error_intel' as NavKey, label: 'مركز أكواد الأخطاء (HS)', group: 'التطبيقات والمنصات', icon: AlertTriangle, module: 'operations' as PermissionModule },
+          ]
+        : []),
+      ...(allowKt
+        ? [{ key: 'keeta' as NavKey, label: 'عمليات Keeta', group: 'التطبيقات والمنصات', icon: Activity, module: 'operations' as PermissionModule }]
+        : []),
+
+      // 4. الأسطول والمركبات
+      { key: 'fleet_dashboard', label: 'لوحة تحكم الأسطول', group: 'الأسطول والمركبات', icon: Car, module: 'fleet' },
+      { key: 'fleet_vehicles', label: 'سجل المركبات والسيارات', group: 'الأسطول والمركبات', icon: Truck, module: 'fleet' },
+      { key: 'fleet_handover', label: 'عهدة التسليم والاستلام', group: 'الأسطول والمركبات', icon: ArrowLeftRight, module: 'fleet' },
+      { key: 'fleet_docs', label: 'وثائق المركبات والانتهاء', group: 'الأسطول والمركبات', icon: FolderLock, module: 'fleet' },
+      { key: 'fleet_maintenance', label: 'سجل الصيانة والأعطال', group: 'الأسطول والمركبات', icon: Wrench, module: 'fleet' },
+
+      // 5. العمليات
+      { key: 'operations', label: 'التحكم والحالات التشغيلية', group: 'العمليات', icon: SlidersHorizontal, module: 'operations' },
+      { key: 'riders', label: 'ملفات المناديب 360° والربط', group: 'العمليات', icon: Users, module: 'operations' },
+      { key: 'daily_ops', label: 'العمليات اليومية', group: 'العمليات', icon: Clock, module: 'operations' },
+      { key: 'rider_perf', label: 'تقييم أداء المندوبين', group: 'العمليات', icon: BarChart3, module: 'operations' },
+      { key: 'attendance', label: 'الحضور والالتزام', group: 'العمليات', icon: CalendarCheck, module: 'operations' },
+      { key: 'distance_wallet', label: 'المسافات والمحافظ', group: 'العمليات', icon: MapPin, module: 'operations' },
+      { key: 'quality', label: 'جودة التسليم الشهرية', group: 'العمليات', icon: Award, module: 'operations' },
+      ...(allowKt
+        ? [{ key: 'facial' as NavKey, label: 'التحقق من الهوية (Keeta)', group: 'العمليات', icon: ScanFace, module: 'operations' as PermissionModule }]
+        : []),
+      { key: 'import', label: 'مركز استيراد Excel', group: 'العمليات', icon: Upload, module: 'operations', action: 'add' },
+
+      // 6. التقارير والتحليلات
+      { key: 'reports', label: 'مركز التقارير الشاملة والتصدير', group: 'التقارير والتحليلات', icon: FileSpreadsheet, module: 'reports' },
+
+      // 7. إدارة النظام
+      { key: 'settings', label: 'إعدادات النظام والمنصات', group: 'إدارة النظام', icon: Settings, module: 'settings' },
+      { key: 'rbac_users', label: 'المستخدمون ونطاق البيانات', group: 'إدارة النظام', icon: Users, module: 'users' },
+      { key: 'rbac_roles', label: 'مصفوفة الصلاحيات والأدوار', group: 'إدارة النظام', icon: KeyRound, module: 'roles' },
+      { key: 'rbac_audit', label: 'سجل النشاط والتدقيق المركزي', group: 'إدارة النظام', icon: FileSearch, module: 'audit' },
+    ];
+  }
+
+  return raw.filter((item) => can(item.module, item.action || 'view'));
+}
+
+const ROLE_PERMISSION_NOTES: Record<UserRole, string> = {
+  owner: 'صلاحيات المالك الكاملة: إدارة النظام، الموارد البشرية، الأسطول، المنصات، المستندات الخاصة، والصلاحيات.',
+  admin: 'مدير النظام الأعلى: صلاحيات كاملة على جميع أنظمة ERP، الوثائق الخاصة، المنصات، والمستخدمين.',
+  operations_manager: 'مدير العمليات: إدارة التشغيل، حسابات التطبيقات، استيراد التقارير، الأسطول، ومتابعة الحالات.',
+  hr_manager: 'مدير الموارد البشرية: إدارة كاملة لملفات المندوبين، الوثائق الخاصة، الانتهاءات، والحالات الوظيفية.',
+  hr_employee: 'موظف موارد بشرية: إضافة وتعديل ملفات المندوبين ورفع الوثائق ومتابعة الانتهاءات.',
+  fleet_manager: 'مدير الأسطول: إدارة المركبات، التسليم والاستلام، الصيانة، والتأمين والاستمارة.',
+  fleet_employee: 'موظف أسطول: تسجيل عمليات التسليم والاستلام والصيانة وتحديث وثائق المركبات.',
+  supervisor: 'مشرف تطبيقات وميدان: متابعة المندوبين والأداء اليومي والحالات ضمن نطاق الفرع والمنصة.',
+  accountant: 'المحاسبة والمالية: عرض وتصدير تقارير المحافظ والمسافات وتكاليف الصيانة والاعتماد المالي.',
+  viewer: 'مطلع تقارير: عرض اللوحات والتقارير المصرح بها فقط بدون تعديل أو حذف.',
+};
+
+const WORKSPACE_META: Record<
+  Exclude<WorkspaceMode, 'selector'>,
+  {
+    title: string;
+    subtitle: string;
+    accentBadgeCls: string;
+    accentIconCls: string;
+    icon: typeof Truck;
+  }
+> = {
+  hungerstation: {
+    title: 'HungerStation Operations',
+    subtitle: 'مساحة عمل هنقرستيشن',
+    accentBadgeCls:
+      'border-amber-200 dark:border-amber-800/70 bg-amber-50 dark:bg-amber-950/50 text-amber-900 dark:text-amber-200',
+    accentIconCls: 'text-amber-400',
+    icon: Truck,
+  },
+  keeta: {
+    title: 'Keeta Operations',
+    subtitle: 'مساحة عمل كيتا',
+    accentBadgeCls:
+      'border-blue-200 dark:border-blue-800/70 bg-blue-50 dark:bg-blue-950/50 text-blue-900 dark:text-blue-200',
+    accentIconCls: 'text-blue-400',
+    icon: Activity,
+  },
+  global: {
+    title: 'نظام الإدارة المتكامل ERP',
+    subtitle: 'Fleet Operations Center',
+    accentBadgeCls:
+      'border-blue-200/80 dark:border-blue-800/70 bg-blue-50/80 dark:bg-blue-950/40 text-[#0f1e36] dark:text-blue-200',
+    accentIconCls: 'text-blue-400',
+    icon: Globe,
+  },
 };
 
 interface EnterpriseShellProps {
+  workspaceMode: Exclude<WorkspaceMode, 'selector'>;
+  allowedPlatforms: Platform[];
+  canAccessGlobal: boolean;
+  onSwitchWorkspace: (mode: WorkspaceMode) => void;
   activeNav: NavKey;
   onSelectNav: (nav: NavKey) => void;
   selectedRider: { platform: Platform; riderId: string } | null;
   onSelectRider: (platform: Platform, riderId: string) => void;
   userProfile: UserProfile;
+  roleTemplates?: RoleTemplate[];
+  platformCatalog?: PlatformCatalogEntry[];
+  vehicles?: VehicleMaster[];
+  platformAccounts?: PlatformAccount[];
+  privateDocs?: PrivateDocumentRecord[];
   onSignOut: () => void;
   onRefreshData: () => void;
   dataLoading: boolean;
@@ -115,11 +315,20 @@ interface EnterpriseShellProps {
 }
 
 export function EnterpriseShell({
+  workspaceMode,
+  allowedPlatforms,
+  canAccessGlobal,
+  onSwitchWorkspace,
   activeNav,
   onSelectNav,
   selectedRider,
   onSelectRider,
   userProfile,
+  roleTemplates = [],
+  platformCatalog = [],
+  vehicles = [],
+  platformAccounts = [],
+  privateDocs = [],
   onSignOut,
   onRefreshData,
   dataLoading,
@@ -140,21 +349,66 @@ export function EnterpriseShell({
       return false;
     }
   });
+  const [collapsedGroups, setCollapsedGroups] = useState<Record<string, boolean>>(() => {
+    try {
+      const saved = localStorage.getItem('foc_sidebar_groups');
+      return saved ? (JSON.parse(saved) as Record<string, boolean>) : {};
+    } catch {
+      return {};
+    }
+  });
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const [searchOpen, setSearchOpen] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
   const [notifOpen, setNotifOpen] = useState(false);
   const [profileOpen, setProfileOpen] = useState(false);
+  const [switcherOpen, setSwitcherOpen] = useState(false);
 
   const notifRef = useRef<HTMLDivElement>(null);
   const profileRef = useRef<HTMLDivElement>(null);
+  const switcherRef = useRef<HTMLDivElement>(null);
   const searchInputRef = useRef<HTMLInputElement>(null);
+
+  const keetaActive = isKeetaActive(settings, platformCatalog);
+
+  const navItems = useMemo(
+    () =>
+      getNavItemsForWorkspace(workspaceMode, {
+        userProfile,
+        roleTemplates,
+        settings,
+        platformCatalog,
+        allowedPlatforms,
+      }),
+    [workspaceMode, userProfile, roleTemplates, settings, platformCatalog, allowedPlatforms]
+  );
+
+  const groups = useMemo(() => Array.from(new Set(navItems.map((n) => n.group))), [navItems]);
+  const wsMeta = WORKSPACE_META[workspaceMode];
+  const WsIcon = wsMeta.icon;
+
+  const assignedRoleTemplate = useMemo(() => {
+    const tid = userProfile.customRoleId || mapLegacyRoleToTemplateId(userProfile.role);
+    return roleTemplates.find((t) => t.roleId === tid);
+  }, [userProfile, roleTemplates]);
 
   const toggleCollapsed = () => {
     setSidebarCollapsed((prev) => {
       const next = !prev;
       try {
         localStorage.setItem('foc_sidebar_collapsed', String(next));
+      } catch {
+        // ignore storage errors
+      }
+      return next;
+    });
+  };
+
+  const toggleGroupCollapsed = (grp: string) => {
+    setCollapsedGroups((prev) => {
+      const next = { ...prev, [grp]: !prev[grp] };
+      try {
+        localStorage.setItem('foc_sidebar_groups', JSON.stringify(next));
       } catch {
         // ignore storage errors
       }
@@ -171,6 +425,7 @@ export function EnterpriseShell({
         setSearchOpen(false);
         setNotifOpen(false);
         setProfileOpen(false);
+        setSwitcherOpen(false);
       }
     };
     window.addEventListener('keydown', onKeyDown);
@@ -186,27 +441,61 @@ export function EnterpriseShell({
   useEffect(() => {
     const onClickOutside = (e: MouseEvent) => {
       const target = e.target as Node;
-      if (notifRef.current && !notifRef.current.contains(target)) {
-        setNotifOpen(false);
-      }
-      if (profileRef.current && !profileRef.current.contains(target)) {
-        setProfileOpen(false);
-      }
+      if (notifRef.current && !notifRef.current.contains(target)) setNotifOpen(false);
+      if (profileRef.current && !profileRef.current.contains(target)) setProfileOpen(false);
+      if (switcherRef.current && !switcherRef.current.contains(target)) setSwitcherOpen(false);
     };
     document.addEventListener('mousedown', onClickOutside);
     return () => document.removeEventListener('mousedown', onClickOutside);
   }, []);
 
-  // Real notifications derived from live operational alerts + error alerts + overdue cases
   const notifications = useMemo(() => {
     const opsAlerts = generateOperationalAlerts(dataset, settings, filters);
-    const errReport = computeErrorCodeIntelligence(dataset, dictionaryEntries, riderErrorCases, filters);
-    const errAlerts = generateErrorIntelligenceAlerts(errReport, settings);
+    const errAlerts =
+      workspaceMode === 'keeta'
+        ? []
+        : generateErrorIntelligenceAlerts(
+            computeErrorCodeIntelligence(dataset, dictionaryEntries, riderErrorCases, filters),
+            settings
+          );
     const todayStr = new Date().toISOString().slice(0, 10);
+
+    const canSeeExpiries =
+      hasPermission(userProfile, roleTemplates, 'alerts', 'view') ||
+      hasPermission(userProfile, roleTemplates, 'hr', 'view') ||
+      hasPermission(userProfile, roleTemplates, 'fleet', 'view');
+
+    const expiryNotifs = canSeeExpiries
+      ? computeAllDocumentExpiries({
+          riders: dataset.riderMaster,
+          vehicles,
+          privateDocs,
+          settings,
+        })
+          .filter((e) => ['expired', 'due_today', 'within_7', 'within_30'].includes(e.urgency))
+          .slice(0, 10)
+          .map((e) => ({
+            id: `exp_${e.id}`,
+            kind: 'expiry' as const,
+            severity: (e.daysRemaining <= 7 ? 'critical' : 'warning') as 'critical' | 'warning',
+            title: `${e.docCategory}: ${e.entityName}`,
+            subtitle:
+              e.daysRemaining < 0
+                ? `منتهي منذ ${Math.abs(e.daysRemaining)} يوم (${e.expiryDate})`
+                : e.daysRemaining === 0
+                  ? `ينتهي اليوم (${e.expiryDate})`
+                  : `متبقي ${e.daysRemaining} يوم (${e.expiryDate})`,
+            onClick: () => {
+              onSelectNav(e.domain === 'fleet' ? 'fleet_docs' : 'hr_expiries');
+              setNotifOpen(false);
+            },
+          }))
+      : [];
 
     const overdueCaseItems = operationalCases
       .filter((c) => c.status !== 'closed' && c.status !== 'resolved' && c.dueDate && c.dueDate < todayStr)
-      .slice(0, 8)
+      .filter((c) => keetaActive || c.platform !== 'keeta')
+      .slice(0, 6)
       .map((c) => ({
         id: `case_due_${c.caseId}`,
         kind: 'case' as const,
@@ -219,108 +508,192 @@ export function EnterpriseShell({
         },
       }));
 
-    const alertItems = [...errAlerts, ...opsAlerts].slice(0, 12).map((a) => ({
-      id: a.id,
-      kind: 'alert' as const,
-      severity: a.severity,
-      title: `${a.category} — ${a.riderId !== '-' ? a.riderId : a.title}`,
-      subtitle: a.description,
-      onClick: () => {
-        if (a.riderId && a.riderId !== '-') {
-          onSelectRider(a.platform, a.riderId);
-        } else {
-          onSelectNav('alerts');
-        }
-        setNotifOpen(false);
-      },
-    }));
+    const alertItems = [...errAlerts, ...opsAlerts]
+      .filter((a) => keetaActive || a.platform !== 'keeta')
+      .slice(0, 10)
+      .map((a) => ({
+        id: a.id,
+        kind: 'alert' as const,
+        severity: a.severity,
+        title: `${a.category} — ${a.riderId !== '-' ? a.riderId : a.title}`,
+        subtitle: a.description,
+        onClick: () => {
+          if (a.riderId && a.riderId !== '-') {
+            onSelectRider(a.platform, a.riderId);
+          } else {
+            onSelectNav('alerts');
+          }
+          setNotifOpen(false);
+        },
+      }));
 
-    return [...overdueCaseItems, ...alertItems];
-  }, [dataset, dictionaryEntries, riderErrorCases, operationalCases, settings, filters, onSelectNav, onSelectRider]);
+    return [...expiryNotifs, ...overdueCaseItems, ...alertItems];
+  }, [
+    workspaceMode,
+    dataset,
+    dictionaryEntries,
+    riderErrorCases,
+    operationalCases,
+    vehicles,
+    privateDocs,
+    settings,
+    filters,
+    userProfile,
+    roleTemplates,
+    keetaActive,
+    onSelectNav,
+    onSelectRider,
+  ]);
 
   const criticalNotifCount = notifications.filter((n) => n.severity === 'critical').length;
 
-  // Global Search Results across pages, riders, error codes, and operational cases
   const searchResults = useMemo(() => {
     const q = searchQuery.trim().toLowerCase();
     if (!q) {
       return {
-        pages: NAV_ITEMS.slice(0, 6),
+        pages: navItems.slice(0, 6),
         riders: [] as Array<{ platform: Platform; riderId: string; label: string; sub: string }>,
+        vehiclesList: [] as VehicleMaster[],
+        accounts: [] as PlatformAccount[],
         cases: [] as OperationalCase[],
         codes: [] as ErrorCodeDictionaryEntry[],
       };
     }
 
-    const pages = NAV_ITEMS.filter((n) => n.label.toLowerCase().includes(q) || n.key.toLowerCase().includes(q)).slice(0, 5);
+    const pages = navItems
+      .filter((n) => n.label.toLowerCase().includes(q) || n.key.toLowerCase().includes(q))
+      .slice(0, 6);
 
     const riderMap = new Map<string, { platform: Platform; riderId: string; label: string; sub: string }>();
-    for (const m of dataset.riderMaster) {
-      if (`${m.internalRiderId} ${m.fullName} ${m.city || ''} ${m.branch || ''}`.toLowerCase().includes(q)) {
-        const mapping = dataset.riderMappings.find((mp) => mp.internalRiderId === m.internalRiderId);
-        const targetPlatform: Platform = mapping ? mapping.platform : 'hungerstation';
-        const targetId = mapping ? mapping.platformRiderId : m.internalRiderId;
-        riderMap.set(`${targetPlatform}:${targetId}`, {
-          platform: targetPlatform,
-          riderId: targetId,
-          label: `${m.fullName} (${m.internalRiderId})`,
-          sub: `${m.city || '-'} · ${m.branch || '-'}`,
-        });
+    if (workspaceMode === 'global') {
+      for (const m of dataset.riderMaster) {
+        if (`${m.internalRiderId} ${m.fullName} ${m.iqamaNumber || ''} ${m.phone || ''} ${m.city || ''} ${m.branch || ''}`.toLowerCase().includes(q)) {
+          const acc = platformAccounts.find(
+            (a) => a.companyRiderId === m.internalRiderId && (keetaActive || a.platformId.toLowerCase() !== 'keeta')
+          );
+          const mapping = dataset.riderMappings.find(
+            (mp) => mp.internalRiderId === m.internalRiderId && (keetaActive || mp.platform !== 'keeta')
+          );
+          const targetPlatform: Platform =
+            acc && (acc.platformId === 'hungerstation' || acc.platformId === 'keeta')
+              ? (acc.platformId as Platform)
+              : mapping
+                ? mapping.platform
+                : 'hungerstation';
+          const targetId = acc ? acc.platformRiderId : mapping ? mapping.platformRiderId : m.internalRiderId;
+          riderMap.set(`${targetPlatform}:${targetId}`, {
+            platform: targetPlatform,
+            riderId: targetId,
+            label: `${m.fullName} (${m.internalRiderId})`,
+            sub: `${m.city || '-'} · ${m.branch || '-'}`,
+          });
+        }
       }
     }
-    for (const r of dataset.hungerDaily) {
-      if (riderMap.size >= 8) break;
-      if (r.riderId.toLowerCase().includes(q) && !riderMap.has(`hungerstation:${r.riderId}`)) {
-        riderMap.set(`hungerstation:${r.riderId}`, {
-          platform: 'hungerstation',
-          riderId: r.riderId,
-          label: `مندوب HungerStation: ${r.riderId}`,
-          sub: `${r.city || '-'} · ${r.contractName || '-'}`,
-        });
+    if (workspaceMode !== 'keeta') {
+      for (const r of dataset.hungerDaily) {
+        if (riderMap.size >= 8) break;
+        if (r.riderId.toLowerCase().includes(q) && !riderMap.has(`hungerstation:${r.riderId}`)) {
+          riderMap.set(`hungerstation:${r.riderId}`, {
+            platform: 'hungerstation',
+            riderId: r.riderId,
+            label: `مندوب HungerStation: ${r.riderId}`,
+            sub: `${r.city || '-'} · ${r.contractName || '-'}`,
+          });
+        }
       }
     }
-    for (const r of dataset.keetaDashboardDaily) {
-      if (riderMap.size >= 10) break;
-      if (`${r.riderId} ${r.fullName || ''}`.toLowerCase().includes(q) && !riderMap.has(`keeta:${r.riderId}`)) {
-        riderMap.set(`keeta:${r.riderId}`, {
-          platform: 'keeta',
-          riderId: r.riderId,
-          label: `${r.fullName || r.riderId} (${r.riderId})`,
-          sub: `Keeta · ${r.branch || r.headquarters || '-'}`,
-        });
+    if (keetaActive && workspaceMode !== 'hungerstation') {
+      for (const r of dataset.keetaDashboardDaily) {
+        if (riderMap.size >= 10) break;
+        if (`${r.riderId} ${r.fullName || ''}`.toLowerCase().includes(q) && !riderMap.has(`keeta:${r.riderId}`)) {
+          riderMap.set(`keeta:${r.riderId}`, {
+            platform: 'keeta',
+            riderId: r.riderId,
+            label: `${r.fullName || r.riderId} (${r.riderId})`,
+            sub: `Keeta · ${r.branch || r.headquarters || '-'}`,
+          });
+        }
       }
     }
 
+    const vehiclesList =
+      hasPermission(userProfile, roleTemplates, 'fleet', 'view')
+        ? vehicles
+            .filter((v) =>
+              `${v.plateNumber} ${v.vehicleInternalId} ${v.make} ${v.model} ${v.currentRiderId || ''}`
+                .toLowerCase()
+                .includes(q)
+            )
+            .slice(0, 5)
+        : [];
+
+    const accounts =
+      hasPermission(userProfile, roleTemplates, 'applications', 'view')
+        ? platformAccounts
+            .filter((a) => keetaActive || a.platformId.toLowerCase() !== 'keeta')
+            .filter((a) =>
+              `${a.platformRiderId} ${a.platformName} ${a.companyRiderId}`
+                .toLowerCase()
+                .includes(q)
+            )
+            .slice(0, 5)
+        : [];
+
     const cases = operationalCases
+      .filter((c) => keetaActive || c.platform !== 'keeta')
       .filter((c) => `${c.title} ${c.riderId} ${c.riderName} ${c.caseId}`.toLowerCase().includes(q))
       .slice(0, 5);
 
-    const codes = dictionaryEntries
-      .filter((d) => `${d.normalizedCode} ${d.arabicDescription} ${d.category || ''}`.toLowerCase().includes(q))
-      .slice(0, 5);
+    const codes =
+      workspaceMode !== 'keeta'
+        ? dictionaryEntries
+            .filter((d) => `${d.normalizedCode} ${d.arabicDescription} ${d.category || ''}`.toLowerCase().includes(q))
+            .slice(0, 5)
+        : [];
 
     return {
       pages,
       riders: Array.from(riderMap.values()).slice(0, 8),
+      vehiclesList,
+      accounts,
       cases,
       codes,
     };
-  }, [searchQuery, dataset, operationalCases, dictionaryEntries]);
+  }, [
+    searchQuery,
+    navItems,
+    workspaceMode,
+    dataset,
+    vehicles,
+    platformAccounts,
+    operationalCases,
+    dictionaryEntries,
+    userProfile,
+    roleTemplates,
+    keetaActive,
+  ]);
 
-  const currentNavMeta = NAV_ITEMS.find((i) => i.key === activeNav) || NAV_ITEMS[0];
-  const groups = ['القيادة والتحكم', 'المنصات والتشغيل', 'التحليلات والتقارير', 'البيانات والإدارة'] as const;
+  const currentNavMeta = navItems.find((i) => i.key === activeNav) || navItems[0] || {
+    key: activeNav,
+    label: 'Fleet Operations Center',
+    group: 'الرئيسية',
+    icon: LayoutDashboard,
+  };
+
+  const firstItemInCurrentGroup = navItems.find((i) => i.group === currentNavMeta.group);
 
   const renderSidebarContent = (collapsed: boolean, onItemClick?: () => void) => (
     <>
-      <div className={`flex h-16 items-center border-b border-slate-800 ${collapsed ? 'justify-center px-2' : 'justify-between px-4'}`}>
+      <div className={`flex h-16 items-center border-b border-[#1e2f4d] ${collapsed ? 'justify-center px-2' : 'justify-between px-4'}`}>
         <div className="flex items-center gap-3 min-w-0">
-          <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-slate-800 border border-slate-700 text-emerald-400">
-            <Truck className="h-5 w-5" />
+          <div className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-[#13223a] border border-[#24385c] ${wsMeta.accentIconCls}`}>
+            <WsIcon className="h-4 w-4" />
           </div>
           {!collapsed && (
             <div className="min-w-0">
-              <div className="truncate text-sm font-bold text-white">Fleet Operations</div>
-              <div className="truncate text-[11px] text-slate-400">Enterprise · HS &amp; Keeta</div>
+              <div className="truncate text-[13px] font-bold text-white">{wsMeta.title}</div>
+              <div className="truncate text-[11px] text-slate-400">{wsMeta.subtitle}</div>
             </div>
           )}
         </div>
@@ -328,60 +701,101 @@ export function EnterpriseShell({
           <button
             type="button"
             onClick={toggleCollapsed}
-            title={collapsed ? 'توسيع القائمة' : 'طي القائمة'}
-            className="hidden lg:inline-flex rounded-lg p-1.5 text-slate-400 hover:bg-slate-800 hover:text-white"
+            title={collapsed ? 'توسيع القائمة الجانبية' : 'طي القائمة الجانبية'}
+            className="hidden lg:inline-flex rounded-lg p-1.5 text-slate-400 hover:bg-[#13223a] hover:text-white transition-colors"
           >
             {collapsed ? <ChevronLeft className="h-4 w-4" /> : <ChevronRight className="h-4 w-4" />}
           </button>
         )}
       </div>
 
-      <nav className="flex-1 overflow-y-auto px-2.5 py-4 space-y-4">
+      {/* Quick Workspace Home Switch */}
+      {(canAccessGlobal || (keetaActive && allowedPlatforms.length > 1)) && (
+        <div className="border-b border-[#1b2842] px-2.5 py-2.5">
+          <button
+            type="button"
+            title={workspaceMode === 'global' ? 'محدد المنصات' : 'العودة لنظام ERP المتكامل'}
+            onClick={() => {
+              onSwitchWorkspace(workspaceMode === 'global' ? 'selector' : canAccessGlobal ? 'global' : 'selector');
+              onItemClick?.();
+            }}
+            className={`flex w-full items-center gap-2.5 rounded-lg border border-[#1e2f4d] bg-[#070f1d] px-2.5 py-2 text-xs font-medium text-slate-300 hover:border-blue-500/50 hover:text-white transition-colors ${
+              collapsed ? 'justify-center' : ''
+            }`}
+          >
+            <Home className="h-4 w-4 shrink-0 text-blue-400" />
+            {!collapsed && (
+              <span className="truncate">
+                {workspaceMode === 'global' ? 'شاشة المنصات المختصرة' : 'نظام الإدارة المتكامل ERP'}
+              </span>
+            )}
+          </button>
+        </div>
+      )}
+
+      <nav className="flex-1 overflow-y-auto erp-scroll px-2.5 py-3 space-y-4">
         {groups.map((grp) => {
-          const items = NAV_ITEMS.filter((i) => i.group === grp);
+          const items = navItems.filter((i) => i.group === grp);
+          const isGroupCollapsed = Boolean(collapsedGroups[grp]);
           return (
             <div key={grp} className="space-y-1">
               {!collapsed && (
-                <div className="px-2.5 text-[10px] font-bold tracking-wider text-slate-500 uppercase">
-                  {grp}
-                </div>
-              )}
-              {items.map((item) => {
-                const Icon = item.icon;
-                const active = activeNav === item.key;
-                return (
-                  <button
-                    key={item.key}
-                    type="button"
-                    title={collapsed ? item.label : undefined}
-                    onClick={() => {
-                      onSelectNav(item.key);
-                      onItemClick?.();
-                    }}
-                    className={`flex w-full items-center gap-3 rounded-lg px-2.5 py-2 text-xs font-medium transition-colors whitespace-nowrap ${
-                      collapsed ? 'justify-center' : ''
-                    } ${
-                      active
-                        ? 'bg-slate-800 text-white font-semibold'
-                        : 'text-slate-400 hover:bg-slate-800/60 hover:text-slate-100'
+                <button
+                  type="button"
+                  onClick={() => toggleGroupCollapsed(grp)}
+                  className="flex w-full items-center justify-between px-2.5 py-1 text-[11px] font-bold text-slate-400 hover:text-slate-200 transition-colors"
+                >
+                  <span className="truncate">{grp}</span>
+                  <ChevronDown
+                    className={`h-3.5 w-3.5 shrink-0 transition-transform duration-150 ${
+                      isGroupCollapsed ? 'rotate-90' : ''
                     }`}
-                  >
-                    <Icon className="h-4 w-4 shrink-0" />
-                    {!collapsed && <span className="truncate">{item.label}</span>}
-                  </button>
-                );
-              })}
+                  />
+                </button>
+              )}
+              {(!isGroupCollapsed || collapsed) &&
+                items.map((item) => {
+                  const Icon = item.icon;
+                  const active = activeNav === item.key;
+                  return (
+                    <button
+                      key={item.key}
+                      type="button"
+                      title={collapsed ? item.label : undefined}
+                      onClick={() => {
+                        onSelectNav(item.key);
+                        onItemClick?.();
+                      }}
+                      className={`relative flex w-full items-center gap-2.5 rounded-lg px-2.5 py-2 text-xs font-medium transition-colors whitespace-nowrap ${
+                        collapsed ? 'justify-center' : ''
+                      } ${
+                        active
+                          ? 'bg-[#152846] text-white font-semibold'
+                          : 'text-slate-300/85 hover:bg-[#13223a]/80 hover:text-white'
+                      }`}
+                    >
+                      {active && !collapsed && (
+                        <span
+                          aria-hidden="true"
+                          className="absolute right-0 top-1.5 bottom-1.5 w-[3px] rounded-l bg-blue-500"
+                        />
+                      )}
+                      <Icon className={`h-4 w-4 shrink-0 ${active ? 'text-blue-400' : 'text-slate-400'}`} />
+                      {!collapsed && <span className="truncate">{item.label}</span>}
+                    </button>
+                  );
+                })}
             </div>
           );
         })}
       </nav>
 
-      <div className="border-t border-slate-800 p-3 space-y-2">
+      <div className="border-t border-[#1e2f4d] p-3 space-y-2.5">
         {!collapsed && (
           <div className="min-w-0 px-1">
             <div className="truncate text-xs font-semibold text-white">{userProfile.displayName}</div>
-            <div className="truncate text-[11px] font-mono-num text-slate-400">
-              {userProfile.role} · {userProfile.email}
+            <div className="truncate text-[11px] text-slate-400">
+              {assignedRoleTemplate?.nameAr || userProfile.role}
             </div>
           </div>
         )}
@@ -389,7 +803,7 @@ export function EnterpriseShell({
           type="button"
           onClick={onSignOut}
           title="تسجيل الخروج"
-          className="flex w-full items-center justify-center gap-2 rounded-lg border border-slate-700 bg-slate-800 px-3 py-2 text-xs font-medium text-slate-200 hover:bg-slate-700"
+          className="flex w-full items-center justify-center gap-2 rounded-lg border border-[#24385c] bg-[#13223a] px-3 py-2 text-xs font-medium text-slate-200 hover:bg-[#1a2f50] transition-colors whitespace-nowrap"
         >
           <LogOut className="h-3.5 w-3.5 shrink-0" />
           {!collapsed && <span>تسجيل الخروج</span>}
@@ -399,23 +813,28 @@ export function EnterpriseShell({
   );
 
   return (
-    <div className="min-h-screen bg-slate-50 dark:bg-slate-950 text-slate-900 dark:text-slate-100 flex">
-      {/* Desktop Collapsible Navy Sidebar */}
+    <div className="min-h-screen bg-slate-50 dark:bg-[#060b16] text-slate-900 dark:text-slate-100 flex">
+      {/* Desktop Collapsible Right-Side RTL Navy Sidebar */}
       <aside
-        className={`no-print hidden lg:flex lg:shrink-0 lg:flex-col bg-slate-900 dark:bg-slate-950 text-slate-200 border-l border-slate-800 transition-all duration-200 ${
-          sidebarCollapsed ? 'lg:w-[72px]' : 'lg:w-64'
+        className={`no-print hidden lg:flex lg:shrink-0 lg:flex-col sticky top-0 h-screen bg-[#0b1628] dark:bg-[#070d19] text-slate-200 border-l border-[#1e2f4d] transition-[width] duration-200 ease-out ${
+          sidebarCollapsed ? 'lg:w-[72px]' : 'lg:w-[264px]'
         }`}
       >
         {renderSidebarContent(sidebarCollapsed)}
       </aside>
 
-      {/* Mobile Drawer */}
+      {/* Mobile RTL Drawer */}
       {mobileMenuOpen && (
         <div className="no-print fixed inset-0 z-50 flex lg:hidden">
-          <div className="fixed inset-0 bg-slate-950/70" onClick={() => setMobileMenuOpen(false)} />
-          <div className="relative z-10 flex w-72 flex-col bg-slate-900 text-slate-200">
-            <div className="flex h-12 items-center justify-end border-b border-slate-800 px-4">
-              <button type="button" onClick={() => setMobileMenuOpen(false)} className="text-slate-400 hover:text-white">
+          <div className="fixed inset-0 bg-slate-950/70 backdrop-blur-[1px]" onClick={() => setMobileMenuOpen(false)} />
+          <div className="relative z-10 flex w-72 max-w-[85vw] flex-col bg-[#0b1628] text-slate-200 border-l border-[#1e2f4d]">
+            <div className="flex h-12 items-center justify-end border-b border-[#1e2f4d] px-4">
+              <button
+                type="button"
+                onClick={() => setMobileMenuOpen(false)}
+                className="rounded-lg p-1 text-slate-400 hover:text-white"
+                aria-label="إغلاق القائمة"
+              >
                 <X className="h-5 w-5" />
               </button>
             </div>
@@ -426,57 +845,162 @@ export function EnterpriseShell({
 
       {/* Main Workspace */}
       <div className="flex min-w-0 flex-1 flex-col">
-        {/* Enterprise Sticky Top Bar */}
+        {/* Sticky Enterprise Top Header */}
         <header className="no-print sticky top-0 z-30 flex h-16 items-center justify-between gap-3 border-b border-slate-200 dark:border-slate-800 bg-white/95 dark:bg-slate-900/95 backdrop-blur px-4 lg:px-6">
-          {/* Left/Start: Menu + Breadcrumbs */}
           <div className="flex items-center gap-3 min-w-0">
             <button
               type="button"
               onClick={() => setMobileMenuOpen(true)}
-              className="rounded-lg border border-slate-200 dark:border-slate-700 p-2 text-slate-700 dark:text-slate-200 lg:hidden"
-              aria-label="القائمة"
+              className="inline-flex h-9 w-9 items-center justify-center rounded-lg border border-slate-200 dark:border-slate-700 text-slate-700 dark:text-slate-200 lg:hidden shrink-0"
+              aria-label="فتح القائمة"
             >
               <Menu className="h-5 w-5" />
             </button>
-            <div className="min-w-0">
-              <div className="hidden sm:flex items-center gap-1.5 text-[11px] text-slate-500 dark:text-slate-400">
-                <span>Fleet Operations</span>
-                <span>/</span>
-                <span>{currentNavMeta.group}</span>
+
+            <div className="relative shrink-0" ref={switcherRef}>
+              <button
+                type="button"
+                onClick={() => setSwitcherOpen((o) => !o)}
+                className={`inline-flex h-9 items-center gap-2 rounded-lg border px-3 text-xs font-bold whitespace-nowrap shrink-0 transition-colors ${wsMeta.accentBadgeCls}`}
+              >
+                <WsIcon className="h-3.5 w-3.5 shrink-0" />
+                <span className="hidden sm:inline">{wsMeta.title}</span>
+                <span className="sm:hidden">
+                  {workspaceMode === 'hungerstation' ? 'HS' : workspaceMode === 'keeta' ? 'Keeta' : 'ERP'}
+                </span>
+                <ChevronDown className="h-3.5 w-3.5 opacity-75" />
+              </button>
+
+              {switcherOpen && (
+                <div className="absolute right-0 mt-2 w-64 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 p-1.5 shadow-xl z-50 text-xs space-y-1">
+                  <div className="px-2.5 py-1 text-[11px] font-bold text-slate-400">تبديل مساحة العمل</div>
+                  {canAccessGlobal && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        onSwitchWorkspace('global');
+                        setSwitcherOpen(false);
+                      }}
+                      className={`flex w-full items-center justify-between rounded-lg px-2.5 py-2 text-right font-semibold transition-colors ${
+                        workspaceMode === 'global'
+                          ? 'bg-blue-50 dark:bg-blue-950/50 text-blue-900 dark:text-blue-200'
+                          : 'text-slate-700 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-800'
+                      }`}
+                    >
+                      <span className="inline-flex items-center gap-2">
+                        <Globe className="h-3.5 w-3.5 text-blue-600 dark:text-blue-400" />
+                        <span>نظام الإدارة المتكامل ERP</span>
+                      </span>
+                      {workspaceMode === 'global' && <span className="text-[10px]">نشط</span>}
+                    </button>
+                  )}
+                  {allowedPlatforms.includes('hungerstation') && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        onSwitchWorkspace('hungerstation');
+                        setSwitcherOpen(false);
+                      }}
+                      className={`flex w-full items-center justify-between rounded-lg px-2.5 py-2 text-right font-semibold transition-colors ${
+                        workspaceMode === 'hungerstation'
+                          ? 'bg-amber-50 dark:bg-amber-950/50 text-amber-900 dark:text-amber-200'
+                          : 'text-slate-700 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-800'
+                      }`}
+                    >
+                      <span className="inline-flex items-center gap-2">
+                        <Truck className="h-3.5 w-3.5 text-amber-600 dark:text-amber-400" />
+                        <span>HungerStation Operations</span>
+                      </span>
+                      {workspaceMode === 'hungerstation' && <span className="text-[10px]">نشط</span>}
+                    </button>
+                  )}
+                  {keetaActive && allowedPlatforms.includes('keeta') && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        onSwitchWorkspace('keeta');
+                        setSwitcherOpen(false);
+                      }}
+                      className={`flex w-full items-center justify-between rounded-lg px-2.5 py-2 text-right font-semibold transition-colors ${
+                        workspaceMode === 'keeta'
+                          ? 'bg-blue-50 dark:bg-blue-950/50 text-blue-900 dark:text-blue-200'
+                          : 'text-slate-700 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-800'
+                      }`}
+                    >
+                      <span className="inline-flex items-center gap-2">
+                        <Activity className="h-3.5 w-3.5 text-blue-600 dark:text-blue-400" />
+                        <span>Keeta Operations</span>
+                      </span>
+                      {workspaceMode === 'keeta' && <span className="text-[10px]">نشط</span>}
+                    </button>
+                  )}
+                  <div className="border-t border-slate-100 dark:border-slate-800 pt-1">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        onSwitchWorkspace('selector');
+                        setSwitcherOpen(false);
+                      }}
+                      className="flex w-full items-center gap-2 rounded-lg px-2.5 py-2 text-right font-semibold text-slate-600 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-800"
+                    >
+                      <Home className="h-3.5 w-3.5" />
+                      <span>شاشة اختيار المنصة الرئيسية</span>
+                    </button>
+                  </div>
+                </div>
+              )}
+            </div>
+
+            {/* Interactive RTL Breadcrumbs */}
+            <nav aria-label="Breadcrumb" className="min-w-0">
+              <div className="hidden md:flex items-center gap-1.5 text-[11px] text-slate-500 dark:text-slate-400">
+                <button
+                  type="button"
+                  onClick={() => {
+                    if (firstItemInCurrentGroup) onSelectNav(firstItemInCurrentGroup.key);
+                  }}
+                  className="hover:text-slate-900 dark:hover:text-slate-200 transition-colors truncate"
+                >
+                  {currentNavMeta.group}
+                </button>
+                <ChevronLeft className="h-3 w-3 shrink-0 opacity-60" />
+                <span className="text-slate-700 dark:text-slate-300 font-medium truncate">
+                  {currentNavMeta.label}
+                </span>
                 {activeNav === 'riders' && selectedRider && (
                   <>
-                    <span>/</span>
-                    <span className="font-mono-num text-blue-700 dark:text-blue-400">{selectedRider.riderId}</span>
+                    <ChevronLeft className="h-3 w-3 shrink-0 opacity-60" />
+                    <span className="font-mono-num font-semibold text-blue-700 dark:text-blue-400">
+                      {selectedRider.riderId}
+                    </span>
                   </>
                 )}
               </div>
-              <h1 className="truncate text-sm sm:text-base font-bold text-slate-900 dark:text-slate-100">
+              <div className="truncate text-sm sm:text-[15px] font-bold text-slate-900 dark:text-slate-100">
                 {currentNavMeta.label}
-              </h1>
-            </div>
+              </div>
+            </nav>
           </div>
 
-          {/* Center: Global Search Button */}
           <button
             type="button"
             onClick={() => setSearchOpen(true)}
-            className="hidden md:flex items-center justify-between gap-4 w-72 lg:w-80 rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-950 px-3 py-1.5 text-xs text-slate-500 dark:text-slate-400 hover:border-slate-300 dark:hover:border-slate-600"
+            className="hidden xl:flex items-center justify-between gap-4 w-72 h-9 rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-950 px-3 text-xs text-slate-500 dark:text-slate-400 hover:border-slate-300 dark:hover:border-slate-600 transition-colors"
           >
             <span className="inline-flex items-center gap-2 truncate">
               <Search className="h-3.5 w-3.5 shrink-0" />
-              <span className="truncate">بحث شامل: مندوب، كود خطأ، حالة، تقرير...</span>
+              <span className="truncate">بحث شامل (مندوب، لوحة مركبة، حساب، صفحة...)</span>
             </span>
-            <kbd className="rounded border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 px-1.5 py-0.5 text-[10px] font-mono-num">
+            <kbd className="rounded border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 px-1.5 py-0.5 text-[10px] font-mono-num shrink-0">
               Ctrl+K
             </kbd>
           </button>
 
-          {/* End: Controls (Search mobile, Theme Toggle, Notifications, Refresh, User Profile) */}
           <div className="flex items-center gap-2 shrink-0">
             <button
               type="button"
               onClick={() => setSearchOpen(true)}
-              className="md:hidden rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 p-2 text-slate-700 dark:text-slate-200"
+              className="xl:hidden inline-flex h-9 w-9 items-center justify-center rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-700 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-700"
               aria-label="بحث"
             >
               <Search className="h-4 w-4" />
@@ -486,18 +1010,17 @@ export function EnterpriseShell({
               type="button"
               onClick={onToggleTheme}
               title={theme === 'dark' ? 'الوضع النهاري' : 'الوضع الليلي'}
-              className="rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 p-2 text-slate-700 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-700"
+              className="inline-flex h-9 w-9 items-center justify-center rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-700 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-700 transition-colors"
             >
               {theme === 'dark' ? <Sun className="h-4 w-4 text-amber-400" /> : <Moon className="h-4 w-4" />}
             </button>
 
-            {/* Real Notification Center */}
             <div className="relative" ref={notifRef}>
               <button
                 type="button"
                 onClick={() => setNotifOpen((o) => !o)}
-                title="التنبيهات والتصعيدات الحرجة"
-                className="relative rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 p-2 text-slate-700 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-700"
+                title="التنبيهات وانتهاء الوثائق"
+                className="relative inline-flex h-9 w-9 items-center justify-center rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-700 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-700 transition-colors"
               >
                 <Bell className="h-4 w-4" />
                 {criticalNotifCount > 0 && (
@@ -511,7 +1034,7 @@ export function EnterpriseShell({
                 <div className="absolute left-0 mt-2 w-80 sm:w-96 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 shadow-xl z-50 overflow-hidden">
                   <div className="flex items-center justify-between border-b border-slate-100 dark:border-slate-800 px-4 py-3">
                     <span className="text-xs font-bold text-slate-900 dark:text-slate-100">
-                      مركز الإشعارات التشغيلية ({notifications.length})
+                      إشعارات {wsMeta.title} ({notifications.length})
                     </span>
                     <button
                       type="button"
@@ -524,10 +1047,10 @@ export function EnterpriseShell({
                       فتح مركز التنبيهات
                     </button>
                   </div>
-                  <div className="max-h-80 overflow-y-auto divide-y divide-slate-100 dark:divide-slate-800">
+                  <div className="max-h-80 overflow-y-auto erp-scroll divide-y divide-slate-100 dark:divide-slate-800">
                     {notifications.length === 0 ? (
                       <div className="p-6 text-center text-xs text-slate-500 dark:text-slate-400">
-                        لا توجد تنبيهات أو حالات متأخرة نشطة حاليًا.
+                        لا توجد تنبيهات أو وثائق منتهية أو حالات متأخرة حاليًا.
                       </div>
                     ) : (
                       notifications.map((n) => (
@@ -548,7 +1071,7 @@ export function EnterpriseShell({
                               {n.title}
                             </span>
                             <span className="text-[10px] font-mono-num text-slate-400 shrink-0">
-                              {n.kind === 'case' ? 'حالة متأخرة' : n.severity === 'critical' ? 'حرج' : 'تحذير'}
+                              {n.kind === 'expiry' ? 'انتهاء وثيقة' : n.kind === 'case' ? 'حالة متأخرة' : n.severity === 'critical' ? 'حرج' : 'تحذير'}
                             </span>
                           </div>
                           <div className="mt-0.5 text-[11px] text-slate-600 dark:text-slate-400 line-clamp-2">
@@ -566,20 +1089,19 @@ export function EnterpriseShell({
               type="button"
               disabled={dataLoading}
               onClick={onRefreshData}
-              className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 px-3 py-2 text-xs font-semibold text-slate-700 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-700 disabled:opacity-50 whitespace-nowrap shrink-0"
+              className="inline-flex h-9 items-center gap-1.5 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 px-3 text-xs font-semibold text-slate-700 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-700 disabled:opacity-50 whitespace-nowrap shrink-0 transition-colors"
             >
               <RefreshCw className={`h-3.5 w-3.5 ${dataLoading ? 'animate-spin' : ''}`} />
-              <span className="hidden sm:inline">تحديث البيانات</span>
+              <span className="hidden sm:inline">تحديث</span>
             </button>
 
-            {/* User Profile Popover */}
             <div className="relative" ref={profileRef}>
               <button
                 type="button"
                 onClick={() => setProfileOpen((o) => !o)}
-                className="flex items-center gap-2 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 px-2.5 py-1.5 text-xs hover:bg-slate-50 dark:hover:bg-slate-700"
+                className="flex h-9 items-center gap-2 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 px-2.5 text-xs hover:bg-slate-50 dark:hover:bg-slate-700 transition-colors"
               >
-                <div className="flex h-6 w-6 items-center justify-center rounded-md bg-slate-900 dark:bg-blue-600 text-white">
+                <div className="flex h-6 w-6 items-center justify-center rounded-md bg-[#0f1e36] dark:bg-blue-600 text-white shrink-0">
                   <User className="h-3.5 w-3.5" />
                 </div>
                 <span className="hidden xl:inline max-w-[120px] truncate font-semibold text-slate-800 dark:text-slate-100">
@@ -594,18 +1116,28 @@ export function EnterpriseShell({
                     <div className="font-mono-num text-[11px] text-slate-500 dark:text-slate-400">{userProfile.email}</div>
                   </div>
                   <div className="space-y-1.5">
-                    <div className="flex justify-between">
+                    <div className="flex justify-between gap-2">
                       <span className="text-slate-500 dark:text-slate-400">الدور الوظيفي:</span>
-                      <span className="font-mono-num font-bold text-slate-900 dark:text-slate-100">{userProfile.role}</span>
+                      <span className="font-semibold text-slate-900 dark:text-slate-100 truncate">
+                        {assignedRoleTemplate?.nameAr || userProfile.role}
+                      </span>
+                    </div>
+                    <div className="flex justify-between gap-2">
+                      <span className="text-slate-500 dark:text-slate-400">نطاق الفروع:</span>
+                      <span className="font-mono-num font-bold text-slate-900 dark:text-slate-100">
+                        {userProfile.dataScope?.allBranches !== false
+                          ? 'جميع الفروع'
+                          : userProfile.dataScope?.branches?.join(' · ') || userProfile.assignedBranch || 'مقيد'}
+                      </span>
                     </div>
                     <div className="rounded-lg bg-slate-50 dark:bg-slate-950 p-2.5 text-[11px] text-slate-600 dark:text-slate-300 leading-relaxed">
-                      {ROLE_PERMISSION_NOTES[userProfile.role]}
+                      {assignedRoleTemplate?.description || ROLE_PERMISSION_NOTES[userProfile.role]}
                     </div>
                   </div>
                   <button
                     type="button"
                     onClick={onSignOut}
-                    className="flex w-full items-center justify-center gap-2 rounded-lg border border-red-200 dark:border-red-800 bg-red-50 dark:bg-red-950/40 px-3 py-2 font-semibold text-red-700 dark:text-red-400 hover:bg-red-100 dark:hover:bg-red-950"
+                    className="flex w-full items-center justify-center gap-2 rounded-lg border border-red-200 dark:border-red-800 bg-red-50 dark:bg-red-950/40 px-3 py-2 font-semibold text-red-700 dark:text-red-400 hover:bg-red-100 dark:hover:bg-red-950 transition-colors"
                   >
                     <LogOut className="h-3.5 w-3.5" />
                     <span>تسجيل الخروج</span>
@@ -616,13 +1148,15 @@ export function EnterpriseShell({
           </div>
         </header>
 
-        <main className="flex-1 p-4 lg:p-6 space-y-6">{children}</main>
+        <main className="flex-1 p-4 sm:p-6 lg:p-7 max-w-[1600px] w-full mx-auto space-y-6">
+          {children}
+        </main>
       </div>
 
-      {/* Global Search Modal */}
+      {/* Unified Quick Search Modal */}
       {searchOpen && (
         <div
-          className="no-print fixed inset-0 z-50 flex items-start justify-center bg-slate-950/60 pt-16 p-4"
+          className="no-print fixed inset-0 z-50 flex items-start justify-center bg-slate-950/60 backdrop-blur-[1px] pt-16 p-4"
           onClick={() => setSearchOpen(false)}
         >
           <div
@@ -636,22 +1170,22 @@ export function EnterpriseShell({
                 type="text"
                 value={searchQuery}
                 onChange={(e) => setSearchQuery(e.target.value)}
-                placeholder="ابحث برقم المندوب، الاسم، كود الخطأ، عنوان الحالة التشغيلية، أو اسم الصفحة..."
+                placeholder={`ابحث في ${wsMeta.title} (اسم، إقامة، لوحة مركبة، حساب تطبيق، صفحة...)`}
                 className="flex-1 bg-transparent text-sm text-slate-900 dark:text-slate-100 placeholder:text-slate-400 focus:outline-none"
               />
               <button
                 type="button"
                 onClick={() => setSearchOpen(false)}
-                className="rounded p-1 text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-800"
+                className="rounded-lg p-1 text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-800"
               >
                 <X className="h-4 w-4" />
               </button>
             </div>
 
-            <div className="max-h-96 overflow-y-auto p-3 space-y-4 text-xs">
+            <div className="max-h-96 overflow-y-auto erp-scroll p-3 space-y-4 text-xs">
               {searchResults.pages.length > 0 && (
                 <div>
-                  <div className="px-2 pb-1 text-[11px] font-bold text-slate-500 dark:text-slate-400">الصفحات والأقسام</div>
+                  <div className="px-2 pb-1 text-[11px] font-bold text-slate-500 dark:text-slate-400">الصفحات والوحدات</div>
                   <div className="space-y-1">
                     {searchResults.pages.map((p) => {
                       const Icon = p.icon;
@@ -691,6 +1225,56 @@ export function EnterpriseShell({
                       >
                         <span className="font-semibold text-slate-900 dark:text-slate-100">{r.label}</span>
                         <span className="text-[11px] text-slate-500 dark:text-slate-400">{r.sub}</span>
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {searchResults.vehiclesList.length > 0 && (
+                <div>
+                  <div className="px-2 pb-1 text-[11px] font-bold text-slate-500 dark:text-slate-400">المركبات والأسطول</div>
+                  <div className="space-y-1">
+                    {searchResults.vehiclesList.map((v) => (
+                      <button
+                        key={v.vehicleInternalId}
+                        type="button"
+                        onClick={() => {
+                          onSelectNav('fleet_vehicles');
+                          setSearchOpen(false);
+                        }}
+                        className="flex w-full items-center justify-between rounded-lg px-3 py-2 text-right hover:bg-slate-100 dark:hover:bg-slate-800"
+                      >
+                        <span className="font-semibold text-slate-900 dark:text-slate-100">
+                          {v.plateNumber} · {v.make} {v.model} ({v.vehicleInternalId})
+                        </span>
+                        <span className="text-[11px] text-slate-500 dark:text-slate-400">
+                          {v.currentRiderId ? `عهدة: ${v.currentRiderId}` : v.status}
+                        </span>
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {searchResults.accounts.length > 0 && (
+                <div>
+                  <div className="px-2 pb-1 text-[11px] font-bold text-slate-500 dark:text-slate-400">حسابات التطبيقات</div>
+                  <div className="space-y-1">
+                    {searchResults.accounts.map((a) => (
+                      <button
+                        key={a.accountId}
+                        type="button"
+                        onClick={() => {
+                          onSelectNav('apps_accounts');
+                          setSearchOpen(false);
+                        }}
+                        className="flex w-full items-center justify-between rounded-lg px-3 py-2 text-right hover:bg-slate-100 dark:hover:bg-slate-800"
+                      >
+                        <span className="font-mono-num font-semibold text-slate-900 dark:text-slate-100">
+                          {a.platformName}: {a.platformRiderId}
+                        </span>
+                        <span className="text-[11px] text-slate-500 dark:text-slate-400">{a.companyRiderId}</span>
                       </button>
                     ))}
                   </div>
@@ -744,10 +1328,12 @@ export function EnterpriseShell({
               {searchQuery.trim() &&
                 searchResults.pages.length === 0 &&
                 searchResults.riders.length === 0 &&
+                searchResults.vehiclesList.length === 0 &&
+                searchResults.accounts.length === 0 &&
                 searchResults.codes.length === 0 &&
                 searchResults.cases.length === 0 && (
                   <div className="py-8 text-center text-slate-500 dark:text-slate-400">
-                    لم يتم العثور على نتائج مطابقة لـ &quot;{searchQuery}&quot;.
+                    لم يتم العثور على نتائج مطابقة لـ &quot;{searchQuery}&quot; داخل هذه المساحة.
                   </div>
                 )}
             </div>

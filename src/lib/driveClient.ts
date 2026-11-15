@@ -19,7 +19,7 @@ export async function listDriveExcelFiles(searchQuery = ''): Promise<DriveFileIt
 
   const qParts = [
     "trashed = false",
-    "(mimeType = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' or name contains '.xlsx')",
+    "(mimeType = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' or mimeType = 'application/vnd.ms-excel' or mimeType = 'text/csv' or name contains '.xlsx' or name contains '.xls' or name contains '.csv')",
   ];
   if (searchQuery.trim()) {
     const safe = searchQuery.trim().replace(/'/g, "\\'");

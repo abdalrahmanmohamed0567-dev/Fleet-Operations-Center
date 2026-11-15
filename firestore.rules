@@ -63,8 +63,81 @@ service cloud.firestore {
       return hasActiveRole(['owner', 'admin', 'operations_manager', 'supervisor']);
     }
 
+    function isHrStaff() {
+      return hasActiveRole(['owner', 'admin', 'operations_manager', 'hr_manager', 'hr_employee']);
+    }
+
+    function isFleetStaff() {
+      return hasActiveRole(['owner', 'admin', 'operations_manager', 'fleet_manager', 'fleet_employee']);
+    }
+
     function isActiveMember() {
-      return hasActiveRole(['owner', 'admin', 'operations_manager', 'supervisor', 'viewer']);
+      return hasActiveRole([
+        'owner', 'admin', 'operations_manager', 'supervisor', 'viewer',
+        'hr_manager', 'hr_employee', 'fleet_manager', 'fleet_employee', 'accountant'
+      ]);
+    }
+
+    function hasModulePerm(mod, action) {
+      return isBootstrappedOwner()
+        || isAdmin()
+        || (
+          isVerified()
+          && exists(/databases/$(database)/documents/users/$(request.auth.uid))
+          && getUserDoc().data.active == true
+          && (
+            (
+              'permissionOverrides' in getUserDoc().data
+              && getUserDoc().data.permissionOverrides is map
+              && mod in getUserDoc().data.permissionOverrides
+              && getUserDoc().data.permissionOverrides[mod] is map
+              && action in getUserDoc().data.permissionOverrides[mod]
+            )
+              ? getUserDoc().data.permissionOverrides[mod][action] == true
+              : (
+                (
+                  'customRoleId' in getUserDoc().data
+                  && getUserDoc().data.customRoleId is string
+                  && getUserDoc().data.customRoleId.size() >= 1
+                  && exists(/databases/$(database)/documents/roleTemplates/$(getUserDoc().data.customRoleId))
+                )
+                  ? (
+                    get(/databases/$(database)/documents/roleTemplates/$(getUserDoc().data.customRoleId)).data.permissions is map
+                    && mod in get(/databases/$(database)/documents/roleTemplates/$(getUserDoc().data.customRoleId)).data.permissions
+                    && get(/databases/$(database)/documents/roleTemplates/$(getUserDoc().data.customRoleId)).data.permissions[mod] is map
+                    && action in get(/databases/$(database)/documents/roleTemplates/$(getUserDoc().data.customRoleId)).data.permissions[mod]
+                    && get(/databases/$(database)/documents/roleTemplates/$(getUserDoc().data.customRoleId)).data.permissions[mod][action] == true
+                  )
+                  : (
+                    (mod == 'hr' && (action == 'view' ? isActiveMember() : isHrStaff()))
+                    || (mod == 'documents' && (action == 'view' ? isActiveMember() : (isHrStaff() || isFleetStaff())))
+                    || (mod == 'applications' && (action == 'view' ? isActiveMember() : isSupervisorOrAbove()))
+                    || (mod == 'fleet' && (action == 'view' ? isActiveMember() : isFleetStaff()))
+                    || (mod == 'operations' && (action == 'view' ? isActiveMember() : isSupervisorOrAbove()))
+                    || (mod == 'settings' && (action == 'view' ? isActiveMember() : isOpsManagerOrAbove()))
+                    || (mod == 'executive' && (action == 'view' ? isActiveMember() : isOpsManagerOrAbove()))
+                    || (mod == 'platforms' && (action == 'view' ? isActiveMember() : isAdmin()))
+                    || (mod == 'builder' && (action == 'view' ? isActiveMember() : isAdmin()))
+                    || (mod == 'branding' && (action == 'view' ? isActiveMember() : isAdmin()))
+                    || (mod == 'company' && (action == 'view' ? isActiveMember() : isAdmin()))
+                    || (mod == 'system_health' && isAdmin())
+                    || (mod == 'trash' && (action == 'view' ? isAdmin() : isAdmin()))
+                  )
+              )
+          )
+        );
+    }
+
+    function hasPlatformAccess(platform) {
+      return isBootstrappedOwner()
+        || hasActiveRole(['owner', 'admin'])
+        || (
+          isActiveMember()
+          && (
+            !('allowedPlatforms' in getUserDoc().data)
+            || platform in getUserDoc().data.allowedPlatforms
+          )
+        );
     }
 
     // Zero-get() list gate using bounded allowedUids or creator/bootstrapped owner
@@ -108,17 +181,40 @@ service cloud.firestore {
       return !(field in data) || data[field] is bool;
     }
 
+    function isOptionalMap(data, field) {
+      return !(field in data) || data[field] is map;
+    }
+
     // Entity Validation Helpers
     function isValidUserProfile(data, userId) {
       return data.keys().hasAll(['uid', 'email', 'displayName', 'role', 'active', 'createdAt', 'updatedAt'])
-        && data.keys().hasOnly(['uid', 'email', 'displayName', 'role', 'active', 'assignedBranch', 'managedByAdminUids', 'createdAt', 'updatedAt'])
+        && data.keys().hasOnly([
+          'uid', 'email', 'displayName', 'role', 'customRoleId', 'active',
+          'allowedPlatforms', 'assignedBranch', 'assignedCity', 'dataScope',
+          'permissionOverrides', 'capabilityOverrides', 'managedByAdminUids', 'createdAt', 'updatedAt'
+        ])
         && data.uid == userId
         && isValidId(data.uid)
         && data.email is string && data.email.size() >= 3 && data.email.size() <= 200
         && data.displayName is string && data.displayName.size() >= 1 && data.displayName.size() <= 120
-        && data.role in ['owner', 'admin', 'operations_manager', 'supervisor', 'viewer']
+        && data.role in [
+          'owner', 'admin', 'operations_manager', 'supervisor', 'viewer',
+          'hr_manager', 'hr_employee', 'fleet_manager', 'fleet_employee', 'accountant'
+        ]
+        && isOptionalString(data, 'customRoleId', 64)
         && data.active is bool
+        && (!('allowedPlatforms' in data) || (
+          data.allowedPlatforms is list
+          && data.allowedPlatforms.size() >= 1
+          && data.allowedPlatforms.size() <= 2
+          && data.allowedPlatforms[0] in ['hungerstation', 'keeta']
+          && (data.allowedPlatforms.size() == 1 || data.allowedPlatforms[1] in ['hungerstation', 'keeta'])
+        ))
         && isOptionalString(data, 'assignedBranch', 100)
+        && isOptionalString(data, 'assignedCity', 100)
+        && (!('dataScope' in data) || data.dataScope is map)
+        && (!('permissionOverrides' in data) || data.permissionOverrides is map)
+        && isOptionalMap(data, 'capabilityOverrides')
         && (!('managedByAdminUids' in data) || (data.managedByAdminUids is list && data.managedByAdminUids.size() <= 10))
         && data.createdAt is timestamp
         && data.updatedAt is timestamp;
@@ -126,16 +222,38 @@ service cloud.firestore {
 
     function isValidRiderMaster(data, docId) {
       return data.keys().hasAll(['internalRiderId', 'fullName', 'status', 'createdByUid', 'allowedUids', 'createdAt', 'updatedAt'])
-        && data.keys().hasOnly(['internalRiderId', 'fullName', 'city', 'branch', 'supervisor', 'contractName', 'vehicleType', 'status', 'createdByUid', 'allowedUids', 'createdAt', 'updatedAt'])
+        && data.keys().hasOnly([
+          'internalRiderId', 'fullName', 'iqamaNumber', 'iqamaIssueDate', 'iqamaExpiryDate', 'iqamaRenewalNotes',
+          'phone', 'birthDate', 'nationality', 'joinDate', 'exitDate',
+          'driverLicenseNumber', 'driverLicenseType', 'driverLicenseIssueDate', 'driverLicenseExpiryDate',
+          'adminNotes', 'city', 'branch', 'supervisor', 'contractName', 'vehicleType',
+          'status', 'statusHistory', 'customFields', 'createdByUid', 'allowedUids', 'createdAt', 'updatedAt'
+        ])
         && data.internalRiderId == docId
         && isValidId(data.internalRiderId)
         && data.fullName is string && data.fullName.size() >= 1 && data.fullName.size() <= 150
-        && data.status in ['active', 'inactive', 'suspended']
+        && data.status in ['new', 'onboarding', 'ready', 'active', 'suspended', 'on_leave', 'terminated', 'inactive']
+        && isOptionalString(data, 'iqamaNumber', 40)
+        && isOptionalString(data, 'iqamaIssueDate', 10)
+        && isOptionalString(data, 'iqamaExpiryDate', 10)
+        && isOptionalString(data, 'iqamaRenewalNotes', 600)
+        && isOptionalString(data, 'phone', 32)
+        && isOptionalString(data, 'birthDate', 10)
+        && isOptionalString(data, 'nationality', 80)
+        && isOptionalString(data, 'joinDate', 10)
+        && isOptionalString(data, 'exitDate', 10)
+        && isOptionalString(data, 'driverLicenseNumber', 40)
+        && isOptionalString(data, 'driverLicenseType', 60)
+        && isOptionalString(data, 'driverLicenseIssueDate', 10)
+        && isOptionalString(data, 'driverLicenseExpiryDate', 10)
+        && isOptionalString(data, 'adminNotes', 1500)
         && isOptionalString(data, 'city', 100)
         && isOptionalString(data, 'branch', 100)
         && isOptionalString(data, 'supervisor', 100)
         && isOptionalString(data, 'contractName', 120)
         && isOptionalString(data, 'vehicleType', 64)
+        && (!('statusHistory' in data) || (data.statusHistory is list && data.statusHistory.size() <= 50))
+        && isOptionalMap(data, 'customFields')
         && isValidId(data.createdByUid)
         && isValidAllowedUids(data.allowedUids)
         && data.createdAt is timestamp
@@ -266,11 +384,14 @@ service cloud.firestore {
         && data.keys().hasOnly([
           'recordKey', 'platform', 'riderId', 'date', 'month', 'firstName', 'lastName', 'fullName',
           'vehicleType', 'headquarters', 'branch', 'supervisor', 'courierType', 'shiftAttendanceSummary',
-          'onShift', 'validDay', 'appOnlineTime', 'shiftValidOnlineTime', 'shiftOnlineHours',
+          'parsedShiftSlots', 'onShift', 'validDay', 'appOnlineTime', 'appOnlineTimeRaw',
+          'shiftValidOnlineTime', 'shiftValidOnlineTimeRaw', 'shiftOnlineHours',
+          'shiftPeAbdoOnlineHours', 'shiftPeAbdoOnlineHoursRaw',
           'acceptedTasks', 'restaurantArrivals', 'deliveredTasks', 'largeOrderTasksCompleted',
           'rejectedTasks', 'rejectedTasksCourier', 'rejectedTasksAuto', 'cancellationRate',
           'completionRate', 'onTimeRate', 'largeOrderOnTimeRate', 'avgDeliveryTimeMinutes',
-          'deliveredOver55Min', 'overdueOrderTasks', 'severelyOverdueOrderTasks', 'rawExtraColumns',
+          'deliveredOver55Min', 'deliveredOver55MinProp', 'overdueOrderTasks', 'severelyOverdueOrderTasks',
+          'originalHeaders', 'rawExtraColumns',
           'sourceFile', 'sourceSheet', 'sourceRowNumber', 'importBatchId', 'rowChecksum',
           'createdByUid', 'allowedUids', 'importedAt', 'updatedAt'
         ])
@@ -279,6 +400,7 @@ service cloud.firestore {
         && data.riderId is string && data.riderId.size() >= 1 && data.riderId.size() <= 64
         && isValidIsoDate(data.date)
         && data.month is string && data.month.size() == 7
+        && isOptionalString(data, 'shiftAttendanceSummary', 500)
         && isValidId(data.createdByUid)
         && isValidAllowedUids(data.allowedUids)
         && data.importedAt is timestamp && data.updatedAt is timestamp;
@@ -287,10 +409,12 @@ service cloud.firestore {
     function isValidKeetaVdaDaily(data, docId) {
       return data.keys().hasAll(['recordKey', 'platform', 'riderId', 'date', 'month', 'sourceFile', 'sourceSheet', 'importBatchId', 'rowChecksum', 'createdByUid', 'allowedUids', 'importedAt', 'updatedAt'])
         && data.keys().hasOnly([
-          'recordKey', 'platform', 'riderId', 'date', 'month', 'vehicleType',
+          'recordKey', 'platform', 'riderId', 'date', 'month', 'firstOnlineDate', 'vehicleType',
+          'threePlId', 'threePlName', 'pmm', 'ifNewRider',
           'shiftOnlineHours', 'sumValidShifts', 'shouldOnlineDays', 'totalDeliveredTasks',
-          'onTimeDTasks', 'cancellationD', 'deliveredOver55Min', 'acceptedOrders',
-          'totalDeliveryDistance', 'payableDistance', 'shiftWindows',
+          'sumDeliveredAdvanceTasks', 'onTimeDTasks', 'cancellationD', 'deliveredOver55Min',
+          'acceptedOrders', 'vdaScore', 'totalDeliveryDistance', 'payableDistance',
+          'shiftWindows', 'shiftsS1ToS6', 'originalHeaders', 'rawExtraColumns',
           'sourceFile', 'sourceSheet', 'sourceRowNumber', 'importBatchId', 'rowChecksum',
           'createdByUid', 'allowedUids', 'importedAt', 'updatedAt'
         ])
@@ -307,9 +431,10 @@ service cloud.firestore {
     function isValidKeetaRankSnapshot(data, docId) {
       return data.keys().hasAll(['recordKey', 'platform', 'riderId', 'snapshotDate', 'sourceFile', 'sourceSheet', 'importBatchId', 'rowChecksum', 'createdByUid', 'allowedUids', 'importedAt', 'updatedAt'])
         && data.keys().hasOnly([
-          'recordKey', 'platform', 'riderId', 'snapshotDate', 'name', 'currentEstimatedLevel',
+          'recordKey', 'platform', 'riderId', 'snapshotDate', 'snapshotMonth', 'name', 'currentEstimatedLevel',
           'rankingPercentile', 'forcedAssignmentScore', 'estimatedRewardAmount', 'onTimeRate',
           'orderCompletionRate', 'didntTapDropOffTooEarly', 'orderVolume',
+          'originalHeaders', 'rawExtraColumns',
           'sourceFile', 'sourceSheet', 'sourceRowNumber', 'importBatchId', 'rowChecksum',
           'createdByUid', 'allowedUids', 'importedAt', 'updatedAt'
         ])
@@ -326,8 +451,9 @@ service cloud.firestore {
       return data.keys().hasAll(['recordKey', 'platform', 'riderId', 'date', 'month', 'sourceFile', 'sourceSheet', 'importBatchId', 'rowChecksum', 'createdByUid', 'allowedUids', 'importedAt', 'updatedAt'])
         && data.keys().hasOnly([
           'recordKey', 'platform', 'riderId', 'date', 'month', 'city', 'partnerId', 'partnerName',
-          'pmm', 'finalInspectionResult', 'totalDaysTriggeredMtd', 'totalDaysPassedMtd',
-          'passRateMtd', 'over90PassRate',
+          'pmm', 'ifTriggeredToday', 'ifTriggeredTodayRaw', 'finalInspectionResult',
+          'totalDaysTriggeredMtd', 'totalDaysPassedMtd', 'passRateMtd', 'over90PassRate',
+          'originalHeaders', 'rawExtraColumns',
           'sourceFile', 'sourceSheet', 'sourceRowNumber', 'importBatchId', 'rowChecksum',
           'createdByUid', 'allowedUids', 'importedAt', 'updatedAt'
         ])
@@ -397,6 +523,7 @@ service cloud.firestore {
           'scoreWeightQuality', 'scoreWeightAcceptance', 'scoreWeightCancellation',
           'minActiveOrdersPerDay', 'minActiveHoursPerDay', 'caseOverdueDays',
           'configuredBranches', 'importMaxFiles', 'importAllowUpdates', 'importStrictDates',
+          'keetaEnabled', 'keetaHidden', 'expiryAlertDays', 'customVehicleTypes',
           'createdByUid', 'allowedUids', 'updatedByEmail', 'updatedAt'
         ])
         && data.settingsId == docId && isValidId(data.settingsId)
@@ -430,6 +557,10 @@ service cloud.firestore {
         && isOptionalNum(data, 'importMaxFiles')
         && isOptionalBool(data, 'importAllowUpdates')
         && isOptionalBool(data, 'importStrictDates')
+        && isOptionalBool(data, 'keetaEnabled')
+        && isOptionalBool(data, 'keetaHidden')
+        && (!('expiryAlertDays' in data) || (data.expiryAlertDays is list && data.expiryAlertDays.size() <= 15))
+        && (!('customVehicleTypes' in data) || (data.customVehicleTypes is list && data.customVehicleTypes.size() <= 40))
         && isOptionalString(data, 'updatedByEmail', 200)
         && isValidId(data.createdByUid)
         && isValidAllowedUids(data.allowedUids)
@@ -498,7 +629,7 @@ service cloud.firestore {
         && data.keys().hasOnly([
           'caseId', 'riderId', 'platform', 'riderName', 'branch', 'issueType', 'title',
           'description', 'priority', 'status', 'assigneeEmail', 'actionTaken', 'notes',
-          'registeredDate', 'dueDate', 'closedDate', 'sourceRef', 'updatedByEmail',
+          'registeredDate', 'dueDate', 'closedDate', 'sourceRef', 'customFields', 'updatedByEmail',
           'createdByUid', 'allowedUids', 'createdAt', 'updatedAt'
         ])
         && data.caseId == docId && isValidId(data.caseId)
@@ -518,6 +649,7 @@ service cloud.firestore {
         && isOptionalString(data, 'dueDate', 10)
         && isOptionalString(data, 'closedDate', 10)
         && isOptionalString(data, 'sourceRef', 200)
+        && isOptionalMap(data, 'customFields')
         && isOptionalString(data, 'updatedByEmail', 200)
         && isValidId(data.createdByUid)
         && isValidAllowedUids(data.allowedUids)
@@ -549,21 +681,566 @@ service cloud.firestore {
 
     function isValidAuditLog(data, docId) {
       return data.keys().hasAll(['logId', 'action', 'targetCollection', 'targetId', 'actorUid', 'actorEmail', 'details', 'allowedUids', 'createdAt'])
-        && data.keys().hasOnly(['logId', 'action', 'targetCollection', 'targetId', 'actorUid', 'actorEmail', 'details', 'allowedUids', 'createdAt'])
+        && data.keys().hasOnly([
+          'logId', 'action', 'targetCollection', 'targetId', 'entityType',
+          'actorUid', 'actorEmail', 'details', 'oldValue', 'newValue', 'source',
+          'allowedUids', 'createdAt'
+        ])
         && data.logId == docId && isValidId(data.logId)
         && data.action is string && data.action.size() >= 1 && data.action.size() <= 80
         && data.targetCollection is string && data.targetCollection.size() >= 1 && data.targetCollection.size() <= 80
         && data.targetId is string && data.targetId.size() >= 1 && data.targetId.size() <= 128
+        && isOptionalString(data, 'entityType', 64)
         && data.actorUid == request.auth.uid
         && data.actorEmail is string && data.actorEmail.size() <= 200
         && data.details is string && data.details.size() <= 2000
+        && isOptionalString(data, 'oldValue', 2000)
+        && isOptionalString(data, 'newValue', 2000)
+        && (!('source' in data) || data.source in ['UI', 'API', 'Import', 'System'])
         && isValidAllowedUids(data.allowedUids)
         && data.createdAt == request.time;
     }
 
+    function isValidRoleTemplate(data, docId) {
+      return data.keys().hasAll(['roleId', 'nameAr', 'nameEn', 'isSystemPreset', 'permissions', 'createdByUid', 'allowedUids', 'createdAt', 'updatedAt'])
+        && data.keys().hasOnly(['roleId', 'nameAr', 'nameEn', 'description', 'isSystemPreset', 'permissions', 'capabilities', 'createdByUid', 'allowedUids', 'createdAt', 'updatedAt'])
+        && data.roleId == docId && isValidId(data.roleId)
+        && data.nameAr is string && data.nameAr.size() >= 1 && data.nameAr.size() <= 120
+        && data.nameEn is string && data.nameEn.size() >= 1 && data.nameEn.size() <= 120
+        && isOptionalString(data, 'description', 400)
+        && data.isSystemPreset is bool
+        && data.permissions is map
+        && isOptionalMap(data, 'capabilities')
+        && isValidId(data.createdByUid)
+        && isValidAllowedUids(data.allowedUids)
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidDocumentTypeConfig(data, docId) {
+      return data.keys().hasAll(['typeId', 'nameAr', 'nameEn', 'targetEntity', 'requiresExpiry', 'isDefault', 'active', 'createdByUid', 'allowedUids', 'createdAt', 'updatedAt'])
+        && data.keys().hasOnly(['typeId', 'nameAr', 'nameEn', 'targetEntity', 'requiresExpiry', 'isDefault', 'active', 'createdByUid', 'allowedUids', 'createdAt', 'updatedAt'])
+        && data.typeId == docId && isValidId(data.typeId)
+        && data.nameAr is string && data.nameAr.size() >= 1 && data.nameAr.size() <= 120
+        && data.nameEn is string && data.nameEn.size() >= 1 && data.nameEn.size() <= 120
+        && data.targetEntity in ['rider', 'vehicle', 'handover']
+        && data.requiresExpiry is bool
+        && data.isDefault is bool
+        && data.active is bool
+        && isValidId(data.createdByUid)
+        && isValidAllowedUids(data.allowedUids)
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidPrivateDocument(data, docId) {
+      return data.keys().hasAll(['docId', 'entityType', 'entityId', 'docTypeId', 'docTypeName', 'title', 'currentVersion', 'versions', 'createdByUid', 'allowedUids', 'createdAt', 'updatedAt'])
+        && data.keys().hasOnly(['docId', 'entityType', 'entityId', 'entityLabel', 'docTypeId', 'docTypeName', 'title', 'issueDate', 'expiryDate', 'notes', 'currentVersion', 'versions', 'createdByUid', 'allowedUids', 'createdAt', 'updatedAt'])
+        && data.docId == docId && isValidId(data.docId)
+        && data.entityType in ['rider', 'vehicle', 'handover', 'custom_field', 'branding']
+        && data.entityId is string && data.entityId.size() >= 1 && data.entityId.size() <= 128
+        && isOptionalString(data, 'entityLabel', 180)
+        && data.docTypeId is string && data.docTypeId.size() >= 1 && data.docTypeId.size() <= 64
+        && data.docTypeName is string && data.docTypeName.size() >= 1 && data.docTypeName.size() <= 120
+        && data.title is string && data.title.size() >= 1 && data.title.size() <= 180
+        && isOptionalString(data, 'issueDate', 10)
+        && isOptionalString(data, 'expiryDate', 10)
+        && isOptionalString(data, 'notes', 600)
+        && data.currentVersion is number
+        && data.versions is list && data.versions.size() >= 1 && data.versions.size() <= 20
+        && isValidId(data.createdByUid)
+        && isValidAllowedUids(data.allowedUids)
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidPlatformCatalogEntry(data, docId) {
+      return data.keys().hasAll(['platformId', 'name', 'nameAr', 'enabled', 'hiddenFromUi', 'operationalImportEnabled', 'supportsExcelImport', 'isBuiltIn', 'createdByUid', 'allowedUids', 'createdAt', 'updatedAt'])
+        && data.keys().hasOnly(['platformId', 'name', 'nameAr', 'enabled', 'hiddenFromUi', 'operationalImportEnabled', 'supportsExcelImport', 'isBuiltIn', 'description', 'createdByUid', 'allowedUids', 'createdAt', 'updatedAt'])
+        && data.platformId == docId && isValidId(data.platformId)
+        && data.name is string && data.name.size() >= 1 && data.name.size() <= 100
+        && data.nameAr is string && data.nameAr.size() >= 1 && data.nameAr.size() <= 100
+        && data.enabled is bool
+        && data.hiddenFromUi is bool
+        && data.operationalImportEnabled is bool
+        && data.supportsExcelImport is bool
+        && data.isBuiltIn is bool
+        && isOptionalString(data, 'description', 400)
+        && isValidId(data.createdByUid)
+        && isValidAllowedUids(data.allowedUids)
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidPlatformAccount(data, docId) {
+      return data.keys().hasAll(['accountId', 'companyRiderId', 'platformId', 'platformName', 'platformRiderId', 'accountStatus', 'linkingStatus', 'createdByUid', 'allowedUids', 'createdAt', 'updatedAt'])
+        && data.keys().hasOnly([
+          'accountId', 'companyRiderId', 'platformId', 'platformName', 'platformRiderId',
+          'startDate', 'deactivationDate', 'accountStatus', 'linkingStatus', 'conflictCandidateRiderIds',
+          'branch', 'city', 'supervisor', 'vehicleType', 'notes', 'customFields',
+          'createdByUid', 'allowedUids', 'createdAt', 'updatedAt'
+        ])
+        && data.accountId == docId && isValidId(data.accountId)
+        && data.companyRiderId is string && data.companyRiderId.size() <= 64
+        && data.platformId is string && data.platformId.size() >= 1 && data.platformId.size() <= 64
+        && data.platformName is string && data.platformName.size() >= 1 && data.platformName.size() <= 100
+        && data.platformRiderId is string && data.platformRiderId.size() >= 1 && data.platformRiderId.size() <= 64
+        && isOptionalString(data, 'startDate', 10)
+        && isOptionalString(data, 'deactivationDate', 10)
+        && data.accountStatus in ['active', 'suspended', 'inactive']
+        && data.linkingStatus in ['linked', 'unlinked', 'conflict_review']
+        && (!('conflictCandidateRiderIds' in data) || (data.conflictCandidateRiderIds is list && data.conflictCandidateRiderIds.size() <= 20))
+        && isOptionalString(data, 'branch', 100)
+        && isOptionalString(data, 'city', 100)
+        && isOptionalString(data, 'supervisor', 100)
+        && isOptionalString(data, 'vehicleType', 64)
+        && isOptionalString(data, 'notes', 800)
+        && isOptionalMap(data, 'customFields')
+        && isValidId(data.createdByUid)
+        && isValidAllowedUids(data.allowedUids)
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidVehicleMaster(data, docId) {
+      return data.keys().hasAll(['vehicleInternalId', 'plateNumber', 'vehicleType', 'make', 'model', 'ownershipType', 'status', 'createdByUid', 'allowedUids', 'createdAt', 'updatedAt'])
+        && data.keys().hasOnly([
+          'vehicleInternalId', 'plateNumber', 'vehicleType', 'make', 'model', 'year', 'color', 'vin',
+          'ownershipType', 'ownerOrLeasingCompany', 'status', 'istimaraNumber', 'istimaraExpiryDate',
+          'insuranceCompany', 'insurancePolicyNumber', 'insuranceExpiryDate', 'periodicInspectionExpiryDate',
+          'currentRiderId', 'currentAssignmentId', 'notes', 'customFields', 'createdByUid', 'allowedUids', 'createdAt', 'updatedAt'
+        ])
+        && data.vehicleInternalId == docId && isValidId(data.vehicleInternalId)
+        && data.plateNumber is string && data.plateNumber.size() >= 1 && data.plateNumber.size() <= 40
+        && data.vehicleType is string && data.vehicleType.size() >= 1 && data.vehicleType.size() <= 64
+        && data.make is string && data.make.size() >= 1 && data.make.size() <= 80
+        && data.model is string && data.model.size() >= 1 && data.model.size() <= 80
+        && isOptionalNum(data, 'year')
+        && isOptionalString(data, 'color', 40)
+        && isOptionalString(data, 'vin', 64)
+        && data.ownershipType in ['owned', 'leased']
+        && isOptionalString(data, 'ownerOrLeasingCompany', 150)
+        && data.status in ['available', 'assigned', 'maintenance', 'out_of_service', 'leased_out', 'ended']
+        && isOptionalString(data, 'istimaraNumber', 64)
+        && isOptionalString(data, 'istimaraExpiryDate', 10)
+        && isOptionalString(data, 'insuranceCompany', 120)
+        && isOptionalString(data, 'insurancePolicyNumber', 64)
+        && isOptionalString(data, 'insuranceExpiryDate', 10)
+        && isOptionalString(data, 'periodicInspectionExpiryDate', 10)
+        && isOptionalString(data, 'currentRiderId', 64)
+        && isOptionalString(data, 'currentAssignmentId', 128)
+        && isOptionalString(data, 'notes', 1000)
+        && isOptionalMap(data, 'customFields')
+        && isValidId(data.createdByUid)
+        && isValidAllowedUids(data.allowedUids)
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidVehicleAssignment(data, docId) {
+      return data.keys().hasAll(['assignmentId', 'vehicleInternalId', 'plateNumber', 'companyRiderId', 'handoverDate', 'handoverCondition', 'handoverByUid', 'handoverByEmail', 'status', 'createdByUid', 'allowedUids', 'createdAt', 'updatedAt'])
+        && data.keys().hasOnly([
+          'assignmentId', 'vehicleInternalId', 'plateNumber', 'companyRiderId', 'riderName',
+          'handoverDate', 'handoverTime', 'handoverOdometer', 'handoverCondition', 'handoverNotes',
+          'handoverDocIds', 'handoverByUid', 'handoverByEmail',
+          'returnDate', 'returnTime', 'returnOdometer', 'returnCondition', 'returnNotes',
+          'returnDamageNotes', 'returnDocIds', 'returnByUid', 'returnByEmail',
+          'status', 'allowSharedOverride', 'customFields', 'createdByUid', 'allowedUids', 'createdAt', 'updatedAt'
+        ])
+        && data.assignmentId == docId && isValidId(data.assignmentId)
+        && data.vehicleInternalId is string && data.vehicleInternalId.size() >= 1 && data.vehicleInternalId.size() <= 64
+        && data.plateNumber is string && data.plateNumber.size() >= 1 && data.plateNumber.size() <= 40
+        && data.companyRiderId is string && data.companyRiderId.size() >= 1 && data.companyRiderId.size() <= 64
+        && isOptionalString(data, 'riderName', 150)
+        && isValidIsoDate(data.handoverDate)
+        && isOptionalString(data, 'handoverTime', 16)
+        && isOptionalNum(data, 'handoverOdometer')
+        && data.handoverCondition is string && data.handoverCondition.size() >= 1 && data.handoverCondition.size() <= 300
+        && isOptionalString(data, 'handoverNotes', 1000)
+        && (!('handoverDocIds' in data) || (data.handoverDocIds is list && data.handoverDocIds.size() <= 20))
+        && isValidId(data.handoverByUid)
+        && data.handoverByEmail is string && data.handoverByEmail.size() >= 3 && data.handoverByEmail.size() <= 200
+        && isOptionalString(data, 'returnDate', 10)
+        && isOptionalString(data, 'returnTime', 16)
+        && isOptionalNum(data, 'returnOdometer')
+        && isOptionalString(data, 'returnCondition', 300)
+        && isOptionalString(data, 'returnNotes', 1000)
+        && isOptionalString(data, 'returnDamageNotes', 1000)
+        && (!('returnDocIds' in data) || (data.returnDocIds is list && data.returnDocIds.size() <= 20))
+        && isOptionalString(data, 'returnByUid', 128)
+        && isOptionalString(data, 'returnByEmail', 200)
+        && data.status in ['active', 'returned']
+        && isOptionalBool(data, 'allowSharedOverride')
+        && isOptionalMap(data, 'customFields')
+        && isValidId(data.createdByUid)
+        && isValidAllowedUids(data.allowedUids)
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidVehicleMaintenance(data, docId) {
+      return data.keys().hasAll(['maintenanceId', 'vehicleInternalId', 'plateNumber', 'maintenanceType', 'maintenanceDate', 'createdByUid', 'allowedUids', 'createdAt', 'updatedAt'])
+        && data.keys().hasOnly([
+          'maintenanceId', 'vehicleInternalId', 'plateNumber', 'maintenanceType', 'maintenanceDate',
+          'cost', 'odometer', 'workshop', 'details', 'nextMaintenanceDate', 'nextMaintenanceOdometer',
+          'customFields', 'createdByUid', 'allowedUids', 'createdAt', 'updatedAt'
+        ])
+        && data.maintenanceId == docId && isValidId(data.maintenanceId)
+        && data.vehicleInternalId is string && data.vehicleInternalId.size() >= 1 && data.vehicleInternalId.size() <= 64
+        && data.plateNumber is string && data.plateNumber.size() >= 1 && data.plateNumber.size() <= 40
+        && data.maintenanceType is string && data.maintenanceType.size() >= 1 && data.maintenanceType.size() <= 120
+        && isValidIsoDate(data.maintenanceDate)
+        && isOptionalNum(data, 'cost')
+        && isOptionalNum(data, 'odometer')
+        && isOptionalString(data, 'workshop', 150)
+        && isOptionalString(data, 'details', 1200)
+        && isOptionalString(data, 'nextMaintenanceDate', 10)
+        && isOptionalNum(data, 'nextMaintenanceOdometer')
+        && isOptionalMap(data, 'customFields')
+        && isValidId(data.createdByUid)
+        && isValidAllowedUids(data.allowedUids)
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidEntityNoteTask(data, docId) {
+      return data.keys().hasAll(['noteTaskId', 'entityType', 'entityId', 'title', 'content', 'priority', 'status', 'createdByUid', 'createdByEmail', 'allowedUids', 'createdAt', 'updatedAt'])
+        && data.keys().hasOnly([
+          'noteTaskId', 'entityType', 'entityId', 'entityLabel', 'title', 'content',
+          'priority', 'status', 'assigneeUid', 'assigneeEmail', 'dueDate', 'actionTaken',
+          'resolutionNote', 'closedAt', 'closedByEmail', 'customFields', 'createdByUid', 'createdByEmail',
+          'allowedUids', 'createdAt', 'updatedAt'
+        ])
+        && data.noteTaskId == docId && isValidId(data.noteTaskId)
+        && data.entityType in ['general', 'rider', 'vehicle', 'platform_account']
+        && data.entityId is string && data.entityId.size() >= 1 && data.entityId.size() <= 128
+        && isOptionalString(data, 'entityLabel', 180)
+        && data.title is string && data.title.size() >= 1 && data.title.size() <= 200
+        && data.content is string && data.content.size() >= 1 && data.content.size() <= 1800
+        && data.priority in ['critical', 'high', 'medium', 'low']
+        && data.status in ['open', 'in_progress', 'closed']
+        && isOptionalString(data, 'assigneeUid', 128)
+        && isOptionalString(data, 'assigneeEmail', 200)
+        && isOptionalString(data, 'dueDate', 10)
+        && isOptionalString(data, 'actionTaken', 1000)
+        && isOptionalString(data, 'resolutionNote', 1000)
+        && isOptionalString(data, 'closedAt', 40)
+        && isOptionalString(data, 'closedByEmail', 200)
+        && isOptionalMap(data, 'customFields')
+        && isValidId(data.createdByUid)
+        && data.createdByEmail is string && data.createdByEmail.size() >= 3 && data.createdByEmail.size() <= 200
+        && isValidAllowedUids(data.allowedUids)
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    // ==========================================
+    // SYSTEM BUILDER & CUSTOMIZATION VALIDATORS
+    // ==========================================
+
+    function isValidCompanyBranding(data, docId) {
+      return data.keys().hasAll(['brandingId', 'company', 'branding', 'credits', 'createdByUid', 'allowedUids', 'createdAt', 'updatedAt'])
+        && data.keys().hasOnly(['brandingId', 'company', 'branding', 'credits', 'updatedByEmail', 'createdByUid', 'allowedUids', 'createdAt', 'updatedAt'])
+        && data.brandingId == docId && isValidId(data.brandingId)
+        && data.company is map
+        && data.branding is map
+        && data.credits is map
+        && isOptionalString(data, 'updatedByEmail', 200)
+        && isValidId(data.createdByUid)
+        && isValidAllowedUids(data.allowedUids)
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidSystemSection(data, docId) {
+      return data.keys().hasAll(['sectionId', 'titleAr', 'titleEn', 'iconName', 'order', 'visible', 'isBuiltIn', 'createdByUid', 'allowedUids', 'createdAt', 'updatedAt'])
+        && data.keys().hasOnly([
+          'sectionId', 'titleAr', 'titleEn', 'description', 'iconName', 'order',
+          'visible', 'isBuiltIn', 'archived', 'allowedRoles',
+          'createdByUid', 'allowedUids', 'createdAt', 'updatedAt'
+        ])
+        && data.sectionId == docId && isValidId(data.sectionId)
+        && data.titleAr is string && data.titleAr.size() >= 1 && data.titleAr.size() <= 120
+        && data.titleEn is string && data.titleEn.size() >= 1 && data.titleEn.size() <= 120
+        && isOptionalString(data, 'description', 400)
+        && data.iconName is string && data.iconName.size() >= 1 && data.iconName.size() <= 60
+        && data.order is number
+        && data.visible is bool
+        && data.isBuiltIn is bool
+        && isOptionalBool(data, 'archived')
+        && (!('allowedRoles' in data) || (data.allowedRoles is list && data.allowedRoles.size() <= 30))
+        && isValidId(data.createdByUid)
+        && isValidAllowedUids(data.allowedUids)
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidSystemPage(data, docId) {
+      return data.keys().hasAll(['pageId', 'slug', 'titleAr', 'titleEn', 'sectionId', 'formId', 'iconName', 'order', 'visible', 'isBuiltIn', 'createdByUid', 'allowedUids', 'createdAt', 'updatedAt'])
+        && data.keys().hasOnly([
+          'pageId', 'slug', 'titleAr', 'titleEn', 'description', 'sectionId', 'formId', 'iconName',
+          'order', 'visible', 'isBuiltIn', 'archived', 'allowedRoles', 'tableColumns',
+          'createdByUid', 'allowedUids', 'createdAt', 'updatedAt'
+        ])
+        && data.pageId == docId && isValidId(data.pageId)
+        && isValidId(data.slug)
+        && data.titleAr is string && data.titleAr.size() >= 1 && data.titleAr.size() <= 120
+        && data.titleEn is string && data.titleEn.size() >= 1 && data.titleEn.size() <= 120
+        && isOptionalString(data, 'description', 400)
+        && isValidId(data.sectionId)
+        && isValidId(data.formId)
+        && data.iconName is string && data.iconName.size() >= 1 && data.iconName.size() <= 60
+        && data.order is number
+        && data.visible is bool
+        && data.isBuiltIn is bool
+        && isOptionalBool(data, 'archived')
+        && (!('allowedRoles' in data) || (data.allowedRoles is list && data.allowedRoles.size() <= 30))
+        && (!('tableColumns' in data) || (data.tableColumns is list && data.tableColumns.size() <= 60))
+        && isValidId(data.createdByUid)
+        && isValidAllowedUids(data.allowedUids)
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidDynamicField(data, docId) {
+      return data.keys().hasAll(['fieldId', 'key', 'labelAr', 'labelEn', 'type', 'module', 'formId', 'order', 'required', 'visible', 'editable', 'createdByUid', 'allowedUids', 'createdAt', 'updatedAt'])
+        && data.keys().hasOnly([
+          'fieldId', 'key', 'labelAr', 'labelEn', 'description', 'placeholderAr', 'type', 'module', 'formId',
+          'order', 'required', 'visible', 'editable', 'showInTable', 'isCore', 'archived',
+          'defaultValue', 'options', 'validation', 'fileConfig', 'formulaExpression', 'permissions',
+          'createdByUid', 'allowedUids', 'createdAt', 'updatedAt'
+        ])
+        && data.fieldId == docId && isValidId(data.fieldId)
+        && data.key is string && data.key.size() >= 1 && data.key.size() <= 64
+        && data.labelAr is string && data.labelAr.size() >= 1 && data.labelAr.size() <= 120
+        && data.labelEn is string && data.labelEn.size() >= 1 && data.labelEn.size() <= 120
+        && isOptionalString(data, 'description', 400)
+        && isOptionalString(data, 'placeholderAr', 150)
+        && data.type in [
+          'short_text', 'long_text', 'number', 'currency', 'date', 'datetime',
+          'image', 'pdf', 'file', 'checkbox', 'dropdown', 'multiselect',
+          'boolean', 'email', 'phone', 'url', 'percentage', 'formula'
+        ]
+        && data.module in ['hr', 'fleet', 'operations', 'executive', 'applications', 'custom']
+        && isValidId(data.formId)
+        && data.order is number
+        && data.required is bool
+        && data.visible is bool
+        && data.editable is bool
+        && isOptionalBool(data, 'showInTable')
+        && isOptionalBool(data, 'isCore')
+        && isOptionalBool(data, 'archived')
+        && (!('options' in data) || (data.options is list && data.options.size() <= 100))
+        && isOptionalMap(data, 'validation')
+        && isOptionalMap(data, 'fileConfig')
+        && isOptionalString(data, 'formulaExpression', 300)
+        && isOptionalMap(data, 'permissions')
+        && isValidId(data.createdByUid)
+        && isValidAllowedUids(data.allowedUids)
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidDynamicForm(data, docId) {
+      return data.keys().hasAll(['formId', 'nameAr', 'nameEn', 'module', 'targetEntity', 'layoutMode', 'sections', 'placements', 'publishedVersion', 'status', 'createdByUid', 'allowedUids', 'createdAt', 'updatedAt'])
+        && data.keys().hasOnly([
+          'formId', 'nameAr', 'nameEn', 'description', 'module', 'targetEntity', 'layoutMode',
+          'sections', 'placements', 'draftSections', 'draftPlacements', 'draftLayoutMode',
+          'hasUnpublishedDraft', 'publishedVersion', 'status', 'updatedByEmail',
+          'createdByUid', 'allowedUids', 'createdAt', 'updatedAt'
+        ])
+        && data.formId == docId && isValidId(data.formId)
+        && data.nameAr is string && data.nameAr.size() >= 1 && data.nameAr.size() <= 140
+        && data.nameEn is string && data.nameEn.size() >= 1 && data.nameEn.size() <= 140
+        && isOptionalString(data, 'description', 400)
+        && data.module in ['hr', 'fleet', 'operations', 'executive', 'applications', 'custom']
+        && data.targetEntity is string && data.targetEntity.size() >= 1 && data.targetEntity.size() <= 80
+        && data.layoutMode in ['sections', 'tabs', 'wizard']
+        && data.sections is list && data.sections.size() <= 30
+        && data.placements is list && data.placements.size() <= 150
+        && (!('draftSections' in data) || (data.draftSections is list && data.draftSections.size() <= 30))
+        && (!('draftPlacements' in data) || (data.draftPlacements is list && data.draftPlacements.size() <= 150))
+        && (!('draftLayoutMode' in data) || data.draftLayoutMode in ['sections', 'tabs', 'wizard'])
+        && isOptionalBool(data, 'hasUnpublishedDraft')
+        && data.publishedVersion is number
+        && data.status in ['published', 'draft']
+        && isOptionalString(data, 'updatedByEmail', 200)
+        && isValidId(data.createdByUid)
+        && isValidAllowedUids(data.allowedUids)
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidDynamicFormVersion(data, docId) {
+      return data.keys().hasAll(['versionId', 'formId', 'versionNumber', 'layoutMode', 'sections', 'placements', 'publishedByUid', 'publishedByEmail', 'createdByUid', 'allowedUids', 'createdAt'])
+        && data.keys().hasOnly([
+          'versionId', 'formId', 'versionNumber', 'layoutMode', 'sections', 'placements',
+          'changeNote', 'publishedByUid', 'publishedByEmail', 'createdByUid', 'allowedUids', 'createdAt'
+        ])
+        && data.versionId == docId && isValidId(data.versionId)
+        && isValidId(data.formId)
+        && data.versionNumber is number
+        && data.layoutMode in ['sections', 'tabs', 'wizard']
+        && data.sections is list && data.sections.size() <= 30
+        && data.placements is list && data.placements.size() <= 150
+        && isOptionalString(data, 'changeNote', 400)
+        && isValidId(data.publishedByUid)
+        && data.publishedByEmail is string && data.publishedByEmail.size() <= 200
+        && isValidId(data.createdByUid)
+        && isValidAllowedUids(data.allowedUids)
+        && data.createdAt is timestamp;
+    }
+
+    function isValidCustomEntityRecord(data, docId) {
+      return data.keys().hasAll(['recordId', 'pageId', 'formId', 'title', 'customFields', 'createdByUid', 'createdByEmail', 'allowedUids', 'createdAt', 'updatedAt'])
+        && data.keys().hasOnly([
+          'recordId', 'pageId', 'formId', 'title', 'status', 'branch', 'city',
+          'customFields', 'archived', 'createdByUid', 'createdByEmail', 'updatedByEmail',
+          'allowedUids', 'createdAt', 'updatedAt'
+        ])
+        && data.recordId == docId && isValidId(data.recordId)
+        && isValidId(data.pageId)
+        && isValidId(data.formId)
+        && data.title is string && data.title.size() >= 1 && data.title.size() <= 200
+        && isOptionalString(data, 'status', 64)
+        && isOptionalString(data, 'branch', 100)
+        && isOptionalString(data, 'city', 100)
+        && data.customFields is map
+        && isOptionalBool(data, 'archived')
+        && isValidId(data.createdByUid)
+        && data.createdByEmail is string && data.createdByEmail.size() <= 200
+        && isOptionalString(data, 'updatedByEmail', 200)
+        && isValidAllowedUids(data.allowedUids)
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidSavedView(data, docId) {
+      return data.keys().hasAll(['viewId', 'scope', 'nameAr', 'filters', 'isShared', 'ownerUid', 'ownerEmail', 'createdByUid', 'allowedUids', 'createdAt', 'updatedAt'])
+        && data.keys().hasOnly([
+          'viewId', 'scope', 'nameAr', 'filters', 'visibleColumns', 'columnOrder',
+          'isShared', 'ownerUid', 'ownerEmail', 'createdByUid', 'allowedUids', 'createdAt', 'updatedAt'
+        ])
+        && data.viewId == docId && isValidId(data.viewId)
+        && data.scope is string && data.scope.size() >= 1 && data.scope.size() <= 80
+        && data.nameAr is string && data.nameAr.size() >= 1 && data.nameAr.size() <= 120
+        && data.filters is map
+        && (!('visibleColumns' in data) || (data.visibleColumns is list && data.visibleColumns.size() <= 80))
+        && (!('columnOrder' in data) || (data.columnOrder is list && data.columnOrder.size() <= 80))
+        && data.isShared is bool
+        && isValidId(data.ownerUid)
+        && data.ownerEmail is string && data.ownerEmail.size() <= 200
+        && isValidId(data.createdByUid)
+        && isValidAllowedUids(data.allowedUids)
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidUserPreference(data, userId) {
+      return data.keys().hasAll(['userId', 'createdByUid', 'allowedUids', 'updatedAt'])
+        && data.keys().hasOnly([
+          'userId', 'defaultNav', 'dashboardDateWindow', 'dashboardWidgets',
+          'tableColumns', 'sidebarCollapsed', 'createdByUid', 'allowedUids', 'updatedAt'
+        ])
+        && data.userId == userId && isValidId(data.userId)
+        && isOptionalString(data, 'defaultNav', 80)
+        && (!('dashboardDateWindow' in data) || data.dashboardDateWindow in ['today', '7d', '30d', 'month'])
+        && (!('dashboardWidgets' in data) || (data.dashboardWidgets is list && data.dashboardWidgets.size() <= 40))
+        && isOptionalMap(data, 'tableColumns')
+        && isOptionalBool(data, 'sidebarCollapsed')
+        && isValidId(data.createdByUid)
+        && isValidAllowedUids(data.allowedUids)
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidNotificationRule(data, docId) {
+      return data.keys().hasAll(['ruleId', 'nameAr', 'module', 'eventType', 'severity', 'targetRoles', 'enabled', 'createdByUid', 'allowedUids', 'createdAt', 'updatedAt'])
+        && data.keys().hasOnly([
+          'ruleId', 'nameAr', 'description', 'module', 'eventType', 'severity',
+          'thresholdDaysOrValue', 'targetRoles', 'enabled', 'createdByUid', 'allowedUids', 'createdAt', 'updatedAt'
+        ])
+        && data.ruleId == docId && isValidId(data.ruleId)
+        && data.nameAr is string && data.nameAr.size() >= 1 && data.nameAr.size() <= 140
+        && isOptionalString(data, 'description', 400)
+        && data.module is string && data.module.size() >= 1 && data.module.size() <= 64
+        && data.eventType is string && data.eventType.size() >= 1 && data.eventType.size() <= 80
+        && data.severity in ['critical', 'warning', 'info']
+        && isOptionalNum(data, 'thresholdDaysOrValue')
+        && data.targetRoles is list && data.targetRoles.size() <= 30
+        && data.enabled is bool
+        && isValidId(data.createdByUid)
+        && isValidAllowedUids(data.allowedUids)
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidTrashItem(data, docId) {
+      return data.keys().hasAll(['trashId', 'itemType', 'sourceCollection', 'sourceDocId', 'titleAr', 'snapshotJson', 'deletedByUid', 'deletedByEmail', 'status', 'createdByUid', 'allowedUids', 'createdAt'])
+        && data.keys().hasOnly([
+          'trashId', 'itemType', 'sourceCollection', 'sourceDocId', 'titleAr', 'summary',
+          'snapshotJson', 'deletedByUid', 'deletedByEmail', 'restoredAt', 'restoredByEmail',
+          'status', 'createdByUid', 'allowedUids', 'createdAt'
+        ])
+        && data.trashId == docId && isValidId(data.trashId)
+        && data.itemType in ['dynamic_field', 'dynamic_form', 'system_section', 'system_page', 'custom_record', 'rider', 'vehicle']
+        && data.sourceCollection is string && data.sourceCollection.size() >= 1 && data.sourceCollection.size() <= 80
+        && data.sourceDocId is string && data.sourceDocId.size() >= 1 && data.sourceDocId.size() <= 128
+        && data.titleAr is string && data.titleAr.size() >= 1 && data.titleAr.size() <= 200
+        && isOptionalString(data, 'summary', 500)
+        && data.snapshotJson is string && data.snapshotJson.size() >= 2 && data.snapshotJson.size() <= 120000
+        && isValidId(data.deletedByUid)
+        && data.deletedByEmail is string && data.deletedByEmail.size() <= 200
+        && isOptionalString(data, 'restoredAt', 40)
+        && isOptionalString(data, 'restoredByEmail', 200)
+        && data.status in ['deleted', 'restored', 'purged']
+        && isValidId(data.createdByUid)
+        && isValidAllowedUids(data.allowedUids)
+        && data.createdAt is timestamp;
+    }
+
+    function isValidConfigSnapshot(data, docId) {
+      return data.keys().hasAll(['snapshotId', 'nameAr', 'payloadJson', 'createdByUid', 'createdByEmail', 'allowedUids', 'createdAt'])
+        && data.keys().hasOnly(['snapshotId', 'nameAr', 'description', 'payloadJson', 'createdByUid', 'createdByEmail', 'allowedUids', 'createdAt'])
+        && data.snapshotId == docId && isValidId(data.snapshotId)
+        && data.nameAr is string && data.nameAr.size() >= 1 && data.nameAr.size() <= 140
+        && isOptionalString(data, 'description', 400)
+        && data.payloadJson is string && data.payloadJson.size() >= 2 && data.payloadJson.size() <= 400000
+        && isValidId(data.createdByUid)
+        && data.createdByEmail is string && data.createdByEmail.size() <= 200
+        && isValidAllowedUids(data.allowedUids)
+        && data.createdAt is timestamp;
+    }
+
+    function isValidCustomReportTemplate(data, docId) {
+      return data.keys().hasAll(['templateId', 'nameAr', 'dataSource', 'columns', 'headerTitle', 'includeCompanyLogo', 'includeCompanyDetails', 'orientation', 'createdByUid', 'createdByEmail', 'allowedUids', 'createdAt', 'updatedAt'])
+        && data.keys().hasOnly([
+          'templateId', 'nameAr', 'dataSource', 'customPageId', 'columns', 'headerTitle',
+          'headerSubtitle', 'footerNote', 'preparerName', 'includeCompanyLogo',
+          'includeCompanyDetails', 'orientation', 'createdByUid', 'createdByEmail',
+          'allowedUids', 'createdAt', 'updatedAt'
+        ])
+        && data.templateId == docId && isValidId(data.templateId)
+        && data.nameAr is string && data.nameAr.size() >= 1 && data.nameAr.size() <= 140
+        && data.dataSource in ['riders', 'vehicles', 'operations_daily', 'expiries', 'maintenance', 'custom_page']
+        && isOptionalString(data, 'customPageId', 128)
+        && data.columns is list && data.columns.size() >= 1 && data.columns.size() <= 60
+        && data.headerTitle is string && data.headerTitle.size() >= 1 && data.headerTitle.size() <= 180
+        && isOptionalString(data, 'headerSubtitle', 250)
+        && isOptionalString(data, 'footerNote', 300)
+        && isOptionalString(data, 'preparerName', 120)
+        && data.includeCompanyLogo is bool
+        && data.includeCompanyDetails is bool
+        && data.orientation in ['landscape', 'portrait']
+        && isValidId(data.createdByUid)
+        && data.createdByEmail is string && data.createdByEmail.size() <= 200
+        && isValidAllowedUids(data.allowedUids)
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
     // 1. users (Strict PII isolation)
     match /users/{userId} {
-      allow get: if isValidId(userId) && (isOwner(userId) || isAdmin());
+      allow get: if isValidId(userId) && (isOwner(userId) || isAdmin() || hasModulePerm('users', 'view'));
       allow list: if isVerified() && (
         isBootstrappedOwner()
         || existing().uid == request.auth.uid
@@ -576,6 +1253,7 @@ service cloud.firestore {
           (isBootstrappedOwner() && userId == request.auth.uid && incoming().role == 'owner' && incoming().active == true)
           || (userId == request.auth.uid && incoming().role == 'viewer' && incoming().active == false)
           || isAdmin()
+          || hasModulePerm('users', 'add')
         );
       allow update: if isVerified() && isValidId(userId) && isValidUserProfile(incoming(), userId)
         && incoming().uid == existing().uid
@@ -583,43 +1261,50 @@ service cloud.firestore {
         && incoming().updatedAt == request.time
         && (
           isAdmin()
+          || hasModulePerm('users', 'edit')
           || (isOwner(userId)
               && incoming().role == existing().role
               && incoming().active == existing().active
               && incoming().diff(existing()).affectedKeys().hasOnly(['displayName', 'updatedAt']))
         );
-      allow delete: if isValidId(userId) && isBootstrappedOwner() && userId != request.auth.uid;
+      allow delete: if isValidId(userId) && (isBootstrappedOwner() || hasModulePerm('users', 'delete')) && userId != request.auth.uid;
     }
 
     // 2. riderMaster
     match /riderMaster/{riderMasterId} {
-      allow get: if isValidId(riderMasterId) && isActiveMember();
+      allow get: if isValidId(riderMasterId) && (isActiveMember() || hasModulePerm('hr', 'view'));
       allow list: if canListResource();
-      allow create: if isValidId(riderMasterId) && isSupervisorOrAbove()
+      allow create: if isValidId(riderMasterId) && (isSupervisorOrAbove() || isHrStaff() || hasModulePerm('hr', 'add'))
         && isValidRiderMaster(incoming(), riderMasterId)
         && incoming().createdByUid == request.auth.uid
         && incoming().createdAt == request.time
         && incoming().updatedAt == request.time;
-      allow update: if isValidId(riderMasterId) && isSupervisorOrAbove()
+      allow update: if isValidId(riderMasterId) && (isSupervisorOrAbove() || isHrStaff() || hasModulePerm('hr', 'edit'))
         && isValidRiderMaster(incoming(), riderMasterId)
         && incoming().createdByUid == existing().createdByUid
         && incoming().createdAt == existing().createdAt
         && incoming().updatedAt == request.time
-        && (isAdmin() || incoming().diff(existing()).affectedKeys().hasOnly(['fullName', 'city', 'branch', 'supervisor', 'contractName', 'vehicleType', 'status', 'allowedUids', 'updatedAt']));
-      allow delete: if isValidId(riderMasterId) && isAdmin();
+        && (isAdmin() || hasModulePerm('hr', 'edit') || incoming().diff(existing()).affectedKeys().hasOnly([
+          'fullName', 'iqamaNumber', 'iqamaIssueDate', 'iqamaExpiryDate', 'iqamaRenewalNotes',
+          'phone', 'birthDate', 'nationality', 'joinDate', 'exitDate',
+          'driverLicenseNumber', 'driverLicenseType', 'driverLicenseIssueDate', 'driverLicenseExpiryDate',
+          'adminNotes', 'city', 'branch', 'supervisor', 'contractName', 'vehicleType',
+          'status', 'statusHistory', 'customFields', 'allowedUids', 'updatedAt'
+        ]));
+      allow delete: if isValidId(riderMasterId) && (isAdmin() || hasModulePerm('hr', 'delete'));
     }
 
     // 3. riderIdentityMapping
     match /riderIdentityMapping/{mappingId} {
-      allow get: if isValidId(mappingId) && isActiveMember();
+      allow get: if isValidId(mappingId) && isActiveMember() && hasPlatformAccess(existing().platform);
       allow list: if canListResource();
-      allow create: if isValidId(mappingId) && isSupervisorOrAbove()
+      allow create: if isValidId(mappingId) && isSupervisorOrAbove() && hasPlatformAccess(incoming().platform)
         && isValidRiderIdentityMapping(incoming(), mappingId)
         && incoming().createdByUid == request.auth.uid
         && incoming().createdAt == request.time
         && incoming().updatedAt == request.time
         && exists(/databases/$(database)/documents/riderMaster/$(incoming().internalRiderId));
-      allow update: if isValidId(mappingId) && isSupervisorOrAbove()
+      allow update: if isValidId(mappingId) && isSupervisorOrAbove() && hasPlatformAccess(incoming().platform)
         && isValidRiderIdentityMapping(incoming(), mappingId)
         && incoming().createdByUid == existing().createdByUid
         && incoming().createdAt == existing().createdAt
@@ -630,14 +1315,16 @@ service cloud.firestore {
 
     // 4. importBatches
     match /importBatches/{batchId} {
-      allow get: if isValidId(batchId) && isActiveMember();
+      allow get: if isValidId(batchId) && isActiveMember() && hasPlatformAccess(existing().platform);
       allow list: if canListResource();
       allow create: if isValidId(batchId) && isOpsManagerOrAbove()
         && isValidImportBatch(incoming(), batchId)
+        && hasPlatformAccess(incoming().platform)
         && incoming().createdByUid == request.auth.uid
         && incoming().createdAt == request.time;
       allow update: if isValidId(batchId) && isOpsManagerOrAbove()
         && isValidImportBatch(incoming(), batchId)
+        && hasPlatformAccess(incoming().platform)
         && incoming().createdByUid == existing().createdByUid
         && incoming().createdAt == existing().createdAt
         && (isAdmin() || (existing().status != 'committed' && incoming().diff(existing()).affectedKeys().hasOnly(['status', 'validCount', 'duplicateCount', 'rejectedCount', 'updatedCount', 'allowedUids'])));
@@ -646,14 +1333,14 @@ service cloud.firestore {
 
     // 5. hungerDaily
     match /hungerDaily/{recordKey} {
-      allow get: if isValidId(recordKey) && isActiveMember();
+      allow get: if isValidId(recordKey) && hasPlatformAccess('hungerstation');
       allow list: if canListResource();
-      allow create: if isValidId(recordKey) && isOpsManagerOrAbove()
+      allow create: if isValidId(recordKey) && isOpsManagerOrAbove() && hasPlatformAccess('hungerstation')
         && isValidHungerDaily(incoming(), recordKey)
         && incoming().createdByUid == request.auth.uid
         && incoming().importedAt == request.time
         && incoming().updatedAt == request.time;
-      allow update: if isValidId(recordKey) && isOpsManagerOrAbove()
+      allow update: if isValidId(recordKey) && isOpsManagerOrAbove() && hasPlatformAccess('hungerstation')
         && isValidHungerDaily(incoming(), recordKey)
         && incoming().createdByUid == existing().createdByUid
         && incoming().importedAt == existing().importedAt
@@ -673,14 +1360,14 @@ service cloud.firestore {
 
     // 6. hungerDistanceDaily
     match /hungerDistanceDaily/{recordKey} {
-      allow get: if isValidId(recordKey) && isActiveMember();
+      allow get: if isValidId(recordKey) && hasPlatformAccess('hungerstation');
       allow list: if canListResource();
-      allow create: if isValidId(recordKey) && isOpsManagerOrAbove()
+      allow create: if isValidId(recordKey) && isOpsManagerOrAbove() && hasPlatformAccess('hungerstation')
         && isValidHungerDistanceDaily(incoming(), recordKey)
         && incoming().createdByUid == request.auth.uid
         && incoming().importedAt == request.time
         && incoming().updatedAt == request.time;
-      allow update: if isValidId(recordKey) && isOpsManagerOrAbove()
+      allow update: if isValidId(recordKey) && isOpsManagerOrAbove() && hasPlatformAccess('hungerstation')
         && isValidHungerDistanceDaily(incoming(), recordKey)
         && incoming().createdByUid == existing().createdByUid
         && incoming().importedAt == existing().importedAt
@@ -695,14 +1382,14 @@ service cloud.firestore {
 
     // 7. hungerWalletSnapshots
     match /hungerWalletSnapshots/{recordKey} {
-      allow get: if isValidId(recordKey) && isActiveMember();
+      allow get: if isValidId(recordKey) && hasPlatformAccess('hungerstation');
       allow list: if canListResource();
-      allow create: if isValidId(recordKey) && isOpsManagerOrAbove()
+      allow create: if isValidId(recordKey) && isOpsManagerOrAbove() && hasPlatformAccess('hungerstation')
         && isValidHungerWalletSnapshot(incoming(), recordKey)
         && incoming().createdByUid == request.auth.uid
         && incoming().importedAt == request.time
         && incoming().updatedAt == request.time;
-      allow update: if isValidId(recordKey) && isOpsManagerOrAbove()
+      allow update: if isValidId(recordKey) && isOpsManagerOrAbove() && hasPlatformAccess('hungerstation')
         && isValidHungerWalletSnapshot(incoming(), recordKey)
         && incoming().createdByUid == existing().createdByUid
         && incoming().importedAt == existing().importedAt
@@ -716,14 +1403,14 @@ service cloud.firestore {
 
     // 8. hungerQualityMonthly
     match /hungerQualityMonthly/{recordKey} {
-      allow get: if isValidId(recordKey) && isActiveMember();
+      allow get: if isValidId(recordKey) && hasPlatformAccess('hungerstation');
       allow list: if canListResource();
-      allow create: if isValidId(recordKey) && isOpsManagerOrAbove()
+      allow create: if isValidId(recordKey) && isOpsManagerOrAbove() && hasPlatformAccess('hungerstation')
         && isValidHungerQualityMonthly(incoming(), recordKey)
         && incoming().createdByUid == request.auth.uid
         && incoming().importedAt == request.time
         && incoming().updatedAt == request.time;
-      allow update: if isValidId(recordKey) && isOpsManagerOrAbove()
+      allow update: if isValidId(recordKey) && isOpsManagerOrAbove() && hasPlatformAccess('hungerstation')
         && isValidHungerQualityMonthly(incoming(), recordKey)
         && incoming().createdByUid == existing().createdByUid
         && incoming().importedAt == existing().importedAt
@@ -741,26 +1428,28 @@ service cloud.firestore {
 
     // 9. keetaDashboardDaily
     match /keetaDashboardDaily/{recordKey} {
-      allow get: if isValidId(recordKey) && isActiveMember();
+      allow get: if isValidId(recordKey) && hasPlatformAccess('keeta');
       allow list: if canListResource();
-      allow create: if isValidId(recordKey) && isOpsManagerOrAbove()
+      allow create: if isValidId(recordKey) && isOpsManagerOrAbove() && hasPlatformAccess('keeta')
         && isValidKeetaDashboardDaily(incoming(), recordKey)
         && incoming().createdByUid == request.auth.uid
         && incoming().importedAt == request.time
         && incoming().updatedAt == request.time;
-      allow update: if isValidId(recordKey) && isOpsManagerOrAbove()
+      allow update: if isValidId(recordKey) && isOpsManagerOrAbove() && hasPlatformAccess('keeta')
         && isValidKeetaDashboardDaily(incoming(), recordKey)
         && incoming().createdByUid == existing().createdByUid
         && incoming().importedAt == existing().importedAt
         && incoming().updatedAt == request.time
         && (isAdmin() || incoming().diff(existing()).affectedKeys().hasOnly([
           'firstName', 'lastName', 'fullName', 'vehicleType', 'headquarters', 'branch',
-          'supervisor', 'courierType', 'shiftAttendanceSummary', 'onShift', 'validDay',
-          'appOnlineTime', 'shiftValidOnlineTime', 'shiftOnlineHours', 'acceptedTasks',
-          'restaurantArrivals', 'deliveredTasks', 'largeOrderTasksCompleted', 'rejectedTasks',
+          'supervisor', 'courierType', 'shiftAttendanceSummary', 'parsedShiftSlots', 'onShift', 'validDay',
+          'appOnlineTime', 'appOnlineTimeRaw', 'shiftValidOnlineTime', 'shiftValidOnlineTimeRaw',
+          'shiftOnlineHours', 'shiftPeAbdoOnlineHours', 'shiftPeAbdoOnlineHoursRaw',
+          'acceptedTasks', 'restaurantArrivals', 'deliveredTasks', 'largeOrderTasksCompleted', 'rejectedTasks',
           'rejectedTasksCourier', 'rejectedTasksAuto', 'cancellationRate', 'completionRate',
           'onTimeRate', 'largeOrderOnTimeRate', 'avgDeliveryTimeMinutes', 'deliveredOver55Min',
-          'overdueOrderTasks', 'severelyOverdueOrderTasks', 'rawExtraColumns',
+          'deliveredOver55MinProp', 'overdueOrderTasks', 'severelyOverdueOrderTasks',
+          'originalHeaders', 'rawExtraColumns',
           'sourceFile', 'sourceSheet', 'sourceRowNumber', 'importBatchId', 'rowChecksum',
           'allowedUids', 'updatedAt'
         ]));
@@ -769,22 +1458,24 @@ service cloud.firestore {
 
     // 10. keetaVdaDaily
     match /keetaVdaDaily/{recordKey} {
-      allow get: if isValidId(recordKey) && isActiveMember();
+      allow get: if isValidId(recordKey) && hasPlatformAccess('keeta');
       allow list: if canListResource();
-      allow create: if isValidId(recordKey) && isOpsManagerOrAbove()
+      allow create: if isValidId(recordKey) && isOpsManagerOrAbove() && hasPlatformAccess('keeta')
         && isValidKeetaVdaDaily(incoming(), recordKey)
         && incoming().createdByUid == request.auth.uid
         && incoming().importedAt == request.time
         && incoming().updatedAt == request.time;
-      allow update: if isValidId(recordKey) && isOpsManagerOrAbove()
+      allow update: if isValidId(recordKey) && isOpsManagerOrAbove() && hasPlatformAccess('keeta')
         && isValidKeetaVdaDaily(incoming(), recordKey)
         && incoming().createdByUid == existing().createdByUid
         && incoming().importedAt == existing().importedAt
         && incoming().updatedAt == request.time
         && (isAdmin() || incoming().diff(existing()).affectedKeys().hasOnly([
-          'vehicleType', 'shiftOnlineHours', 'sumValidShifts', 'shouldOnlineDays',
-          'totalDeliveredTasks', 'onTimeDTasks', 'cancellationD', 'deliveredOver55Min',
-          'acceptedOrders', 'totalDeliveryDistance', 'payableDistance', 'shiftWindows',
+          'firstOnlineDate', 'vehicleType', 'threePlId', 'threePlName', 'pmm', 'ifNewRider',
+          'shiftOnlineHours', 'sumValidShifts', 'shouldOnlineDays', 'totalDeliveredTasks',
+          'sumDeliveredAdvanceTasks', 'onTimeDTasks', 'cancellationD', 'deliveredOver55Min',
+          'acceptedOrders', 'vdaScore', 'totalDeliveryDistance', 'payableDistance',
+          'shiftWindows', 'shiftsS1ToS6', 'originalHeaders', 'rawExtraColumns',
           'sourceFile', 'sourceSheet', 'sourceRowNumber', 'importBatchId', 'rowChecksum',
           'allowedUids', 'updatedAt'
         ]));
@@ -793,22 +1484,22 @@ service cloud.firestore {
 
     // 11. keetaRankSnapshots
     match /keetaRankSnapshots/{recordKey} {
-      allow get: if isValidId(recordKey) && isActiveMember();
+      allow get: if isValidId(recordKey) && hasPlatformAccess('keeta');
       allow list: if canListResource();
-      allow create: if isValidId(recordKey) && isOpsManagerOrAbove()
+      allow create: if isValidId(recordKey) && isOpsManagerOrAbove() && hasPlatformAccess('keeta')
         && isValidKeetaRankSnapshot(incoming(), recordKey)
         && incoming().createdByUid == request.auth.uid
         && incoming().importedAt == request.time
         && incoming().updatedAt == request.time;
-      allow update: if isValidId(recordKey) && isOpsManagerOrAbove()
+      allow update: if isValidId(recordKey) && isOpsManagerOrAbove() && hasPlatformAccess('keeta')
         && isValidKeetaRankSnapshot(incoming(), recordKey)
         && incoming().createdByUid == existing().createdByUid
         && incoming().importedAt == existing().importedAt
         && incoming().updatedAt == request.time
         && (isAdmin() || incoming().diff(existing()).affectedKeys().hasOnly([
-          'name', 'currentEstimatedLevel', 'rankingPercentile', 'forcedAssignmentScore',
+          'snapshotMonth', 'name', 'currentEstimatedLevel', 'rankingPercentile', 'forcedAssignmentScore',
           'estimatedRewardAmount', 'onTimeRate', 'orderCompletionRate',
-          'didntTapDropOffTooEarly', 'orderVolume',
+          'didntTapDropOffTooEarly', 'orderVolume', 'originalHeaders', 'rawExtraColumns',
           'sourceFile', 'sourceSheet', 'sourceRowNumber', 'importBatchId', 'rowChecksum',
           'allowedUids', 'updatedAt'
         ]));
@@ -817,21 +1508,22 @@ service cloud.firestore {
 
     // 12. keetaFacialRecognitionDaily
     match /keetaFacialRecognitionDaily/{recordKey} {
-      allow get: if isValidId(recordKey) && isActiveMember();
+      allow get: if isValidId(recordKey) && hasPlatformAccess('keeta');
       allow list: if canListResource();
-      allow create: if isValidId(recordKey) && isOpsManagerOrAbove()
+      allow create: if isValidId(recordKey) && isOpsManagerOrAbove() && hasPlatformAccess('keeta')
         && isValidKeetaFacialDaily(incoming(), recordKey)
         && incoming().createdByUid == request.auth.uid
         && incoming().importedAt == request.time
         && incoming().updatedAt == request.time;
-      allow update: if isValidId(recordKey) && isOpsManagerOrAbove()
+      allow update: if isValidId(recordKey) && isOpsManagerOrAbove() && hasPlatformAccess('keeta')
         && isValidKeetaFacialDaily(incoming(), recordKey)
         && incoming().createdByUid == existing().createdByUid
         && incoming().importedAt == existing().importedAt
         && incoming().updatedAt == request.time
         && (isAdmin() || incoming().diff(existing()).affectedKeys().hasOnly([
-          'city', 'partnerId', 'partnerName', 'pmm', 'finalInspectionResult',
-          'totalDaysTriggeredMtd', 'totalDaysPassedMtd', 'passRateMtd', 'over90PassRate',
+          'city', 'partnerId', 'partnerName', 'pmm', 'ifTriggeredToday', 'ifTriggeredTodayRaw',
+          'finalInspectionResult', 'totalDaysTriggeredMtd', 'totalDaysPassedMtd', 'passRateMtd',
+          'over90PassRate', 'originalHeaders', 'rawExtraColumns',
           'sourceFile', 'sourceSheet', 'sourceRowNumber', 'importBatchId', 'rowChecksum',
           'allowedUids', 'updatedAt'
         ]));
@@ -883,15 +1575,15 @@ service cloud.firestore {
     match /operationalSettings/{settingsId} {
       allow get: if isValidId(settingsId) && isActiveMember();
       allow list: if canListResource();
-      allow create: if isValidId(settingsId) && isOpsManagerOrAbove()
+      allow create: if isValidId(settingsId) && (isOpsManagerOrAbove() || hasModulePerm('settings', 'add'))
         && isValidOperationalSettings(incoming(), settingsId)
         && incoming().createdByUid == request.auth.uid
         && incoming().updatedAt == request.time;
-      allow update: if isValidId(settingsId) && isOpsManagerOrAbove()
+      allow update: if isValidId(settingsId) && (isOpsManagerOrAbove() || hasModulePerm('settings', 'edit') || hasModulePerm('platforms', 'edit'))
         && isValidOperationalSettings(incoming(), settingsId)
         && incoming().createdByUid == existing().createdByUid
         && incoming().updatedAt == request.time
-        && (isAdmin() || incoming().diff(existing()).affectedKeys().hasOnly([
+        && (isAdmin() || hasModulePerm('settings', 'edit') || incoming().diff(existing()).affectedKeys().hasOnly([
           'minDailyWorkingHours', 'minDailyOrders', 'maxOverdueRatePct',
           'maxCancellationRatePct', 'minAcceptanceRatePct', 'minCompletionRatePct',
           'minOnTimeRatePct', 'minAttendanceRatePct', 'minFacialPassRatePct',
@@ -902,6 +1594,7 @@ service cloud.firestore {
           'scoreWeightQuality', 'scoreWeightAcceptance', 'scoreWeightCancellation',
           'minActiveOrdersPerDay', 'minActiveHoursPerDay', 'caseOverdueDays',
           'configuredBranches', 'importMaxFiles', 'importAllowUpdates', 'importStrictDates',
+          'expiryAlertDays', 'customVehicleTypes',
           'allowedUids', 'updatedByEmail', 'updatedAt'
         ]));
       allow delete: if isValidId(settingsId) && isAdmin();
@@ -909,14 +1602,14 @@ service cloud.firestore {
 
     // 16. hungerErrorDictionary
     match /hungerErrorDictionary/{codeKey} {
-      allow get: if isValidId(codeKey) && isActiveMember();
+      allow get: if isValidId(codeKey) && isActiveMember() && hasPlatformAccess('hungerstation');
       allow list: if canListResource();
-      allow create: if isValidId(codeKey) && isSupervisorOrAbove()
+      allow create: if isValidId(codeKey) && isSupervisorOrAbove() && hasPlatformAccess('hungerstation')
         && isValidErrorCodeDictionary(incoming(), codeKey)
         && incoming().createdByUid == request.auth.uid
         && incoming().createdAt == request.time
         && incoming().updatedAt == request.time;
-      allow update: if isValidId(codeKey) && isSupervisorOrAbove()
+      allow update: if isValidId(codeKey) && isSupervisorOrAbove() && hasPlatformAccess('hungerstation')
         && isValidErrorCodeDictionary(incoming(), codeKey)
         && incoming().createdByUid == existing().createdByUid
         && incoming().createdAt == existing().createdAt
@@ -931,14 +1624,14 @@ service cloud.firestore {
 
     // 17. hungerRiderErrorCases
     match /hungerRiderErrorCases/{caseId} {
-      allow get: if isValidId(caseId) && isActiveMember();
+      allow get: if isValidId(caseId) && isActiveMember() && hasPlatformAccess('hungerstation');
       allow list: if canListResource();
-      allow create: if isValidId(caseId) && isSupervisorOrAbove()
+      allow create: if isValidId(caseId) && isSupervisorOrAbove() && hasPlatformAccess('hungerstation')
         && isValidRiderErrorCase(incoming(), caseId)
         && incoming().createdByUid == request.auth.uid
         && incoming().createdAt == request.time
         && incoming().updatedAt == request.time;
-      allow update: if isValidId(caseId) && isSupervisorOrAbove()
+      allow update: if isValidId(caseId) && isSupervisorOrAbove() && hasPlatformAccess('hungerstation')
         && isValidRiderErrorCase(incoming(), caseId)
         && incoming().createdByUid == existing().createdByUid
         && incoming().createdAt == existing().createdAt
@@ -960,14 +1653,14 @@ service cloud.firestore {
 
     // 19. operationalCases
     match /operationalCases/{caseId} {
-      allow get: if isValidId(caseId) && isActiveMember();
+      allow get: if isValidId(caseId) && isActiveMember() && hasPlatformAccess(existing().platform);
       allow list: if canListResource();
-      allow create: if isValidId(caseId) && isSupervisorOrAbove()
+      allow create: if isValidId(caseId) && isSupervisorOrAbove() && hasPlatformAccess(incoming().platform)
         && isValidOperationalCase(incoming(), caseId)
         && incoming().createdByUid == request.auth.uid
         && incoming().createdAt == request.time
         && incoming().updatedAt == request.time;
-      allow update: if isValidId(caseId) && isSupervisorOrAbove()
+      allow update: if isValidId(caseId) && isSupervisorOrAbove() && hasPlatformAccess(incoming().platform)
         && isValidOperationalCase(incoming(), caseId)
         && incoming().createdByUid == existing().createdByUid
         && incoming().createdAt == existing().createdAt
@@ -976,21 +1669,21 @@ service cloud.firestore {
         && (isAdmin() || incoming().diff(existing()).affectedKeys().hasOnly([
           'riderName', 'branch', 'issueType', 'title', 'description', 'priority',
           'status', 'assigneeEmail', 'actionTaken', 'notes', 'dueDate', 'closedDate',
-          'updatedByEmail', 'allowedUids', 'updatedAt'
+          'customFields', 'updatedByEmail', 'allowedUids', 'updatedAt'
         ]));
       allow delete: if isValidId(caseId) && isAdmin();
     }
 
     // 20. riderNotes
     match /riderNotes/{noteId} {
-      allow get: if isValidId(noteId) && isActiveMember();
+      allow get: if isValidId(noteId) && isActiveMember() && hasPlatformAccess(existing().platform);
       allow list: if canListResource();
-      allow create: if isValidId(noteId) && isSupervisorOrAbove()
+      allow create: if isValidId(noteId) && isSupervisorOrAbove() && hasPlatformAccess(incoming().platform)
         && isValidRiderNote(incoming(), noteId)
         && incoming().createdByUid == request.auth.uid
         && incoming().createdAt == request.time
         && incoming().updatedAt == request.time;
-      allow update: if isValidId(noteId) && isSupervisorOrAbove()
+      allow update: if isValidId(noteId) && isSupervisorOrAbove() && hasPlatformAccess(incoming().platform)
         && (isAdmin() || existing().createdByUid == request.auth.uid)
         && isValidRiderNote(incoming(), noteId)
         && incoming().createdByUid == existing().createdByUid
@@ -1001,6 +1694,377 @@ service cloud.firestore {
         && incoming().updatedAt == request.time
         && incoming().diff(existing()).affectedKeys().hasOnly(['category', 'content', 'allowedUids', 'updatedAt']);
       allow delete: if isValidId(noteId) && (isAdmin() || existing().createdByUid == request.auth.uid);
+    }
+
+    // 21. roleTemplates (Customizable RBAC Matrices)
+    match /roleTemplates/{roleId} {
+      allow get: if isValidId(roleId) && isActiveMember();
+      allow list: if canListResource();
+      allow create: if isValidId(roleId) && (isAdmin() || hasModulePerm('roles', 'add'))
+        && isValidRoleTemplate(incoming(), roleId)
+        && incoming().createdByUid == request.auth.uid
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time;
+      allow update: if isValidId(roleId) && (isAdmin() || hasModulePerm('roles', 'edit'))
+        && isValidRoleTemplate(incoming(), roleId)
+        && incoming().createdByUid == existing().createdByUid
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time;
+      allow delete: if isValidId(roleId) && (isAdmin() || hasModulePerm('roles', 'delete')) && existing().isSystemPreset != true;
+    }
+
+    // 22. documentTypes
+    match /documentTypes/{typeId} {
+      allow get: if isValidId(typeId) && isActiveMember();
+      allow list: if canListResource();
+      allow create: if isValidId(typeId) && (isAdmin() || hasModulePerm('settings', 'add') || hasModulePerm('documents', 'add'))
+        && isValidDocumentTypeConfig(incoming(), typeId)
+        && incoming().createdByUid == request.auth.uid
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time;
+      allow update: if isValidId(typeId) && (isAdmin() || hasModulePerm('settings', 'edit') || hasModulePerm('documents', 'edit'))
+        && isValidDocumentTypeConfig(incoming(), typeId)
+        && incoming().createdByUid == existing().createdByUid
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time;
+      allow delete: if isValidId(typeId) && (isAdmin() || hasModulePerm('settings', 'delete')) && existing().isDefault != true;
+    }
+
+    // 23. privateDocuments (Metadata + Version History; Files stored server-side in Private Vault)
+    match /privateDocuments/{docId} {
+      allow get: if isValidId(docId) && hasModulePerm('documents', 'view');
+      allow list: if canListResource();
+      allow create: if isValidId(docId) && hasModulePerm('documents', 'add')
+        && isValidPrivateDocument(incoming(), docId)
+        && incoming().createdByUid == request.auth.uid
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time;
+      allow update: if isValidId(docId) && hasModulePerm('documents', 'edit')
+        && isValidPrivateDocument(incoming(), docId)
+        && incoming().createdByUid == existing().createdByUid
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time;
+      allow delete: if isValidId(docId) && hasModulePerm('documents', 'delete');
+    }
+
+    // 24. platformCatalog (Platform Registry + Feature Flags)
+    match /platformCatalog/{platformId} {
+      allow get: if isValidId(platformId) && isActiveMember();
+      allow list: if canListResource();
+      allow create: if isValidId(platformId) && (isAdmin() || hasModulePerm('platforms', 'add'))
+        && isValidPlatformCatalogEntry(incoming(), platformId)
+        && incoming().createdByUid == request.auth.uid
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time;
+      allow update: if isValidId(platformId) && (isAdmin() || hasModulePerm('platforms', 'edit'))
+        && isValidPlatformCatalogEntry(incoming(), platformId)
+        && incoming().createdByUid == existing().createdByUid
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time;
+      allow delete: if isValidId(platformId) && (isAdmin() || hasModulePerm('platforms', 'delete')) && existing().isBuiltIn != true;
+    }
+
+    // 25. platformAccounts
+    match /platformAccounts/{accountId} {
+      allow get: if isValidId(accountId) && hasModulePerm('applications', 'view');
+      allow list: if canListResource();
+      allow create: if isValidId(accountId) && hasModulePerm('applications', 'add')
+        && isValidPlatformAccount(incoming(), accountId)
+        && incoming().createdByUid == request.auth.uid
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time;
+      allow update: if isValidId(accountId) && (hasModulePerm('applications', 'edit') || hasModulePerm('applications', 'approve'))
+        && isValidPlatformAccount(incoming(), accountId)
+        && incoming().createdByUid == existing().createdByUid
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time;
+      allow delete: if isValidId(accountId) && hasModulePerm('applications', 'delete');
+    }
+
+    // 26. vehicles
+    match /vehicles/{vehicleInternalId} {
+      allow get: if isValidId(vehicleInternalId) && hasModulePerm('fleet', 'view');
+      allow list: if canListResource();
+      allow create: if isValidId(vehicleInternalId) && hasModulePerm('fleet', 'add')
+        && isValidVehicleMaster(incoming(), vehicleInternalId)
+        && incoming().createdByUid == request.auth.uid
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time;
+      allow update: if isValidId(vehicleInternalId) && hasModulePerm('fleet', 'edit')
+        && isValidVehicleMaster(incoming(), vehicleInternalId)
+        && incoming().createdByUid == existing().createdByUid
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time;
+      allow delete: if isValidId(vehicleInternalId) && hasModulePerm('fleet', 'delete');
+    }
+
+    // 27. vehicleAssignments
+    match /vehicleAssignments/{assignmentId} {
+      allow get: if isValidId(assignmentId) && hasModulePerm('fleet', 'view');
+      allow list: if canListResource();
+      allow create: if isValidId(assignmentId) && hasModulePerm('fleet', 'add')
+        && isValidVehicleAssignment(incoming(), assignmentId)
+        && incoming().createdByUid == request.auth.uid
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time
+        && exists(/databases/$(database)/documents/vehicles/$(incoming().vehicleInternalId))
+        && exists(/databases/$(database)/documents/riderMaster/$(incoming().companyRiderId));
+      allow update: if isValidId(assignmentId) && (hasModulePerm('fleet', 'edit') || hasModulePerm('fleet', 'approve'))
+        && isValidVehicleAssignment(incoming(), assignmentId)
+        && incoming().createdByUid == existing().createdByUid
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time;
+      allow delete: if isValidId(assignmentId) && hasModulePerm('fleet', 'delete');
+    }
+
+    // 28. vehicleMaintenance
+    match /vehicleMaintenance/{maintenanceId} {
+      allow get: if isValidId(maintenanceId) && hasModulePerm('fleet', 'view');
+      allow list: if canListResource();
+      allow create: if isValidId(maintenanceId) && hasModulePerm('fleet', 'add')
+        && isValidVehicleMaintenance(incoming(), maintenanceId)
+        && incoming().createdByUid == request.auth.uid
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time
+        && exists(/databases/$(database)/documents/vehicles/$(incoming().vehicleInternalId));
+      allow update: if isValidId(maintenanceId) && hasModulePerm('fleet', 'edit')
+        && isValidVehicleMaintenance(incoming(), maintenanceId)
+        && incoming().createdByUid == existing().createdByUid
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time;
+      allow delete: if isValidId(maintenanceId) && hasModulePerm('fleet', 'delete');
+    }
+
+    // 29. entityNotesTasks
+    match /entityNotesTasks/{noteTaskId} {
+      allow get: if isValidId(noteTaskId) && isActiveMember();
+      allow list: if canListResource();
+      allow create: if isValidId(noteTaskId) && isActiveMember()
+        && isValidEntityNoteTask(incoming(), noteTaskId)
+        && incoming().createdByUid == request.auth.uid
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time;
+      allow update: if isValidId(noteTaskId) && isActiveMember()
+        && isValidEntityNoteTask(incoming(), noteTaskId)
+        && incoming().createdByUid == existing().createdByUid
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        && (existing().status != 'closed' || isOpsManagerOrAbove() || hasModulePerm('executive', 'approve'))
+        && (isAdmin() || hasModulePerm('executive', 'edit') || existing().createdByUid == request.auth.uid || existing().assigneeUid == request.auth.uid);
+      allow delete: if isValidId(noteTaskId) && (isAdmin() || hasModulePerm('executive', 'delete') || existing().createdByUid == request.auth.uid);
+    }
+
+    // ==========================================
+    // SYSTEM BUILDER & ENTERPRISE CUSTOMIZATION COLLECTIONS
+    // ==========================================
+
+    // 30. companyBranding
+    match /companyBranding/{brandingId} {
+      allow get: if isValidId(brandingId) && isActiveMember();
+      allow list: if canListResource();
+      allow create: if isValidId(brandingId) && (isAdmin() || hasModulePerm('branding', 'add') || hasModulePerm('company', 'add'))
+        && isValidCompanyBranding(incoming(), brandingId)
+        && incoming().createdByUid == request.auth.uid
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time;
+      allow update: if isValidId(brandingId) && (isAdmin() || hasModulePerm('branding', 'edit') || hasModulePerm('company', 'edit'))
+        && isValidCompanyBranding(incoming(), brandingId)
+        && incoming().createdByUid == existing().createdByUid
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time;
+      allow delete: if isValidId(brandingId) && isBootstrappedOwner();
+    }
+
+    // 31. systemSections
+    match /systemSections/{sectionId} {
+      allow get: if isValidId(sectionId) && isActiveMember();
+      allow list: if canListResource();
+      allow create: if isValidId(sectionId) && (isAdmin() || hasModulePerm('builder', 'add'))
+        && isValidSystemSection(incoming(), sectionId)
+        && incoming().createdByUid == request.auth.uid
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time;
+      allow update: if isValidId(sectionId) && (isAdmin() || hasModulePerm('builder', 'edit'))
+        && isValidSystemSection(incoming(), sectionId)
+        && incoming().createdByUid == existing().createdByUid
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time;
+      allow delete: if isValidId(sectionId) && (isAdmin() || hasModulePerm('builder', 'delete')) && existing().isBuiltIn != true;
+    }
+
+    // 32. systemPages
+    match /systemPages/{pageId} {
+      allow get: if isValidId(pageId) && isActiveMember();
+      allow list: if canListResource();
+      allow create: if isValidId(pageId) && (isAdmin() || hasModulePerm('builder', 'add'))
+        && isValidSystemPage(incoming(), pageId)
+        && incoming().createdByUid == request.auth.uid
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time;
+      allow update: if isValidId(pageId) && (isAdmin() || hasModulePerm('builder', 'edit'))
+        && isValidSystemPage(incoming(), pageId)
+        && incoming().createdByUid == existing().createdByUid
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time;
+      allow delete: if isValidId(pageId) && (isAdmin() || hasModulePerm('builder', 'delete')) && existing().isBuiltIn != true;
+    }
+
+    // 33. dynamicFields
+    match /dynamicFields/{fieldId} {
+      allow get: if isValidId(fieldId) && isActiveMember();
+      allow list: if canListResource();
+      allow create: if isValidId(fieldId) && (isAdmin() || hasModulePerm('builder', 'add'))
+        && isValidDynamicField(incoming(), fieldId)
+        && incoming().createdByUid == request.auth.uid
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time;
+      allow update: if isValidId(fieldId) && (isAdmin() || hasModulePerm('builder', 'edit'))
+        && isValidDynamicField(incoming(), fieldId)
+        && incoming().createdByUid == existing().createdByUid
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time;
+      allow delete: if isValidId(fieldId) && (isAdmin() || hasModulePerm('builder', 'delete')) && existing().isCore != true;
+    }
+
+    // 34. dynamicForms
+    match /dynamicForms/{formId} {
+      allow get: if isValidId(formId) && isActiveMember();
+      allow list: if canListResource();
+      allow create: if isValidId(formId) && (isAdmin() || hasModulePerm('builder', 'add'))
+        && isValidDynamicForm(incoming(), formId)
+        && incoming().createdByUid == request.auth.uid
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time;
+      allow update: if isValidId(formId) && (isAdmin() || hasModulePerm('builder', 'edit'))
+        && isValidDynamicForm(incoming(), formId)
+        && incoming().createdByUid == existing().createdByUid
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time;
+      allow delete: if isValidId(formId) && (isAdmin() || hasModulePerm('builder', 'delete'));
+    }
+
+    // 35. dynamicFormVersions
+    match /dynamicFormVersions/{versionId} {
+      allow get: if isValidId(versionId) && (isAdmin() || hasModulePerm('builder', 'view'));
+      allow list: if canListResource();
+      allow create: if isValidId(versionId) && (isAdmin() || hasModulePerm('builder', 'edit') || hasModulePerm('builder', 'add'))
+        && isValidDynamicFormVersion(incoming(), versionId)
+        && incoming().createdByUid == request.auth.uid
+        && incoming().createdAt == request.time;
+      allow update: if false;
+      allow delete: if isValidId(versionId) && isBootstrappedOwner();
+    }
+
+    // 36. customEntityRecords
+    match /customEntityRecords/{recordId} {
+      allow get: if isValidId(recordId) && isActiveMember();
+      allow list: if canListResource();
+      allow create: if isValidId(recordId) && isActiveMember()
+        && isValidCustomEntityRecord(incoming(), recordId)
+        && incoming().createdByUid == request.auth.uid
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time;
+      allow update: if isValidId(recordId) && isActiveMember()
+        && isValidCustomEntityRecord(incoming(), recordId)
+        && incoming().createdByUid == existing().createdByUid
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time;
+      allow delete: if isValidId(recordId) && (isAdmin() || existing().createdByUid == request.auth.uid);
+    }
+
+    // 37. savedViews
+    match /savedViews/{viewId} {
+      allow get: if isValidId(viewId) && isActiveMember() && (existing().isShared == true || existing().ownerUid == request.auth.uid);
+      allow list: if canListResource();
+      allow create: if isValidId(viewId) && isActiveMember()
+        && isValidSavedView(incoming(), viewId)
+        && incoming().ownerUid == request.auth.uid
+        && incoming().createdByUid == request.auth.uid
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time;
+      allow update: if isValidId(viewId) && isActiveMember()
+        && (isAdmin() || existing().ownerUid == request.auth.uid)
+        && isValidSavedView(incoming(), viewId)
+        && incoming().createdByUid == existing().createdByUid
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time;
+      allow delete: if isValidId(viewId) && (isAdmin() || existing().ownerUid == request.auth.uid);
+    }
+
+    // 38. userPreferences
+    match /userPreferences/{userId} {
+      allow get: if isValidId(userId) && isOwner(userId);
+      allow list: if isVerified() && existing().userId == request.auth.uid;
+      allow create: if isValidId(userId) && isOwner(userId)
+        && isValidUserPreference(incoming(), userId)
+        && incoming().createdByUid == request.auth.uid
+        && incoming().updatedAt == request.time;
+      allow update: if isValidId(userId) && isOwner(userId)
+        && isValidUserPreference(incoming(), userId)
+        && incoming().createdByUid == existing().createdByUid
+        && incoming().updatedAt == request.time;
+      allow delete: if isValidId(userId) && isOwner(userId);
+    }
+
+    // 39. notificationRules
+    match /notificationRules/{ruleId} {
+      allow get: if isValidId(ruleId) && isActiveMember();
+      allow list: if canListResource();
+      allow create: if isValidId(ruleId) && (isAdmin() || hasModulePerm('settings', 'add') || hasModulePerm('builder', 'add'))
+        && isValidNotificationRule(incoming(), ruleId)
+        && incoming().createdByUid == request.auth.uid
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time;
+      allow update: if isValidId(ruleId) && (isAdmin() || hasModulePerm('settings', 'edit') || hasModulePerm('builder', 'edit'))
+        && isValidNotificationRule(incoming(), ruleId)
+        && incoming().createdByUid == existing().createdByUid
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time;
+      allow delete: if isValidId(ruleId) && (isAdmin() || hasModulePerm('settings', 'delete') || hasModulePerm('builder', 'delete'));
+    }
+
+    // 40. trashItems
+    match /trashItems/{trashId} {
+      allow get: if isValidId(trashId) && (isAdmin() || hasModulePerm('trash', 'view') || hasModulePerm('builder', 'view'));
+      allow list: if canListResource();
+      allow create: if isValidId(trashId) && (isAdmin() || hasModulePerm('trash', 'add') || hasModulePerm('builder', 'delete') || hasModulePerm('hr', 'delete') || hasModulePerm('fleet', 'delete'))
+        && isValidTrashItem(incoming(), trashId)
+        && incoming().createdByUid == request.auth.uid
+        && incoming().createdAt == request.time;
+      allow update: if isValidId(trashId) && (isAdmin() || hasModulePerm('trash', 'edit') || hasModulePerm('builder', 'edit'))
+        && isValidTrashItem(incoming(), trashId)
+        && incoming().createdByUid == existing().createdByUid
+        && incoming().createdAt == existing().createdAt;
+      allow delete: if isValidId(trashId) && (isAdmin() || hasModulePerm('trash', 'delete'));
+    }
+
+    // 41. configSnapshots
+    match /configSnapshots/{snapshotId} {
+      allow get: if isValidId(snapshotId) && (isAdmin() || hasModulePerm('builder', 'view'));
+      allow list: if canListResource();
+      allow create: if isValidId(snapshotId) && (isAdmin() || hasModulePerm('builder', 'add'))
+        && isValidConfigSnapshot(incoming(), snapshotId)
+        && incoming().createdByUid == request.auth.uid
+        && incoming().createdAt == request.time;
+      allow update: if false;
+      allow delete: if isValidId(snapshotId) && (isAdmin() || hasModulePerm('builder', 'delete'));
+    }
+
+    // 42. customReportTemplates
+    match /customReportTemplates/{templateId} {
+      allow get: if isValidId(templateId) && (isActiveMember() || hasModulePerm('reports', 'view'));
+      allow list: if canListResource();
+      allow create: if isValidId(templateId) && (isAdmin() || hasModulePerm('reports', 'view') || hasModulePerm('reports', 'export'))
+        && isValidCustomReportTemplate(incoming(), templateId)
+        && incoming().createdByUid == request.auth.uid
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time;
+      allow update: if isValidId(templateId) && (isAdmin() || existing().createdByUid == request.auth.uid || hasModulePerm('reports', 'approve'))
+        && isValidCustomReportTemplate(incoming(), templateId)
+        && incoming().createdByUid == existing().createdByUid
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time;
+      allow delete: if isValidId(templateId) && (isAdmin() || existing().createdByUid == request.auth.uid);
     }
   }
 }

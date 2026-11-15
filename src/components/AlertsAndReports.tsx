@@ -1,5 +1,5 @@
 import { CloudUpload, Download, FileText, Printer, RotateCcw, Settings } from 'lucide-react';
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { exportExcelInBrowser } from '../lib/clientExcelFallback';
 import { computeErrorCodeIntelligence, generateErrorIntelligenceAlerts } from '../lib/errorIntelligence';
 import { auth, getDriveAccessToken, refreshDriveTokenWithPopup } from '../lib/firebase';
@@ -11,6 +11,7 @@ import {
   type FleetDataset,
   type UnifiedDailyRow,
 } from '../lib/fleetAnalytics';
+import { generateKeetaIntelligenceAlerts } from '../lib/keetaIntelligence';
 import { exportArabicTableToPdf } from '../lib/pdfExport';
 import { ApiHtmlFallbackError, safeParseJsonResponse } from '../lib/safeFetch';
 import {
@@ -18,26 +19,58 @@ import {
   computeRiderPerformanceScore,
   detectOperationalAnomalies,
 } from '../lib/smartAnalytics';
+import { computeAllDocumentExpiries, EMPLOYEE_HR_STATUS_LABELS, VEHICLE_STATUS_LABELS } from '../lib/erpHelpers';
 import type { ExportColumn } from '../shared/exportCore';
+import { isKeetaActive } from '../shared/rbacCore';
 import type {
   AlertItem,
+  AuditLog,
+  CompanyBrandingDoc,
+  CustomEntityRecord,
+  CustomReportTemplate,
+  DynamicFieldDefinition,
   ErrorCodeDictionaryEntry,
   FilterState,
   OperationalCase,
   OperationalSettings,
   Platform,
+  PlatformAccount,
+  PlatformCatalogEntry,
+  PrivateDocumentRecord,
   RiderErrorCase,
+  SystemPageConfig,
+  UserProfile,
+  VehicleAssignment,
+  VehicleMaintenanceRecord,
+  VehicleMaster,
 } from '../types/fleet';
 import { ConfirmModal } from './ConfirmModal';
+import { CustomReportDesigner } from './CustomReportDesigner';
 import { DataTable, type TableColumn } from './DataTable';
 import { KpiCard } from './KpiCard';
+import {
+  Button,
+  Card,
+  Input,
+  PageHeader,
+  SectionHeader,
+  Select,
+  StatusBadge,
+  Tabs,
+  ToastBanner,
+} from './ui/EnterpriseUI';
 
 interface AlertsViewProps {
   dataset: FleetDataset;
   dictionaryEntries?: ErrorCodeDictionaryEntry[];
   riderErrorCases?: RiderErrorCase[];
+  vehicles?: VehicleMaster[];
+  privateDocs?: PrivateDocumentRecord[];
+  platformAccounts?: PlatformAccount[];
+  platformCatalog?: PlatformCatalogEntry[];
   settings: OperationalSettings;
   filters: FilterState;
+  lockedPlatform?: Platform;
   onSelectRider: (platform: Platform, riderId: string) => void;
   onGoToSettings: () => void;
 }
@@ -46,24 +79,100 @@ export function AlertsCenterView({
   dataset,
   dictionaryEntries = [],
   riderErrorCases = [],
+  vehicles = [],
+  privateDocs = [],
+  platformAccounts = [],
+  platformCatalog = [],
   settings,
   filters,
+  lockedPlatform,
   onSelectRider,
   onGoToSettings,
 }: AlertsViewProps) {
   const [sevFilter, setSevFilter] = useState<'all' | 'critical' | 'warning'>('all');
   const [catFilter, setCatFilter] = useState<string>('');
+  const keetaActive = isKeetaActive(settings, platformCatalog);
+
+  const effectiveFilters = useMemo(
+    () => (lockedPlatform ? { ...filters, platform: lockedPlatform } : filters),
+    [filters, lockedPlatform]
+  );
 
   const alerts = useMemo(() => {
-    const opsAlerts = generateOperationalAlerts(dataset, settings, filters);
-    if (filters.platform === 'keeta') return opsAlerts;
-    const errorReport = computeErrorCodeIntelligence(dataset, dictionaryEntries, riderErrorCases, filters);
-    const errorAlerts = generateErrorIntelligenceAlerts(errorReport, settings);
-    return [...errorAlerts, ...opsAlerts].sort((a, b) => {
+    const opsAlerts = generateOperationalAlerts(dataset, settings, effectiveFilters).filter(
+      (a) => keetaActive || a.platform !== 'keeta'
+    );
+    const keetaAlerts =
+      keetaActive && effectiveFilters.platform !== 'hungerstation'
+        ? generateKeetaIntelligenceAlerts(dataset, settings, effectiveFilters)
+        : [];
+    const errorAlerts =
+      effectiveFilters.platform !== 'keeta'
+        ? generateErrorIntelligenceAlerts(
+            computeErrorCodeIntelligence(dataset, dictionaryEntries, riderErrorCases, effectiveFilters),
+            settings
+          )
+        : [];
+
+    const erpAlerts: AlertItem[] = [];
+    if (!lockedPlatform) {
+      const todayIso = new Date().toISOString().slice(0, 10);
+      const expiries = computeAllDocumentExpiries({
+        riders: dataset.riderMaster,
+        vehicles,
+        privateDocs,
+        settings,
+        refDateIso: todayIso,
+      });
+      for (const exp of expiries) {
+        if (filters.branch && exp.branch && exp.branch !== filters.branch) continue;
+        const isCritical = exp.urgency === 'expired' || exp.urgency === 'due_today' || exp.urgency === 'within_7';
+        erpAlerts.push({
+          id: `exp_${exp.entityType === 'vehicle' ? 'veh' : 'hr'}_${exp.id}`,
+          severity: isCritical ? 'critical' : 'warning',
+          category: exp.domain === 'fleet' ? 'انتهاء وثائق الأسطول' : 'انتهاء وثائق HR',
+          date: exp.expiryDate,
+          platform: 'hungerstation',
+          riderId: exp.entityId,
+          metricValue: `${exp.daysRemaining} يوم`,
+          thresholdValue: '0-90 يوم',
+          title:
+            exp.daysRemaining < 0
+              ? `وثيقة منتهية (${exp.docCategory}): ${exp.entityName}`
+              : exp.daysRemaining === 0
+                ? `تنتهي اليوم (${exp.docCategory}): ${exp.entityName}`
+                : `وثيقة تقترب من الانتهاء (${exp.docCategory}) خلال ${exp.daysRemaining} يوم`,
+          description: `${exp.entityType === 'vehicle' ? 'المركبة' : 'المندوب'}: ${exp.entityName}${exp.docNumber ? ` · رقم: ${exp.docNumber}` : ''} · تاريخ الانتهاء: ${exp.expiryDate}`,
+        });
+      }
+
+      for (const acc of platformAccounts) {
+        if (acc.linkingStatus !== 'conflict_review') continue;
+        if (!keetaActive && acc.platformId === 'keeta') continue;
+        erpAlerts.push({
+          id: `conflict_${acc.accountId}`,
+          severity: 'critical',
+          category: 'تعارض ربط التطبيقات',
+          date: todayIso,
+          platform: acc.platformId === 'keeta' ? 'keeta' : 'hungerstation',
+          riderId: acc.companyRiderId || acc.platformRiderId,
+          metricValue: acc.platformRiderId,
+          thresholdValue: 'مطابقة فريدة',
+          title: `تعارض ملكية معرف ${acc.platformName} (${acc.platformRiderId})`,
+          description: acc.notes || `معرف التطبيق ${acc.platformRiderId} يتطلب مراجعة واعتماد الربط.`,
+        });
+      }
+    }
+
+    const dedup = new Map<string, AlertItem>();
+    for (const a of [...erpAlerts, ...errorAlerts, ...keetaAlerts, ...opsAlerts]) {
+      if (!dedup.has(a.id)) dedup.set(a.id, a);
+    }
+    return Array.from(dedup.values()).sort((a, b) => {
       if (a.severity !== b.severity) return a.severity === 'critical' ? -1 : 1;
       return b.date.localeCompare(a.date);
     });
-  }, [dataset, dictionaryEntries, riderErrorCases, settings, filters]);
+  }, [dataset, dictionaryEntries, riderErrorCases, vehicles, privateDocs, platformAccounts, settings, effectiveFilters, lockedPlatform, keetaActive, filters.branch]);
 
   const categories = useMemo(() => Array.from(new Set(alerts.map((a) => a.category))).sort(), [alerts]);
   const visible = alerts.filter((a) => {
@@ -81,37 +190,39 @@ export function AlertsCenterView({
       header: 'الخطورة',
       sortValue: (r) => r.severity,
       render: (r) => (
-        <span className={`font-semibold ${r.severity === 'critical' ? 'text-red-700 dark:text-red-400' : 'text-amber-700 dark:text-amber-400'}`}>
-          {r.severity === 'critical' ? 'حرج' : 'تحذير'}
-        </span>
+        <StatusBadge
+          label={r.severity === 'critical' ? 'حرج' : 'تحذير'}
+          tone={r.severity === 'critical' ? 'danger' : 'warning'}
+        />
       ),
     },
     { key: 'cat', header: 'التصنيف', sortValue: (r) => r.category, render: (r) => <span className="font-medium text-slate-900 dark:text-slate-100">{r.category}</span> },
     { key: 'date', header: 'التاريخ', sortValue: (r) => r.date, render: (r) => <span className="font-mono-num">{r.date}</span> },
-    { key: 'platform', header: 'المنصة', sortValue: (r) => r.platform, render: (r) => <span>{r.platform === 'hungerstation' ? 'HungerStation' : 'Keeta'}</span> },
-    { key: 'riderId', header: 'المندوب', sortValue: (r) => r.riderId, render: (r) => <span className="font-mono-num font-bold text-slate-900 dark:text-slate-100">{r.riderId}</span> },
+    ...(!lockedPlatform
+      ? [{ key: 'platform', header: 'المنصة', sortValue: (r: AlertItem) => r.platform, render: (r: AlertItem) => <span>{r.platform === 'hungerstation' ? 'HungerStation' : 'Keeta'}</span> }]
+      : []),
+    { key: 'riderId', header: lockedPlatform === 'keeta' ? 'Courier ID' : 'المندوب', sortValue: (r) => r.riderId, render: (r) => <span className="font-mono-num font-bold text-slate-900 dark:text-slate-100">{r.riderId}</span> },
     { key: 'title', header: 'المشكلة المكتشفة', render: (r) => <span className="font-semibold text-slate-800 dark:text-slate-200">{r.title}</span> },
     { key: 'desc', header: 'التفاصيل والمؤشر', render: (r) => <span className="text-xs text-slate-600 dark:text-slate-300">{r.description}</span> },
   ];
 
   return (
     <div className="space-y-5">
-      <div className="flex flex-wrap items-center justify-between gap-3">
-        <div>
-          <h2 className="text-lg font-bold text-slate-900 dark:text-slate-100">مركز التنبيهات التشغيلية (Alerts Center)</h2>
-          <p className="text-xs text-slate-500 dark:text-slate-400">
-            يتم توليد التنبيهات ديناميكيًا وفق حدود الأهداف المضبوطة في إعدادات النظام (دون أي حدود ثابتة في الكود).
-          </p>
-        </div>
-        <button
-          type="button"
-          onClick={onGoToSettings}
-          className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 px-3.5 py-2 text-xs font-semibold text-slate-800 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-700 whitespace-nowrap shrink-0"
-        >
-          <Settings className="h-3.5 w-3.5" />
-          <span>تعديل حدود التنبيهات</span>
-        </button>
-      </div>
+      <PageHeader
+        title={
+          lockedPlatform === 'hungerstation'
+            ? 'تنبيهات HungerStation التشغيلية'
+            : lockedPlatform === 'keeta'
+              ? 'تنبيهات Keeta التشغيلية'
+              : 'مركز التنبيهات التشغيلية الشاملة (Alerts Center)'
+        }
+        subtitle="يتم توليد التنبيهات ديناميكيًا وفق حدود الأهداف المضبوطة في إعدادات النظام (دون أي حدود ثابتة في الكود)."
+        actions={
+          <Button variant="secondary" icon={<Settings className="h-3.5 w-3.5" />} onClick={onGoToSettings}>
+            تعديل حدود التنبيهات
+          </Button>
+        }
+      />
 
       <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
         <KpiCard label="إجمالي التنبيهات" value={fmtNum(alerts.length)} />
@@ -120,35 +231,27 @@ export function AlertsCenterView({
         <KpiCard label="هدف الطلبات / الساعات" value={`${settings.minDailyOrders} / ${settings.minDailyWorkingHours} س`} />
       </div>
 
-      <div className="flex flex-wrap items-center gap-3 rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 p-3">
-        <div className="flex items-center gap-1 rounded-lg bg-slate-100 dark:bg-slate-800 p-1">
-          {(['all', 'critical', 'warning'] as const).map((sv) => (
-            <button
-              key={sv}
-              type="button"
-              onClick={() => setSevFilter(sv)}
-              className={`rounded-md px-3 py-1.5 text-xs font-semibold transition-colors whitespace-nowrap ${
-                sevFilter === sv
-                  ? 'bg-white dark:bg-slate-700 text-slate-900 dark:text-white shadow-sm'
-                  : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white'
-              }`}
-            >
-              {sv === 'all' ? 'الكل' : sv === 'critical' ? 'حرج فقط' : 'تحذيرات فقط'}
-            </button>
-          ))}
-        </div>
+      <Card padding="sm" className="flex flex-wrap items-center justify-between gap-3">
+        <Tabs
+          variant="segmented"
+          activeKey={sevFilter}
+          onChange={setSevFilter}
+          items={[
+            { key: 'all', label: 'الكل', count: alerts.length },
+            { key: 'critical', label: 'حرج فقط', count: criticalCount },
+            { key: 'warning', label: 'تحذيرات فقط', count: warningCount },
+          ]}
+        />
 
-        <select
-          value={catFilter}
-          onChange={(e) => setCatFilter(e.target.value)}
-          className="rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-950 px-3 py-1.5 text-xs text-slate-800 dark:text-slate-200 focus:outline-none"
-        >
-          <option value="">كل التصنيفات</option>
-          {categories.map((c) => (
-            <option key={c} value={c}>{c}</option>
-          ))}
-        </select>
-      </div>
+        <div className="w-full sm:w-64">
+          <Select value={catFilter} onChange={(e) => setCatFilter(e.target.value)}>
+            <option value="">كل التصنيفات</option>
+            {categories.map((c) => (
+              <option key={c} value={c}>{c}</option>
+            ))}
+          </Select>
+        </div>
+      </Card>
 
       <DataTable
         rows={visible}
@@ -159,7 +262,7 @@ export function AlertsCenterView({
         emptyTitle="لا توجد تنبيهات تشغيلية مطابقة"
         emptySubtitle="جميع السجلات ضمن الحدود التشغيلية المحددة أو لم يتم استيراد بيانات بعد."
         onRowClick={(r) => {
-          if (r.riderId && r.riderId !== '-') {
+          if (!r.id.startsWith('exp_veh_') && r.riderId && r.riderId !== '-') {
             onSelectRider(r.platform, r.riderId);
           }
         }}
@@ -178,9 +281,15 @@ export type ReportKind =
   | 'error_code_analysis'
   | 'attendance_report'
   | 'delivery_quality'
-  | 'platform_comparison';
+  | 'platform_comparison'
+  | 'hr_riders_report'
+  | 'applications_accounts_report'
+  | 'fleet_vehicles_report'
+  | 'expiries_report'
+  | 'maintenance_cost_report'
+  | 'audit_summary_report';
 
-const REPORT_DEFS: Array<{ key: ReportKind; label: string; note: string }> = [
+const REPORT_DEFS: Array<{ key: ReportKind; label: string; note: string; erpOnly?: boolean }> = [
   {
     key: 'executive_report',
     label: '1. ملخص الإدارة العليا الرسمي',
@@ -189,7 +298,7 @@ const REPORT_DEFS: Array<{ key: ReportKind; label: string; note: string }> = [
   {
     key: 'daily_operations',
     label: '2. العمليات اليومية',
-    note: 'تقرير مقارن يومي للطلبات المكتملة وساعات العمل/الاتصال والمسافات عبر المنصتين.',
+    note: 'تقرير مقارن يومي للطلبات المكتملة وساعات العمل/الاتصال والمسافات عبر المنصات المفعّلة.',
   },
   {
     key: 'monthly_performance',
@@ -209,7 +318,7 @@ const REPORT_DEFS: Array<{ key: ReportKind; label: string; note: string }> = [
   {
     key: 'supervisor_performance',
     label: '6. أداء المشرفين',
-    note: 'أداء فرق المشرفين حسب بيانات Keeta Dashboard وتوزيع المناديب التابعين.',
+    note: 'أداء فرق المشرفين وتوزيع المناديب التابعين ومعدلات الطلبات والساعات.',
   },
   {
     key: 'error_code_analysis',
@@ -219,17 +328,53 @@ const REPORT_DEFS: Array<{ key: ReportKind; label: string; note: string }> = [
   {
     key: 'attendance_report',
     label: '8. الحضور والشفتات',
-    note: 'تقرير الالتزام والحضور اليومي (HS Attendance Rate مقابل Keeta On-Shift % وساعات العمل).',
+    note: 'تقرير الالتزام والحضور اليومي وساعات العمل المسجلة.',
   },
   {
     key: 'delivery_quality',
     label: '9. جودة التسليم والتصنيف',
-    note: 'جودة التسليم (HS Quality Score/Segment الشهري مقابل Keeta On-Time % وOverdue).',
+    note: 'جودة التسليم ومستويات التقييم والالتزام بوقت التسليم.',
   },
   {
     key: 'platform_comparison',
     label: '10. مقارنة المنصتين',
     note: 'مقارنة شاملة بين HungerStation وKeeta مع توضيح تطابق أو اختلاف التعريفات الإحصائية.',
+  },
+  {
+    key: 'hr_riders_report',
+    label: '11. سجل الموارد البشرية والمندوبين',
+    note: 'بيانات المندوبين الشاملة: رقم الشركة الداخلي، الإقامة، الرخصة، الحالة الوظيفية، والفرع.',
+    erpOnly: true,
+  },
+  {
+    key: 'applications_accounts_report',
+    label: '12. حسابات التطبيقات والربط',
+    note: 'قائمة حسابات المندوبين عبر المنصات وحالة الربط التاريخي وتعارضات المعرّفات.',
+    erpOnly: true,
+  },
+  {
+    key: 'fleet_vehicles_report',
+    label: '13. سجل الأسطول والمركبات والعهدة',
+    note: 'تفاصيل السيارات، حالة التشغيل، المندوب المستلم الحالي، وتواريخ انتهاء الاستمارة والتأمين.',
+    erpOnly: true,
+  },
+  {
+    key: 'expiries_report',
+    label: '14. انتهاء الوثائق (HR والمركبات)',
+    note: 'رصد شامل للإقامات والرخص والاستمارات والتأمين والفحص الدوري حسب الأيام المتبقية.',
+    erpOnly: true,
+  },
+  {
+    key: 'maintenance_cost_report',
+    label: '15. صيانة وتكاليف الأسطول',
+    note: 'سجل أوامر الصيانة، نوع الصيانة، التكلفة بالريال، وحالة الإغلاق.',
+    erpOnly: true,
+  },
+  {
+    key: 'audit_summary_report',
+    label: '16. ملخص سجل التدقيق والنشاط',
+    note: 'تقرير حوكمة العمليات والتعديلات الحساسة المسجلة في سجل التدقيق المركزي.',
+    erpOnly: true,
   },
 ];
 
@@ -238,20 +383,67 @@ export function ReportsExportsView({
   dictionaryEntries = [],
   riderErrorCases = [],
   operationalCases = [],
+  vehicles = [],
+  vehicleAssignments = [],
+  vehicleMaintenance = [],
+  platformAccounts = [],
+  privateDocs = [],
+  auditLogs = [],
+  platformCatalog = [],
   settings,
+  lockedPlatform,
+  companyBranding,
+  dynamicFields = [],
+  systemPages = [],
+  customEntityRecords = [],
+  reportTemplates = [],
+  currentUser,
+  allowedUids = [],
+  onRefresh,
 }: {
   dataset: FleetDataset;
   filteredRows: UnifiedDailyRow[];
   dictionaryEntries?: ErrorCodeDictionaryEntry[];
   riderErrorCases?: RiderErrorCase[];
   operationalCases?: OperationalCase[];
+  vehicles?: VehicleMaster[];
+  vehicleAssignments?: VehicleAssignment[];
+  vehicleMaintenance?: VehicleMaintenanceRecord[];
+  platformAccounts?: PlatformAccount[];
+  privateDocs?: PrivateDocumentRecord[];
+  auditLogs?: AuditLog[];
+  platformCatalog?: PlatformCatalogEntry[];
   settings: OperationalSettings;
+  lockedPlatform?: Platform;
+  companyBranding?: CompanyBrandingDoc;
+  dynamicFields?: DynamicFieldDefinition[];
+  systemPages?: SystemPageConfig[];
+  customEntityRecords?: CustomEntityRecord[];
+  reportTemplates?: CustomReportTemplate[];
+  currentUser?: UserProfile;
+  allowedUids?: string[];
+  onRefresh?: () => Promise<void>;
 }) {
+  const keetaActive = isKeetaActive(settings, platformCatalog);
+  const [reportsMode, setReportsMode] = useState<'standard' | 'designer'>('standard');
+
+  const availableReports = useMemo(
+    () =>
+      REPORT_DEFS.filter((r) => {
+        if ((lockedPlatform || !keetaActive) && r.key === 'platform_comparison') return false;
+        if (lockedPlatform === 'keeta' && r.key === 'error_code_analysis') return false;
+        if (lockedPlatform === 'hungerstation' && r.key === 'supervisor_performance') return false;
+        if (lockedPlatform && r.erpOnly) return false;
+        return true;
+      }),
+    [lockedPlatform, keetaActive]
+  );
+
   const [reportKind, setReportKind] = useState<ReportKind>('executive_report');
   const [startDate, setStartDate] = useState('');
   const [endDate, setEndDate] = useState('');
   const [monthFilter, setMonthFilter] = useState('');
-  const [platformFilter, setPlatformFilter] = useState<'all' | Platform>('all');
+  const [platformFilter, setPlatformFilter] = useState<'all' | Platform>(lockedPlatform || 'all');
   const [cityFilter, setCityFilter] = useState('');
   const [branchFilter, setBranchFilter] = useState('');
   const [supervisorFilter, setSupervisorFilter] = useState('');
@@ -259,9 +451,24 @@ export function ReportsExportsView({
 
   const [exportBusy, setExportBusy] = useState(false);
   const [driveConfirmOpen, setDriveConfirmOpen] = useState(false);
-  const [exportMsg, setExportMsg] = useState<string | null>(null);
+  const [exportMsg, setExportMsg] = useState<{ type: 'ok' | 'err'; text: string } | null>(null);
 
-  const allUnified = useMemo(() => buildUnifiedDailyRows(dataset), [dataset]);
+  useEffect(() => {
+    setPlatformFilter(lockedPlatform || 'all');
+    if (!availableReports.some((r) => r.key === reportKind)) {
+      setReportKind('executive_report');
+    }
+  }, [lockedPlatform, availableReports, reportKind]);
+
+  const effectivePlatformFilter: 'all' | Platform = lockedPlatform || platformFilter;
+  const activeReportKind: ReportKind = availableReports.some((r) => r.key === reportKind)
+    ? reportKind
+    : 'executive_report';
+
+  const allUnified = useMemo(
+    () => buildUnifiedDailyRows(dataset).filter((r) => keetaActive || r.platform !== 'keeta'),
+    [dataset, keetaActive]
+  );
 
   const inlineOptions = useMemo(() => {
     const months = Array.from(new Set(allUnified.map((r) => r.month).filter(Boolean))).sort().reverse();
@@ -282,7 +489,7 @@ export function ReportsExportsView({
   const reportRows = useMemo(() => {
     const q = riderQuery.trim().toLowerCase();
     return allUnified.filter((r) => {
-      if (platformFilter !== 'all' && r.platform !== platformFilter) return false;
+      if (effectivePlatformFilter !== 'all' && r.platform !== effectivePlatformFilter) return false;
       if (monthFilter && r.month !== monthFilter) return false;
       if (startDate && r.date < startDate) return false;
       if (endDate && r.date > endDate) return false;
@@ -299,13 +506,13 @@ export function ReportsExportsView({
       }
       return true;
     });
-  }, [allUnified, internalIdByPlatformRider, platformFilter, monthFilter, startDate, endDate, cityFilter, branchFilter, supervisorFilter, riderQuery]);
+  }, [allUnified, internalIdByPlatformRider, effectivePlatformFilter, monthFilter, startDate, endDate, cityFilter, branchFilter, supervisorFilter, riderQuery]);
 
   const reportFiltersForErrors: FilterState = useMemo(
     () => ({
       date: '',
       month: monthFilter,
-      platform: platformFilter,
+      platform: effectivePlatformFilter,
       city: cityFilter,
       branch: branchFilter,
       contract: '',
@@ -313,7 +520,7 @@ export function ReportsExportsView({
       vehicleType: '',
       riderId: riderQuery,
     }),
-    [monthFilter, platformFilter, cityFilter, branchFilter, supervisorFilter, riderQuery]
+    [monthFilter, effectivePlatformFilter, cityFilter, branchFilter, supervisorFilter, riderQuery]
   );
 
   const errorIntel = useMemo(
@@ -393,24 +600,32 @@ export function ReportsExportsView({
   }, [reportRows, dataset.hungerQualityMonthly, settings, operationalCases, errorIntel.totalErrorEvents]);
 
   const reportPayload = useMemo(() => {
-    const def = REPORT_DEFS.find((d) => d.key === reportKind)!;
+    const def = availableReports.find((d) => d.key === activeReportKind) || availableReports[0];
     let columns: ExportColumn[] = [];
     let rows: Array<Record<string, unknown>> = [];
 
-    if (reportKind === 'executive_report') {
+    if (activeReportKind === 'executive_report') {
       columns = [
         { header: 'البند التنفيذي', key: 'section', width: 28 },
         { header: 'القيمة / المؤشر', key: 'value', width: 26 },
         { header: 'ملاحظات الإدارة التشغيلية', key: 'detail', width: 45 },
       ];
+      const sourceLabel =
+        lockedPlatform === 'hungerstation' || !keetaActive
+          ? 'HungerStation'
+          : lockedPlatform === 'keeta'
+            ? 'Keeta'
+            : 'HungerStation + Keeta';
       rows = [
         { section: 'نطاق الفترة المغطاة', value: `${executiveSummary.periodStart} → ${executiveSummary.periodEnd}`, detail: `${executiveSummary.distinctDays} يوم تشغيلي` },
         { section: 'إجمالي المندوبين / النشطون', value: `${executiveSummary.activeRiders} / ${executiveSummary.totalRiders}`, detail: 'بحسب الفلاتر المطبقة' },
-        { section: 'إجمالي الطلبات المكتملة', value: executiveSummary.totalOrders, detail: 'HungerStation + Keeta' },
+        { section: 'إجمالي الطلبات المكتملة', value: executiveSummary.totalOrders, detail: sourceLabel },
         { section: 'إجمالي ساعات العمل / الاتصال', value: executiveSummary.totalHours, detail: 'ساعة مسجلة' },
-        { section: 'إجمالي المسافة المقطوعة (كم)', value: executiveSummary.totalKm, detail: 'HS Distance + Keeta VDA' },
+        { section: 'إجمالي المسافة المقطوعة (كم)', value: executiveSummary.totalKm, detail: lockedPlatform === 'hungerstation' || !keetaActive ? 'HS Riders Distance' : lockedPlatform === 'keeta' ? 'Keeta VDA' : 'HS Distance + Keeta VDA' },
         { section: 'متوسط نسبة الحضور', value: executiveSummary.avgAttendance !== null ? `${executiveSummary.avgAttendance}%` : 'غير متاح', detail: 'معدل السجلات المتوفرة' },
-        { section: 'حالات أخطاء HungerStation', value: executiveSummary.errorEventsCount, detail: `${errorIntel.distinctCodesCount} أكواد مختلفة` },
+        ...(lockedPlatform !== 'keeta'
+          ? [{ section: 'حالات أخطاء HungerStation', value: executiveSummary.errorEventsCount, detail: `${errorIntel.distinctCodesCount} أكواد مختلفة` }]
+          : []),
         { section: 'الحالات التشغيلية المفتوحة / المتأخرة', value: `${executiveSummary.openCasesCount} / ${executiveSummary.overdueCasesCount}`, detail: 'من مركز التحكم التشغيلي' },
         { section: 'الانحرافات الأدائيّة المرصودة', value: executiveSummary.anomaliesCount, detail: 'تراجع حاد ≥35% أو انخفاض متتالي' },
         ...executiveSummary.branchCards.map((b) => ({
@@ -419,8 +634,8 @@ export function ReportsExportsView({
           detail: `الإنجاز ${b.completionRate ?? '-'}% · المندوبون ${b.activeRidersCount}/${b.ridersCount} · الحالة: ${b.healthStatus}`,
         })),
       ];
-    } else if (reportKind === 'daily_operations' || reportKind === 'monthly_performance') {
-      const isMonthly = reportKind === 'monthly_performance';
+    } else if (activeReportKind === 'daily_operations' || activeReportKind === 'monthly_performance') {
+      const isMonthly = activeReportKind === 'monthly_performance';
       columns = [
         { header: isMonthly ? 'الشهر' : 'التاريخ', key: 'period', width: 16 },
         { header: 'المنصة', key: 'platform', width: 16 },
@@ -461,7 +676,7 @@ export function ReportsExportsView({
           totalKm: Number(x.totalKm.toFixed(1)),
           payableKm: Number(x.payableKm.toFixed(1)),
         }));
-    } else if (reportKind === 'rider_ranking') {
+    } else if (activeReportKind === 'rider_ranking') {
       columns = [
         { header: 'المنصة', key: 'platform', width: 15 },
         { header: 'معرف المندوب', key: 'riderId', width: 18 },
@@ -484,7 +699,7 @@ export function ReportsExportsView({
         score: x.score,
         band: x.band,
       }));
-    } else if (reportKind === 'branch_performance') {
+    } else if (activeReportKind === 'branch_performance') {
       columns = [
         { header: 'الفرع / المدينة', key: 'branchName', width: 24 },
         { header: 'إجمالي المندوبين', key: 'ridersCount', width: 16 },
@@ -505,7 +720,7 @@ export function ReportsExportsView({
         workingHours: b.workingHours,
         healthStatus: b.healthStatus,
       }));
-    } else if (reportKind === 'supervisor_performance') {
+    } else if (activeReportKind === 'supervisor_performance') {
       columns = [
         { header: 'المشرف', key: 'supervisor', width: 24 },
         { header: 'المنصة', key: 'platform', width: 16 },
@@ -538,7 +753,7 @@ export function ReportsExportsView({
           orders: x.orders,
           hours: Number(x.hours.toFixed(1)),
         }));
-    } else if (reportKind === 'error_code_analysis') {
+    } else if (activeReportKind === 'error_code_analysis') {
       columns = [
         { header: 'الكود الموحد', key: 'normalizedCode', width: 18 },
         { header: 'الوصف المعتمد', key: 'displayTitle', width: 28 },
@@ -559,7 +774,7 @@ export function ReportsExportsView({
         topCity: c.cityBreakdown[0]?.name || '-',
         range: `${c.firstSeenDate} → ${c.lastSeenDate}`,
       }));
-    } else if (reportKind === 'platform_comparison') {
+    } else if (activeReportKind === 'platform_comparison') {
       columns = [
         { header: 'المؤشر', key: 'metric', width: 28 },
         { header: 'HungerStation', key: 'hs', width: 20 },
@@ -584,7 +799,7 @@ export function ReportsExportsView({
         { metric: 'المسافة الإجمالية (Total KM)', hs: Number(sum(hs, (r) => r.totalKm).toFixed(1)), keeta: Number(sum(kt, (r) => r.totalKm).toFixed(1)), parityNote: 'متطابق (Riders Distance مقابل VDA Total Distance)' },
         { metric: 'المسافة المستحقة (Payable KM)', hs: Number(sum(hs, (r) => r.payableKm).toFixed(1)), keeta: Number(sum(kt, (r) => r.payableKm).toFixed(1)), parityNote: 'متطابق (Payable KM مقابل VDA Payable distance)' },
       ];
-    } else if (reportKind === 'attendance_report') {
+    } else if (activeReportKind === 'attendance_report') {
       columns = [
         { header: 'التاريخ', key: 'date', width: 14 },
         { header: 'المنصة', key: 'platform', width: 16 },
@@ -599,8 +814,7 @@ export function ReportsExportsView({
         hours: r.workingHours ?? 'غير متاح',
         att: r.attendanceRate !== null ? `${r.attendanceRate}%` : 'غير متاح',
       }));
-    } else {
-      // delivery_quality
+    } else if (activeReportKind === 'delivery_quality') {
       columns = [
         { header: 'المنصة', key: 'platform', width: 16 },
         { header: 'المندوب', key: 'riderId', width: 18 },
@@ -609,7 +823,7 @@ export function ReportsExportsView({
         { header: 'Segment / Overdue', key: 'extra', width: 22 },
       ];
       rows = [
-        ...(platformFilter !== 'keeta'
+        ...(effectivePlatformFilter !== 'keeta'
           ? dataset.hungerQualityMonthly
               .filter((q) => (!monthFilter || q.month === monthFilter) && (!cityFilter || q.city === cityFilter))
               .map((q) => ({
@@ -620,7 +834,7 @@ export function ReportsExportsView({
                 extra: q.segment || '-',
               }))
           : []),
-        ...(platformFilter !== 'hungerstation'
+        ...(keetaActive && effectivePlatformFilter !== 'hungerstation'
           ? dataset.keetaDashboardDaily
               .filter((k) => (!monthFilter || k.month === monthFilter) && (!startDate || k.date >= startDate) && (!endDate || k.date <= endDate))
               .map((k) => ({
@@ -632,10 +846,155 @@ export function ReportsExportsView({
               }))
           : []),
       ];
+    } else if (activeReportKind === 'hr_riders_report') {
+      columns = [
+        { header: 'رقم الشركة', key: 'internalRiderId', width: 14 },
+        { header: 'الاسم الكامل', key: 'fullName', width: 24 },
+        { header: 'الحالة الوظيفية', key: 'hrStatus', width: 16 },
+        { header: 'رقم الإقامة', key: 'iqamaNumber', width: 16 },
+        { header: 'انتهاء الإقامة', key: 'iqamaExpiry', width: 14 },
+        { header: 'انتهاء الرخصة', key: 'licenseExpiry', width: 14 },
+        { header: 'المدينة / الفرع', key: 'branch', width: 18 },
+        { header: 'الجوال', key: 'phone', width: 15 },
+      ];
+      rows = dataset.riderMaster
+        .filter((r) => (!branchFilter || r.branch === branchFilter) && (!cityFilter || r.city === cityFilter))
+        .map((r) => ({
+          internalRiderId: r.internalRiderId,
+          fullName: r.fullName,
+          hrStatus: EMPLOYEE_HR_STATUS_LABELS[r.status] || r.status,
+          iqamaNumber: r.iqamaNumber || '-',
+          iqamaExpiry: r.iqamaExpiryDate || '-',
+          licenseExpiry: r.driverLicenseExpiryDate || '-',
+          branch: [r.city, r.branch].filter(Boolean).join(' / ') || '-',
+          phone: r.phone || '-',
+        }));
+    } else if (activeReportKind === 'applications_accounts_report') {
+      const riderNameMap = new Map(dataset.riderMaster.map((r) => [r.internalRiderId, r.fullName]));
+      columns = [
+        { header: 'المنصة', key: 'platformName', width: 16 },
+        { header: 'معرف المنصة', key: 'platformRiderId', width: 18 },
+        { header: 'المندوب بالشركة', key: 'companyRiderName', width: 22 },
+        { header: 'رقم الشركة', key: 'companyRiderId', width: 14 },
+        { header: 'حالة الحساب', key: 'accountStatus', width: 14 },
+        { header: 'حالة الربط', key: 'linkingStatus', width: 16 },
+        { header: 'مرشحو التعارض', key: 'conflicts', width: 14 },
+        { header: 'ملاحظات', key: 'notes', width: 28 },
+      ];
+      rows = platformAccounts
+        .filter((a) => keetaActive || a.platformId !== 'keeta')
+        .filter((a) => !branchFilter || a.branch === branchFilter)
+        .map((a) => ({
+          platformName: a.platformName || a.platformId,
+          platformRiderId: a.platformRiderId,
+          companyRiderName: riderNameMap.get(a.companyRiderId) || '-',
+          companyRiderId: a.companyRiderId,
+          accountStatus: a.accountStatus === 'active' ? 'نشط' : a.accountStatus === 'suspended' ? 'موقوف' : 'منتهي',
+          linkingStatus: a.linkingStatus === 'linked' ? 'مربوط مؤكد' : a.linkingStatus === 'conflict_review' ? 'تعارض يحتاج اعتماد' : 'غير مربوط',
+          conflicts: a.conflictCandidateRiderIds?.length ?? 0,
+          notes: a.notes || '-',
+        }));
+    } else if (activeReportKind === 'fleet_vehicles_report') {
+      const riderNameMap = new Map(dataset.riderMaster.map((r) => [r.internalRiderId, r.fullName]));
+      columns = [
+        { header: 'رقم المركبة', key: 'vehicleId', width: 14 },
+        { header: 'رقم اللوحة', key: 'plate', width: 16 },
+        { header: 'النوع والموديل', key: 'model', width: 24 },
+        { header: 'الحالة', key: 'status', width: 16 },
+        { header: 'المندوب المستلم', key: 'rider', width: 22 },
+        { header: 'انتهاء الاستمارة', key: 'istimara', width: 15 },
+        { header: 'انتهاء التأمين', key: 'insurance', width: 15 },
+        { header: 'الفحص الدوري', key: 'inspection', width: 15 },
+      ];
+      const activeAssignMap = new Map(vehicleAssignments.filter((a) => a.status === 'active').map((a) => [a.vehicleInternalId, a]));
+      rows = vehicles.map((v) => {
+        const activeAssign = activeAssignMap.get(v.vehicleInternalId);
+        const curRiderName = v.currentRiderId ? riderNameMap.get(v.currentRiderId) || v.currentRiderId : '';
+        return {
+          vehicleId: v.vehicleInternalId,
+          plate: v.plateNumber,
+          model: `${v.vehicleType} · ${v.make} ${v.model} ${v.year || ''}`.trim(),
+          status: VEHICLE_STATUS_LABELS[v.status] || v.status,
+          rider: activeAssign ? `${activeAssign.riderName || ''} (${activeAssign.companyRiderId})`.trim() : curRiderName || 'غير مسلمة',
+          istimara: v.istimaraExpiryDate || '-',
+          insurance: v.insuranceExpiryDate || '-',
+          inspection: v.periodicInspectionExpiryDate || '-',
+        };
+      });
+    } else if (activeReportKind === 'expiries_report') {
+      columns = [
+        { header: 'النطاق', key: 'domain', width: 14 },
+        { header: 'الكيان', key: 'entityName', width: 24 },
+        { header: 'نوع الوثيقة', key: 'docCategory', width: 18 },
+        { header: 'الرقم المرجعي', key: 'docNumber', width: 16 },
+        { header: 'تاريخ الانتهاء', key: 'expiryDate', width: 14 },
+        { header: 'الأيام المتبقية', key: 'daysRemaining', width: 14 },
+        { header: 'مستوى التنبيه', key: 'urgency', width: 16 },
+      ];
+      const items = computeAllDocumentExpiries({
+        riders: dataset.riderMaster,
+        vehicles,
+        privateDocs,
+        settings,
+      });
+      rows = items.map((i) => ({
+        domain: i.domain === 'fleet' ? 'الأسطول' : 'الموارد البشرية',
+        entityName: `${i.entityName} (${i.entityId})`,
+        docCategory: i.docCategory,
+        docNumber: i.docNumber || '-',
+        expiryDate: i.expiryDate,
+        daysRemaining: i.daysRemaining,
+        urgency:
+          i.urgency === 'expired'
+            ? 'منتهي'
+            : i.urgency === 'due_today'
+              ? 'ينتهي اليوم'
+              : i.urgency === 'within_7'
+                ? 'حرج (≤7 أيام)'
+                : i.urgency === 'within_30'
+                  ? 'قريب (≤30 يوم)'
+                  : 'تنبيه مبكر',
+      }));
+    } else if (activeReportKind === 'maintenance_cost_report') {
+      columns = [
+        { header: 'التاريخ', key: 'date', width: 14 },
+        { header: 'اللوحة', key: 'plate', width: 16 },
+        { header: 'نوع الصيانة', key: 'type', width: 16 },
+        { header: 'التفاصيل', key: 'desc', width: 28 },
+        { header: 'الورشة / المزود', key: 'vendor', width: 20 },
+        { header: 'التكلفة (ر.س)', key: 'cost', width: 14 },
+        { header: 'المتابعة القادمة', key: 'nextDate', width: 16 },
+      ];
+      rows = vehicleMaintenance.map((m) => ({
+        date: m.maintenanceDate,
+        plate: m.plateNumber || m.vehicleInternalId,
+        type: m.maintenanceType === 'periodic' ? 'دورية' : m.maintenanceType === 'accident' ? 'حادث' : m.maintenanceType === 'tires' ? 'إطارات' : m.maintenanceType === 'emergency' ? 'طارئة' : m.maintenanceType || 'صيانة',
+        desc: m.details || '-',
+        vendor: m.workshop || '-',
+        cost: m.cost ?? 0,
+        nextDate: m.nextMaintenanceDate || '-',
+      }));
+    } else {
+      columns = [
+        { header: 'الإجراء', key: 'action', width: 22 },
+        { header: 'النوع', key: 'entityType', width: 16 },
+        { header: 'المعرّف', key: 'targetId', width: 18 },
+        { header: 'المنفّذ', key: 'actorEmail', width: 24 },
+        { header: 'المصدر', key: 'source', width: 12 },
+        { header: 'التفاصيل', key: 'details', width: 38 },
+      ];
+      rows = auditLogs.slice(0, 200).map((l) => ({
+        action: l.action,
+        entityType: l.entityType || l.targetCollection,
+        targetId: l.targetId,
+        actorEmail: l.actorEmail,
+        source: l.source || 'UI',
+        details: l.details,
+      }));
     }
 
     return { def, columns, rows };
-  }, [reportKind, reportRows, dataset, executiveSummary, errorIntel, platformFilter, monthFilter, startDate, endDate, cityFilter]);
+  }, [availableReports, activeReportKind, reportRows, dataset, executiveSummary, errorIntel, effectivePlatformFilter, lockedPlatform, monthFilter, startDate, endDate, cityFilter, branchFilter, keetaActive, vehicles, vehicleAssignments, vehicleMaintenance, platformAccounts, privateDocs, auditLogs, settings]);
 
   const handleExportExcel = async (saveToDrive = false) => {
     if (!auth.currentUser) return;
@@ -655,10 +1014,17 @@ export function ReportsExportsView({
         headers['X-Drive-Access-Token'] = driveToken;
       }
 
-      const fileName = `fleet_${reportKind}_${new Date().toISOString().slice(0, 10)}.xlsx`;
+      const filePrefix = lockedPlatform === 'hungerstation' ? 'hs' : lockedPlatform === 'keeta' ? 'kt' : 'fleet';
+      const platformHeading =
+        lockedPlatform === 'hungerstation'
+          ? 'HungerStation Operations'
+          : lockedPlatform === 'keeta'
+            ? 'Keeta Operations'
+            : 'Fleet Operations Center';
+      const fileName = `${filePrefix}_${activeReportKind}_${new Date().toISOString().slice(0, 10)}.xlsx`;
       const exportPayload = {
-        title: `Fleet Operations Center — ${reportPayload.def.label}`,
-        sheetName: reportKind,
+        title: `${platformHeading} — ${reportPayload.def.label}`,
+        sheetName: activeReportKind,
         columns: reportPayload.columns,
         rows: reportPayload.rows,
         metadataLines: [reportPayload.def.note, `تاريخ التصدير: ${new Date().toISOString().slice(0, 10)}`],
@@ -685,7 +1051,7 @@ export function ReportsExportsView({
 
         if (saveToDrive) {
           const json = await safeParseJsonResponse<{ driveFile?: { name?: string } }>(res);
-          setExportMsg(`تم حفظ التقرير "${json.driveFile?.name || fileName}" في Google Drive بنجاح.`);
+          setExportMsg({ type: 'ok', text: `تم حفظ التقرير "${json.driveFile?.name || fileName}" في Google Drive بنجاح.` });
           setDriveConfirmOpen(false);
         } else {
           const blob = await res.blob();
@@ -695,23 +1061,23 @@ export function ReportsExportsView({
           a.download = fileName;
           a.click();
           URL.revokeObjectURL(url);
-          setExportMsg(`تم تنزيل ملف Excel (${fileName}) بنجاح.`);
+          setExportMsg({ type: 'ok', text: `تم تنزيل ملف Excel (${fileName}) بنجاح.` });
         }
       } catch (apiErr) {
         if (apiErr instanceof ApiHtmlFallbackError || apiErr instanceof TypeError) {
           const fallbackRes = await exportExcelInBrowser(exportPayload);
           if (saveToDrive) {
-            setExportMsg(`تم حفظ التقرير "${fallbackRes.driveFile?.name || fileName}" في Google Drive بنجاح.`);
+            setExportMsg({ type: 'ok', text: `تم حفظ التقرير "${fallbackRes.driveFile?.name || fileName}" في Google Drive بنجاح.` });
             setDriveConfirmOpen(false);
           } else {
-            setExportMsg(`تم تنزيل ملف Excel (${fileName}) بنجاح.`);
+            setExportMsg({ type: 'ok', text: `تم تنزيل ملف Excel (${fileName}) بنجاح.` });
           }
         } else {
           throw apiErr;
         }
       }
     } catch (err) {
-      setExportMsg(err instanceof Error ? err.message : 'فشل التصدير.');
+      setExportMsg({ type: 'err', text: err instanceof Error ? err.message : 'فشل التصدير.' });
     } finally {
       setExportBusy(false);
     }
@@ -721,17 +1087,26 @@ export function ReportsExportsView({
     setExportBusy(true);
     setExportMsg(null);
     try {
-      const fileName = `fleet_${reportKind}_${new Date().toISOString().slice(0, 10)}.pdf`;
+      const filePrefix = lockedPlatform === 'hungerstation' ? 'hs' : lockedPlatform === 'keeta' ? 'kt' : 'fleet';
+      const platformHeading =
+        lockedPlatform === 'hungerstation'
+          ? 'HungerStation Operations'
+          : lockedPlatform === 'keeta'
+            ? 'Keeta Operations'
+            : 'Fleet Operations Center';
+      const fileName = `${filePrefix}_${activeReportKind}_${new Date().toISOString().slice(0, 10)}.pdf`;
       await exportArabicTableToPdf({
-        title: `Fleet Operations Center — ${reportPayload.def.label}`,
+        title: `${platformHeading} — ${reportPayload.def.label}`,
         subtitle: reportPayload.def.note,
         columns: reportPayload.columns,
         rows: reportPayload.rows,
         fileName,
+        branding: companyBranding,
+        preparer: currentUser?.displayName || currentUser?.email,
       });
-      setExportMsg(`تم تصدير ملف PDF (${fileName}) بنجاح.`);
+      setExportMsg({ type: 'ok', text: `تم تصدير ملف PDF (${fileName}) بنجاح.` });
     } catch (err) {
-      setExportMsg(err instanceof Error ? err.message : 'فشل تصدير PDF.');
+      setExportMsg({ type: 'err', text: err instanceof Error ? err.message : 'فشل تصدير PDF.' });
     } finally {
       setExportBusy(false);
     }
@@ -755,7 +1130,7 @@ export function ReportsExportsView({
     setStartDate('');
     setEndDate('');
     setMonthFilter('');
-    setPlatformFilter('all');
+    setPlatformFilter(lockedPlatform || 'all');
     setCityFilter('');
     setBranchFilter('');
     setSupervisorFilter('');
@@ -764,171 +1139,193 @@ export function ReportsExportsView({
 
   return (
     <div className="space-y-5">
-      <div className="no-print flex flex-wrap items-center justify-between gap-3">
-        <div>
-          <h2 className="text-lg font-bold text-slate-900 dark:text-slate-100">مركز التقارير والذكاء التجاري (BI Reports Center)</h2>
-          <p className="text-xs text-slate-500 dark:text-slate-400">{reportPayload.def.note}</p>
-        </div>
-        <div className="flex flex-wrap items-center gap-2">
-          <button
-            type="button"
-            onClick={() => window.print()}
-            className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 px-3.5 py-2 text-xs font-semibold text-slate-800 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-700 whitespace-nowrap shrink-0"
-          >
-            <Printer className="h-3.5 w-3.5" />
-            <span>طباعة التقرير الرسمي</span>
-          </button>
-          <button
-            type="button"
-            disabled={exportBusy || reportPayload.rows.length === 0}
-            onClick={() => handleExportExcel(false)}
-            className="inline-flex items-center gap-1.5 rounded-lg bg-slate-900 dark:bg-blue-600 px-3.5 py-2 text-xs font-semibold text-white hover:bg-slate-800 dark:hover:bg-blue-700 disabled:opacity-50 whitespace-nowrap shrink-0"
-          >
-            <Download className="h-3.5 w-3.5" />
-            <span>تصدير Excel</span>
-          </button>
-          <button
-            type="button"
-            disabled={exportBusy || reportPayload.rows.length === 0}
-            onClick={handleExportPdf}
-            className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 px-3.5 py-2 text-xs font-semibold text-slate-800 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-700 disabled:opacity-50 whitespace-nowrap shrink-0"
-          >
-            <FileText className="h-3.5 w-3.5" />
-            <span>تصدير PDF</span>
-          </button>
-          <button
-            type="button"
-            disabled={exportBusy || reportPayload.rows.length === 0}
-            onClick={() => setDriveConfirmOpen(true)}
-            className="inline-flex items-center gap-1.5 rounded-lg border border-emerald-700 bg-emerald-700 px-3.5 py-2 text-xs font-semibold text-white hover:bg-emerald-800 disabled:opacity-50 whitespace-nowrap shrink-0"
-          >
-            <CloudUpload className="h-3.5 w-3.5" />
-            <span>حفظ في Google Drive</span>
-          </button>
-        </div>
+      <div className="no-print">
+        <PageHeader
+          title={
+            lockedPlatform === 'hungerstation'
+              ? 'تقارير وتصدير HungerStation'
+              : lockedPlatform === 'keeta'
+                ? 'تقارير وتصدير Keeta'
+                : 'مركز التقارير ومقارنة المنصتين (BI Reports Center)'
+          }
+          subtitle={reportPayload.def.note}
+          actions={
+            <>
+              <Button variant="secondary" icon={<Printer className="h-3.5 w-3.5" />} onClick={() => window.print()}>
+                طباعة التقرير الرسمي
+              </Button>
+              <Button
+                variant="primary"
+                disabled={exportBusy || reportPayload.rows.length === 0}
+                onClick={() => handleExportExcel(false)}
+                icon={<Download className="h-3.5 w-3.5" />}
+              >
+                تصدير Excel
+              </Button>
+              <Button
+                variant="secondary"
+                disabled={exportBusy || reportPayload.rows.length === 0}
+                onClick={handleExportPdf}
+                icon={<FileText className="h-3.5 w-3.5" />}
+              >
+                تصدير PDF
+              </Button>
+              <Button
+                variant="accent"
+                disabled={exportBusy || reportPayload.rows.length === 0}
+                onClick={() => setDriveConfirmOpen(true)}
+                icon={<CloudUpload className="h-3.5 w-3.5" />}
+              >
+                حفظ في Google Drive
+              </Button>
+            </>
+          }
+        />
       </div>
 
+      {!lockedPlatform && currentUser && companyBranding && (
+        <div className="no-print">
+          <Tabs
+            variant="underline"
+            activeKey={reportsMode}
+            onChange={setReportsMode}
+            items={[
+              { key: 'standard', label: 'التقارير القياسية الموحدة' },
+              { key: 'designer', label: 'مصمم التقارير والطباعة المخصص' },
+            ]}
+          />
+        </div>
+      )}
+
+      {reportsMode === 'designer' && !lockedPlatform && currentUser && companyBranding ? (
+        <CustomReportDesigner
+          dataset={dataset}
+          unifiedRows={allUnified}
+          vehicles={vehicles}
+          maintenance={vehicleMaintenance}
+          privateDocs={privateDocs}
+          settings={settings}
+          branding={companyBranding}
+          dynamicFields={dynamicFields}
+          systemPages={systemPages}
+          customEntityRecords={customEntityRecords}
+          reportTemplates={reportTemplates}
+          currentUser={currentUser}
+          allowedUids={allowedUids}
+          onRefresh={onRefresh || (async () => {})}
+        />
+      ) : (
+        <>
       {exportMsg && (
-        <div className="no-print rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-900 px-4 py-2.5 text-xs font-medium text-slate-800 dark:text-slate-200">
-          {exportMsg}
+        <div className="no-print">
+          <ToastBanner type={exportMsg.type} message={exportMsg.text} onDismiss={() => setExportMsg(null)} />
         </div>
       )}
 
       {/* Inline Report Filters */}
-      <div className="no-print rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 p-4 space-y-3">
-        <div className="flex flex-wrap items-center justify-between gap-2">
-          <span className="text-xs font-bold text-slate-800 dark:text-slate-200">نطاق وفلاتر التقرير</span>
-          <button
-            type="button"
-            onClick={resetInlineFilters}
-            className="inline-flex items-center gap-1 text-xs font-medium text-slate-500 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white"
-          >
-            <RotateCcw className="h-3 w-3" />
-            <span>إعادة ضبط</span>
-          </button>
-        </div>
-        <div className="grid grid-cols-2 gap-2.5 sm:grid-cols-4 lg:grid-cols-8 text-xs">
-          <input
+      <Card padding="sm" className="no-print space-y-3">
+        <SectionHeader
+          title="نطاق وفلاتر التقرير"
+          actions={
+            <Button variant="ghost" size="sm" icon={<RotateCcw className="h-3 w-3" />} onClick={resetInlineFilters}>
+              إعادة ضبط
+            </Button>
+          }
+        />
+        <div className="grid grid-cols-2 gap-2.5 sm:grid-cols-4 lg:grid-cols-8">
+          <Input
             type="date"
             value={startDate}
             onChange={(e) => setStartDate(e.target.value)}
             aria-label="من تاريخ"
-            className="rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-950 px-2.5 py-1.5 font-mono-num text-slate-800 dark:text-slate-200"
+            className="font-mono-num"
           />
-          <input
+          <Input
             type="date"
             value={endDate}
             onChange={(e) => setEndDate(e.target.value)}
             aria-label="إلى تاريخ"
-            className="rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-950 px-2.5 py-1.5 font-mono-num text-slate-800 dark:text-slate-200"
+            className="font-mono-num"
           />
-          <select
-            value={monthFilter}
-            onChange={(e) => setMonthFilter(e.target.value)}
-            className="rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-950 px-2.5 py-1.5 text-slate-800 dark:text-slate-200"
-          >
+          <Select value={monthFilter} onChange={(e) => setMonthFilter(e.target.value)} className="font-mono-num">
             <option value="">كل الأشهر</option>
             {inlineOptions.months.map((m) => (
               <option key={m} value={m}>{m}</option>
             ))}
-          </select>
-          <select
-            value={platformFilter}
-            onChange={(e) => setPlatformFilter(e.target.value as 'all' | Platform)}
-            className="rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-950 px-2.5 py-1.5 text-slate-800 dark:text-slate-200"
-          >
-            <option value="all">كل المنصات</option>
-            <option value="hungerstation">HungerStation</option>
-            <option value="keeta">Keeta</option>
-          </select>
-          <select
-            value={cityFilter}
-            onChange={(e) => setCityFilter(e.target.value)}
-            className="rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-950 px-2.5 py-1.5 text-slate-800 dark:text-slate-200"
-          >
+          </Select>
+          {!lockedPlatform && (
+            <Select
+              value={effectivePlatformFilter}
+              onChange={(e) => setPlatformFilter(e.target.value as 'all' | Platform)}
+            >
+              <option value="all">كل المنصات</option>
+              <option value="hungerstation">HungerStation</option>
+              {keetaActive && <option value="keeta">Keeta</option>}
+            </Select>
+          )}
+          <Select value={cityFilter} onChange={(e) => setCityFilter(e.target.value)}>
             <option value="">كل المدن</option>
             {inlineOptions.cities.map((c) => (
               <option key={c} value={c}>{c}</option>
             ))}
-          </select>
-          <select
-            value={branchFilter}
-            onChange={(e) => setBranchFilter(e.target.value)}
-            className="rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-950 px-2.5 py-1.5 text-slate-800 dark:text-slate-200"
-          >
+          </Select>
+          <Select value={branchFilter} onChange={(e) => setBranchFilter(e.target.value)}>
             <option value="">كل الفروع</option>
             {inlineOptions.branches.map((b) => (
               <option key={b} value={b}>{b}</option>
             ))}
-          </select>
-          <select
-            value={supervisorFilter}
-            onChange={(e) => setSupervisorFilter(e.target.value)}
-            className="rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-950 px-2.5 py-1.5 text-slate-800 dark:text-slate-200"
-          >
-            <option value="">كل المشرفين</option>
-            {inlineOptions.supervisors.map((s) => (
-              <option key={s} value={s}>{s}</option>
-            ))}
-          </select>
-          <input
+          </Select>
+          {lockedPlatform !== 'hungerstation' && (
+            <Select value={supervisorFilter} onChange={(e) => setSupervisorFilter(e.target.value)}>
+              <option value="">كل المشرفين</option>
+              {inlineOptions.supervisors.map((s) => (
+                <option key={s} value={s}>{s}</option>
+              ))}
+            </Select>
+          )}
+          <Input
             type="text"
             value={riderQuery}
             onChange={(e) => setRiderQuery(e.target.value)}
             placeholder="معرف أو اسم المندوب..."
-            className="rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-950 px-2.5 py-1.5 text-slate-800 dark:text-slate-200"
           />
         </div>
-      </div>
+      </Card>
 
-      {/* 10 Report Selector Tabs */}
-      <div className="no-print flex flex-wrap gap-1.5 rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 p-2">
-        {REPORT_DEFS.map((r) => (
-          <button
-            key={r.key}
-            type="button"
-            onClick={() => setReportKind(r.key)}
-            className={`rounded-lg px-3 py-1.5 text-xs font-semibold transition-colors whitespace-nowrap shrink-0 ${
-              reportKind === r.key
-                ? 'bg-slate-900 dark:bg-blue-600 text-white'
-                : 'bg-slate-50 dark:bg-slate-800 text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-700 hover:text-slate-900 dark:hover:text-white'
-            }`}
-          >
-            {r.label}
-          </button>
-        ))}
-      </div>
+      {/* Report Selector Tabs (Scoped to Workspace) */}
+      <Card padding="sm" className="no-print">
+        <div className="flex flex-wrap gap-1.5">
+          {availableReports.map((r) => (
+            <Button
+              key={r.key}
+              size="sm"
+              variant={activeReportKind === r.key ? 'primary' : 'secondary'}
+              onClick={() => setReportKind(r.key)}
+            >
+              {r.label}
+            </Button>
+          ))}
+        </div>
+      </Card>
 
       {/* Formal Printable Executive Brief View */}
-      {reportKind === 'executive_report' && (
-        <div className="rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 p-6 space-y-6">
+      {activeReportKind === 'executive_report' && (
+        <Card padding="lg" className="space-y-6">
           <div className="flex flex-wrap items-start justify-between gap-4 border-b border-slate-200 dark:border-slate-800 pb-4">
             <div>
               <div className="text-[11px] font-mono-num font-bold tracking-wider text-slate-500 dark:text-slate-400">
-                FLEET OPERATIONS CENTER — FORMAL EXECUTIVE BRIEF
+                {lockedPlatform === 'hungerstation'
+                  ? 'HUNGERSTATION OPERATIONS — EXECUTIVE BRIEF'
+                  : lockedPlatform === 'keeta'
+                    ? 'KEETA OPERATIONS — EXECUTIVE BRIEF'
+                    : 'FLEET OPERATIONS CENTER — FORMAL EXECUTIVE BRIEF'}
               </div>
               <h3 className="mt-1 text-xl font-bold text-slate-900 dark:text-slate-100">
-                ملخص الإدارة العليا الرسمي لأداء الأسطول
+                {lockedPlatform === 'hungerstation'
+                  ? 'التقرير التنفيذي الرسمي لمنصة HungerStation'
+                  : lockedPlatform === 'keeta'
+                    ? 'التقرير التنفيذي الرسمي لمنصة Keeta'
+                    : 'ملخص الإدارة العليا الرسمي لأداء الأسطول'}
               </h3>
               <p className="mt-0.5 text-xs text-slate-500 dark:text-slate-400">
                 الفترة المغطاة: <span className="font-mono-num font-semibold">{executiveSummary.periodStart}</span> →{' '}
@@ -937,7 +1334,14 @@ export function ReportsExportsView({
             </div>
             <div className="text-left text-xs text-slate-500 dark:text-slate-400 font-mono-num">
               <div>تاريخ الإصدار: {new Date().toISOString().slice(0, 10)}</div>
-              <div>المصدر: HungerStation &amp; Keeta Official Reports</div>
+              <div>
+                المصدر:{' '}
+                {lockedPlatform === 'hungerstation' || !keetaActive
+                  ? 'HungerStation Official Reports'
+                  : lockedPlatform === 'keeta'
+                    ? 'Keeta Official Reports'
+                    : 'HungerStation & Keeta Official Reports'}
+              </div>
             </div>
           </div>
 
@@ -956,13 +1360,13 @@ export function ReportsExportsView({
 
           <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">
             <div className="space-y-2">
-              <h4 className="text-sm font-bold text-slate-900 dark:text-slate-100">أعلى 5 مندوبين حسب التقييم الموزون</h4>
+              <SectionHeader title="أعلى 5 مندوبين حسب التقييم الموزون" />
               <div className="rounded-lg border border-slate-200 dark:border-slate-800 divide-y divide-slate-100 dark:divide-slate-800 text-xs">
                 {executiveSummary.topPerformers.length === 0 ? (
                   <div className="p-4 text-center text-slate-500">لا توجد بيانات كافية</div>
                 ) : (
                   executiveSummary.topPerformers.map((r) => (
-                    <div key={`${r.platform}:${r.riderId}`} className="flex items-center justify-between px-3 py-2">
+                    <div key={`${r.platform}:${r.riderId}`} className="flex items-center justify-between px-3.5 py-2.5">
                       <div>
                         <span className="font-bold text-slate-900 dark:text-slate-100">{r.riderName}</span>{' '}
                         <span className="font-mono-num text-slate-500">({r.riderId})</span>
@@ -977,13 +1381,13 @@ export function ReportsExportsView({
             </div>
 
             <div className="space-y-2">
-              <h4 className="text-sm font-bold text-slate-900 dark:text-slate-100">أدنى 5 مندوبين للمتابعة والتدخل</h4>
+              <SectionHeader title="أدنى 5 مندوبين للمتابعة والتدخل" />
               <div className="rounded-lg border border-slate-200 dark:border-slate-800 divide-y divide-slate-100 dark:divide-slate-800 text-xs">
                 {executiveSummary.bottomPerformers.length === 0 ? (
                   <div className="p-4 text-center text-slate-500">لا توجد بيانات كافية</div>
                 ) : (
                   executiveSummary.bottomPerformers.map((r) => (
-                    <div key={`${r.platform}:${r.riderId}`} className="flex items-center justify-between px-3 py-2">
+                    <div key={`${r.platform}:${r.riderId}`} className="flex items-center justify-between px-3.5 py-2.5">
                       <div>
                         <span className="font-bold text-slate-900 dark:text-slate-100">{r.riderName}</span>{' '}
                         <span className="font-mono-num text-slate-500">({r.riderId})</span>
@@ -997,13 +1401,13 @@ export function ReportsExportsView({
               </div>
             </div>
           </div>
-        </div>
+        </Card>
       )}
 
       <DataTable
         rows={reportPayload.rows}
         columns={tableCols}
-        rowKey={(_, idx) => `${reportKind}_${idx}`}
+        rowKey={(_, idx) => `${activeReportKind}_${idx}`}
         searchPlaceholder="تصفية سريعة داخل التقرير..."
         searchText={(r) => Object.values(r).join(' ')}
       />
@@ -1011,12 +1415,14 @@ export function ReportsExportsView({
       <ConfirmModal
         open={driveConfirmOpen}
         title="تأكيد حفظ التقرير في Google Drive"
-        description={`سيتم إنشاء ملف Excel جديد باسم "fleet_${reportKind}_${new Date().toISOString().slice(0, 10)}.xlsx" ورفعه إلى حسابك في Google Drive (${reportPayload.rows.length} صف). هل تريد المتابعة؟`}
+        description={`سيتم إنشاء ملف Excel جديد باسم "${lockedPlatform === 'hungerstation' ? 'hs' : lockedPlatform === 'keeta' ? 'kt' : 'fleet'}_${activeReportKind}_${new Date().toISOString().slice(0, 10)}.xlsx" ورفعه إلى حسابك في Google Drive (${reportPayload.rows.length} صف). هل تريد المتابعة؟`}
         confirmLabel="رفع وحفظ في Drive"
         busy={exportBusy}
         onConfirm={() => handleExportExcel(true)}
         onCancel={() => setDriveConfirmOpen(false)}
       />
+        </>
+      )}
     </div>
   );
 }

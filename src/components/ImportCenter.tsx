@@ -1,16 +1,13 @@
 import {
-  AlertTriangle,
   CheckCircle2,
   Cloud,
   Download,
   FileSpreadsheet,
   FolderOpen,
-  RefreshCw,
   Trash2,
   Upload,
-  XCircle,
 } from 'lucide-react';
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import {
   commitExcelInBrowser,
   exportExcelInBrowser,
@@ -20,23 +17,38 @@ import {
 import { listDriveExcelFiles, type DriveFileItem } from '../lib/driveClient';
 import { auth, getDriveAccessToken, refreshDriveTokenWithPopup } from '../lib/firebase';
 import { ApiHtmlFallbackError, safeParseJsonResponse } from '../lib/safeFetch';
+import { isKeetaActive } from '../shared/rbacCore';
 import type {
   ImportBatch,
   ImportPreviewResult,
   OperationalSettings,
+  Platform,
+  PlatformCatalogEntry,
   UserProfile,
 } from '../types/fleet';
 import { DataTable, type TableColumn } from './DataTable';
+import {
+  Button,
+  Card,
+  Input,
+  PageHeader,
+  SectionHeader,
+  StatusBadge,
+  Tabs,
+  ToastBanner,
+} from './ui/EnterpriseUI';
 
 interface ImportCenterProps {
   currentUser: UserProfile;
   importBatches: ImportBatch[];
   settings?: OperationalSettings;
+  platformCatalog?: PlatformCatalogEntry[];
+  lockedPlatform?: Platform;
   onCommitted: () => Promise<void>;
 }
 
 function downloadRejectedCsv(file: ImportPreviewResult) {
-  const headers = ['الشيت', 'رقم الصف', 'معرف المندوب الخام', 'سبب الرفض', 'اسم الملف'];
+  const headers = ['الشيت', 'رقم الصف', 'معرف المندوب الخام', 'العمود', 'القيمة الخام', 'سبب الرفض', 'اسم الملف'];
   const esc = (val: string | number) => {
     const s = String(val ?? '');
     if (s.includes(',') || s.includes('"') || s.includes('\n')) {
@@ -47,14 +59,16 @@ function downloadRejectedCsv(file: ImportPreviewResult) {
   const lines = [
     headers.map(esc).join(','),
     ...file.rejectedSample.map((r) =>
-      [r.sheetName, r.rowNumber, r.riderIdRaw || '', r.reason, file.fileName].map(esc).join(',')
+      [r.sheetName, r.rowNumber, r.riderIdRaw || '', r.columnName || '', r.rawValue || '', r.reason, file.fileName]
+        .map(esc)
+        .join(',')
     ),
   ];
   const csvContent = '\uFEFF' + lines.join('\r\n');
   const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
-  const baseName = file.fileName.replace(/\.xlsx?$/i, '');
+  const baseName = file.fileName.replace(/\.(xlsx?|csv)$/i, '');
   a.href = url;
   a.download = `rejected_${baseName}.csv`;
   a.click();
@@ -65,10 +79,16 @@ export function ImportCenter({
   currentUser,
   importBatches,
   settings,
+  platformCatalog = [],
+  lockedPlatform,
   onCommitted,
 }: ImportCenterProps) {
   const role = currentUser.role;
-  const canImport = role === 'owner' || role === 'admin' || role === 'operations_manager';
+  const keetaActive = isKeetaActive(settings, platformCatalog);
+  const keetaLockedOut = lockedPlatform === 'keeta' && !keetaActive;
+  const canImport =
+    !keetaLockedOut &&
+    (role === 'owner' || role === 'admin' || role === 'operations_manager');
 
   const maxFiles = Math.min(10, Math.max(1, settings?.importMaxFiles ?? 10));
   const allowUpdates = settings?.importAllowUpdates ?? true;
@@ -89,16 +109,31 @@ export function ImportCenter({
     previewId: string;
     files: ImportPreviewResult[];
   } | null>(null);
+  const [previewSheetTabByFile, setPreviewSheetTabByFile] = useState<Record<string, string>>({});
+  const [expandedSheetDiagByFile, setExpandedSheetDiagByFile] = useState<Record<string, boolean>>({});
+
+  useEffect(() => {
+    setStagedFiles([]);
+    setSelectedDriveIds([]);
+    setPreviewData(null);
+    setErrorMsg(null);
+    setSuccessMsg(null);
+  }, [lockedPlatform]);
+
+  const scopedBatches = useMemo(() => {
+    const base = keetaActive ? importBatches : importBatches.filter((b) => b.platform !== 'keeta');
+    return lockedPlatform ? base.filter((b) => b.platform === lockedPlatform) : base;
+  }, [importBatches, lockedPlatform, keetaActive]);
 
   const batchByHash = useMemo(() => {
     const map = new Map<string, ImportBatch>();
-    for (const b of importBatches) {
+    for (const b of scopedBatches) {
       if (b.fileHash && !map.has(b.fileHash)) {
         map.set(b.fileHash, b);
       }
     }
     return map;
-  }, [importBatches]);
+  }, [scopedBatches]);
 
   const handleAddLocalFiles = (fileList: FileList | null) => {
     if (!fileList || fileList.length === 0) return;
@@ -160,7 +195,13 @@ export function ImportCenter({
     const totalCount = stagedFiles.length + selectedDrive.length;
 
     if (totalCount === 0) {
-      setErrorMsg('يرجى إضافة ملف HungerStation أو Keeta من جهازك أو من Google Drive أولاً.');
+      const targetName =
+        lockedPlatform === 'hungerstation'
+          ? 'HungerStation'
+          : lockedPlatform === 'keeta'
+            ? 'Keeta'
+            : 'HungerStation أو Keeta';
+      setErrorMsg(`يرجى إضافة ملف ${targetName} من جهازك أو من Google Drive أولاً.`);
       return;
     }
 
@@ -184,6 +225,9 @@ export function ImportCenter({
       }
 
       const formData = new FormData();
+      if (lockedPlatform) {
+        formData.append('expectedPlatform', lockedPlatform);
+      }
       for (const f of stagedFiles) {
         formData.append('files', f);
       }
@@ -222,6 +266,7 @@ export function ImportCenter({
             localFiles: stagedFiles,
             driveFiles: selectedDrive.map((d) => ({ id: d.id, name: d.name })),
             user: currentUser,
+            expectedPlatform: lockedPlatform,
           });
         } else {
           throw apiErr;
@@ -301,7 +346,7 @@ export function ImportCenter({
   const handleExportRejectedExcel = async (file: ImportPreviewResult) => {
     setExportingRejectedHash(file.fileHash);
     try {
-      const baseName = file.fileName.replace(/\.xlsx?$/i, '');
+      const baseName = file.fileName.replace(/\.(xlsx?|csv)$/i, '');
       await exportExcelInBrowser({
         title: `تقرير السجلات المرفوضة — ${file.fileName}`,
         sheetName: 'Rejected Rows',
@@ -315,12 +360,16 @@ export function ImportCenter({
           { key: 'sheetName', header: 'الشيت', width: 28 },
           { key: 'rowNumber', header: 'رقم الصف', width: 12 },
           { key: 'riderIdRaw', header: 'معرف المندوب الخام', width: 22 },
+          { key: 'columnName', header: 'العمود', width: 24 },
+          { key: 'rawValue', header: 'القيمة الخام', width: 24 },
           { key: 'reason', header: 'سبب الرفض', width: 48 },
         ],
         rows: file.rejectedSample.map((r) => ({
           sheetName: r.sheetName,
           rowNumber: r.rowNumber,
           riderIdRaw: r.riderIdRaw || '(فارغ)',
+          columnName: r.columnName || '-',
+          rawValue: r.rawValue || '-',
           reason: r.reason,
         })),
       });
@@ -343,9 +392,10 @@ export function ImportCenter({
       header: 'المنصة',
       sortValue: (r) => r.platform,
       render: (r) => (
-        <span className="font-medium text-slate-800 dark:text-slate-200">
-          {r.platform === 'hungerstation' ? 'HungerStation' : 'Keeta'}
-        </span>
+        <StatusBadge
+          label={r.platform === 'hungerstation' ? 'HungerStation' : 'Keeta'}
+          tone={r.platform === 'hungerstation' ? 'info' : 'neutral'}
+        />
       ),
     },
     {
@@ -407,7 +457,7 @@ export function ImportCenter({
       key: 'by',
       header: 'بواسطة',
       render: (r) => (
-        <span className="text-xs text-slate-500 dark:text-slate-400">
+        <span className="font-mono-num text-xs text-slate-500 dark:text-slate-400">
           {r.importedByEmail || '-'}
         </span>
       ),
@@ -416,76 +466,94 @@ export function ImportCenter({
 
   const totalStagedCount = stagedFiles.length + selectedDriveIds.length;
 
+  const pageTitle =
+    lockedPlatform === 'hungerstation'
+      ? 'مركز استيراد تقارير HungerStation'
+      : lockedPlatform === 'keeta'
+        ? 'مركز استيراد تقارير Keeta'
+        : 'مركز استيراد تقارير Excel متعدد الملفات';
+
+  const pageSubtitle =
+    lockedPlatform === 'hungerstation'
+      ? 'استيراد مخصص لملفات HungerStation فقط (يُرفض أي ملف خاص بمنصة أخرى تلقائيًا) · استيراد Idempotent يمنع التكرار'
+      : lockedPlatform === 'keeta'
+        ? 'استيراد مخصص لملفات Keeta فقط (يُرفض أي ملف خاص بمنصة أخرى تلقائيًا) · استيراد Idempotent يمنع التكرار'
+        : 'كشف تلقائي للمنصة من الشيتات والأعمدة · تنظيف العناوين المكررة والصفوف الفارغة · استيراد Idempotent يمنع التكرار';
+
   return (
     <div className="space-y-6">
-      <div className="flex flex-wrap items-center justify-between gap-4">
-        <div>
-          <h2 className="text-lg font-bold text-slate-900 dark:text-white">
-            مركز استيراد تقارير Excel متعدد الملفات
-          </h2>
-          <p className="text-xs text-slate-500 dark:text-slate-400">
-            كشف تلقائي للمنصة من الشيتات والأعمدة · تنظيف العناوين المكررة والصفوف الفارغة · استيراد Idempotent يمنع التكرار
-          </p>
-        </div>
-        <div className="flex flex-wrap items-center gap-3 rounded-xl border border-slate-200 bg-white px-4 py-2 text-xs text-slate-600 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-300">
-          <span>
-            الحد الأقصى للدفعة: <strong className="font-mono-num text-slate-900 dark:text-white">{maxFiles} ملفات</strong>
-          </span>
-          <span className="text-slate-300 dark:text-slate-600">|</span>
-          <span>
-            تحديث السجلات المتغيرة: <strong className="text-slate-900 dark:text-white">{allowUpdates ? 'مسموح' : 'جديد فقط'}</strong>
-          </span>
-          <span className="text-slate-300 dark:text-slate-600">|</span>
-          <span>
-            تدقيق التواريخ: <strong className="text-slate-900 dark:text-white">{strictDates ? 'صارم' : 'مرن'}</strong>
-          </span>
-        </div>
-      </div>
+      <PageHeader
+        title={pageTitle}
+        subtitle={pageSubtitle}
+        actions={
+          <div className="flex flex-wrap items-center gap-3 rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 px-3.5 py-2 text-xs text-slate-600 dark:text-slate-300">
+            <span>
+              الحد الأقصى للدفعة: <strong className="font-mono-num text-slate-900 dark:text-white">{maxFiles} ملفات</strong>
+            </span>
+            <span className="text-slate-300 dark:text-slate-700">|</span>
+            <span>
+              تحديث السجلات المتغيرة: <strong className="text-slate-900 dark:text-white">{allowUpdates ? 'مسموح' : 'جديد فقط'}</strong>
+            </span>
+            <span className="text-slate-300 dark:text-slate-700">|</span>
+            <span>
+              تدقيق التواريخ: <strong className="text-slate-900 dark:text-white">{strictDates ? 'صارم' : 'مرن'}</strong>
+            </span>
+          </div>
+        }
+      />
 
-      {!canImport && (
-        <div className="rounded-xl border border-amber-200 bg-amber-50 p-4 text-sm text-amber-800 dark:border-amber-800/50 dark:bg-amber-950/30 dark:text-amber-200">
-          صلاحياتك الحالية ({role}) مخصصة للعرض فقط. الاستيراد متاح لمالك النظام، المدير، ومدير العمليات.
-        </div>
+      {keetaLockedOut && (
+        <ToastBanner
+          type="warn"
+          message="تم تعطيل عمليات واستيراد Keeta مؤقتًا عبر إعدادات المنصات (Feature Flag). يمكن إعادة التفعيل من إعدادات النظام والمنصات دون فقدان البيانات التاريخية."
+        />
+      )}
+
+      {!keetaLockedOut && !canImport && (
+        <ToastBanner
+          type="warn"
+          message={`صلاحياتك الحالية (${role}) مخصصة للعرض فقط. الاستيراد متاح لمالك النظام، المدير، ومدير العمليات.`}
+        />
       )}
 
       {errorMsg && (
-        <div className="flex items-start gap-2 rounded-xl border border-red-200 bg-red-50 p-4 text-sm text-red-800 dark:border-red-800/50 dark:bg-red-950/30 dark:text-red-200">
-          <XCircle className="mt-0.5 h-4 w-4 shrink-0 text-red-700 dark:text-red-400" />
-          <span>{errorMsg}</span>
-        </div>
+        <ToastBanner type="err" message={errorMsg} onDismiss={() => setErrorMsg(null)} />
       )}
 
       {successMsg && (
-        <div className="flex items-start gap-2 rounded-xl border border-emerald-200 bg-emerald-50 p-4 text-sm text-emerald-800 dark:border-emerald-800/50 dark:bg-emerald-950/30 dark:text-emerald-200">
-          <CheckCircle2 className="mt-0.5 h-4 w-4 shrink-0 text-emerald-700 dark:text-emerald-400" />
-          <span>{successMsg}</span>
-        </div>
+        <ToastBanner type="ok" message={successMsg} onDismiss={() => setSuccessMsg(null)} />
       )}
 
       <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">
         {/* Multi-File Local Uploads */}
-        <div className="rounded-xl border border-slate-200 bg-white p-5 space-y-4 dark:border-slate-700 dark:bg-slate-900">
-          <div className="flex items-center justify-between">
-            <h3 className="text-sm font-bold text-slate-900 dark:text-white">
-              رفع ملفات Excel من الجهاز (دفعة متعددة)
-            </h3>
-            <span className="font-mono-num text-xs text-slate-500 dark:text-slate-400">
-              {totalStagedCount} / {maxFiles} ملفات محددة
-            </span>
-          </div>
+        <Card className="space-y-4">
+          <SectionHeader
+            title="رفع ملفات Excel من الجهاز (دفعة متعددة)"
+            actions={
+              <span className="font-mono-num text-xs font-semibold text-slate-500 dark:text-slate-400">
+                {totalStagedCount} / {maxFiles} ملفات محددة
+              </span>
+            }
+          />
 
-          <label className="flex cursor-pointer flex-col items-center justify-center rounded-xl border border-dashed border-slate-300 bg-slate-50 p-6 text-center transition-colors hover:border-slate-400 hover:bg-slate-100 dark:border-slate-600 dark:bg-slate-800/60 dark:hover:border-slate-500 dark:hover:bg-slate-800">
+          <label className="flex cursor-pointer flex-col items-center justify-center rounded-xl border border-dashed border-slate-300 dark:border-slate-700 bg-slate-50/70 dark:bg-slate-950/60 p-6 text-center transition-colors hover:border-blue-400 dark:hover:border-blue-600 hover:bg-slate-100/70 dark:hover:bg-slate-800/60">
             <FileSpreadsheet className="h-7 w-7 text-slate-700 dark:text-slate-300" />
             <span className="mt-2 text-xs font-bold text-slate-900 dark:text-white">
-              اختر ملف أو عدة ملفات HungerStation / Keeta (.xlsx)
+              {lockedPlatform === 'hungerstation'
+                ? 'اختر ملف أو عدة ملفات HungerStation (.xlsx / .csv)'
+                : lockedPlatform === 'keeta'
+                  ? 'اختر ملف أو عدة ملفات Keeta (.xlsx / .csv)'
+                  : 'اختر ملف أو عدة ملفات HungerStation / Keeta (.xlsx / .csv)'}
             </span>
             <span className="mt-1 text-xs text-slate-500 dark:text-slate-400">
-              يتم التعرف على المنصة تلقائيًا لكل ملف ويمكنك إرفاق حتى {maxFiles} ملفات في العملية الواحدة
+              {lockedPlatform
+                ? `يتم التحقق الصارم من مطابقة الشيتات والأعمدة لمنصة ${lockedPlatform === 'hungerstation' ? 'HungerStation' : 'Keeta'} حتى ${maxFiles} ملفات`
+                : `يتم التعرف على المنصة تلقائيًا لكل ملف (.xlsx / .xls / .csv) ويمكنك إرفاق حتى ${maxFiles} ملفات في العملية الواحدة`}
             </span>
             <input
               type="file"
               multiple
-              accept=".xlsx,.xls"
+              accept=".xlsx,.xls,.csv"
               disabled={!canImport}
               onChange={(e) => {
                 handleAddLocalFiles(e.target.files);
@@ -496,7 +564,7 @@ export function ImportCenter({
           </label>
 
           {stagedFiles.length > 0 ? (
-            <div className="divide-y divide-slate-100 rounded-lg border border-slate-200 dark:divide-slate-800 dark:border-slate-700">
+            <div className="divide-y divide-slate-100 dark:divide-slate-800 rounded-lg border border-slate-200 dark:border-slate-800">
               {stagedFiles.map((f, idx) => (
                 <div
                   key={`${f.name}_${f.size}_${idx}`}
@@ -523,44 +591,46 @@ export function ImportCenter({
               ))}
             </div>
           ) : (
-            <div className="rounded-lg border border-slate-100 bg-slate-50 px-3 py-2.5 text-xs text-slate-500 dark:border-slate-800 dark:bg-slate-800/40 dark:text-slate-400">
-              الشيتات المدعومة تلقائيًا: Hunger-Daily، Riders Wallet، Riders Distance، Delivery Quality Segmentation، Dashboard، VDA، RankPlanProcess، Facial recognition.
+            <div className="rounded-lg border border-slate-200/80 dark:border-slate-800 bg-slate-50/70 dark:bg-slate-950/60 px-3 py-2.5 text-xs text-slate-500 dark:text-slate-400">
+              {lockedPlatform === 'hungerstation'
+                ? 'الشيتات المدعومة لـ HungerStation: Hunger-Daily، Riders Wallet، Riders Distance، Delivery Quality Segmentation.'
+                : lockedPlatform === 'keeta'
+                  ? 'الشيتات المدعومة لـ Keeta: Dashboard، VDA (Online Day)، RankPlanProcess، Facial recognition.'
+                  : 'الشيتات المدعومة تلقائيًا: Hunger-Daily، Riders Wallet، Riders Distance، Delivery Quality Segmentation، Dashboard، VDA، RankPlanProcess، Facial recognition.'}
             </div>
           )}
-        </div>
+        </Card>
 
         {/* Google Drive Integration */}
-        <div className="rounded-xl border border-slate-200 bg-white p-5 space-y-4 dark:border-slate-700 dark:bg-slate-900">
-          <div className="flex items-center justify-between gap-3">
-            <div className="flex items-center gap-2">
-              <Cloud className="h-4 w-4 text-slate-700 dark:text-slate-300" />
-              <h3 className="text-sm font-bold text-slate-900 dark:text-white">
-                استيراد مباشر من Google Drive
-              </h3>
-            </div>
-            <button
-              type="button"
-              disabled={!canImport || driveLoading}
-              onClick={handleLoadDriveFiles}
-              className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 bg-slate-50 px-3 py-1.5 text-xs font-semibold text-slate-800 hover:bg-slate-100 disabled:opacity-50 whitespace-nowrap shrink-0 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-200 dark:hover:bg-slate-700"
-            >
-              <FolderOpen className="h-3.5 w-3.5" />
-              <span>{driveLoading ? 'جاري الجلب...' : 'استعراض ملفات Drive'}</span>
-            </button>
-          </div>
+        <Card className="space-y-4">
+          <SectionHeader
+            title="استيراد مباشر من Google Drive"
+            actions={
+              <Button
+                variant="secondary"
+                size="sm"
+                loading={driveLoading}
+                disabled={!canImport || driveLoading}
+                onClick={handleLoadDriveFiles}
+                icon={<FolderOpen className="h-3.5 w-3.5" />}
+              >
+                {driveLoading ? 'جاري الجلب...' : 'استعراض ملفات Drive'}
+              </Button>
+            }
+          />
 
-          <div className="flex gap-2">
-            <input
+          <div className="flex items-center gap-2">
+            <Cloud className="h-4 w-4 text-slate-400 shrink-0" />
+            <Input
               type="text"
               value={driveQuery}
               onChange={(e) => setDriveQuery(e.target.value)}
               placeholder="بحث باسم الملف في Google Drive..."
-              className="flex-1 rounded-lg border border-slate-200 bg-slate-50 px-3 py-1.5 text-xs text-slate-800 focus:border-slate-400 focus:bg-white focus:outline-none dark:border-slate-700 dark:bg-slate-800 dark:text-slate-100 dark:focus:border-slate-500 dark:focus:bg-slate-800"
             />
           </div>
 
           {driveFiles.length > 0 ? (
-            <div className="max-h-48 overflow-y-auto divide-y divide-slate-100 rounded-lg border border-slate-200 dark:divide-slate-800 dark:border-slate-700">
+            <div className="max-h-48 overflow-y-auto erp-scroll divide-y divide-slate-100 dark:divide-slate-800 rounded-lg border border-slate-200 dark:border-slate-800">
               {driveFiles.map((df) => {
                 const checked = selectedDriveIds.includes(df.id);
                 return (
@@ -589,89 +659,81 @@ export function ImportCenter({
               })}
             </div>
           ) : (
-            <div className="rounded-lg border border-slate-100 bg-slate-50 p-4 text-center text-xs text-slate-500 dark:border-slate-800 dark:bg-slate-800/40 dark:text-slate-400">
-              اضغط &quot;استعراض ملفات Drive&quot; لعرض ملفات Excel (.xlsx) المخزنة في حسابك.
+            <div className="rounded-lg border border-slate-200/80 dark:border-slate-800 bg-slate-50/70 dark:bg-slate-950/60 p-4 text-center text-xs text-slate-500 dark:text-slate-400">
+              اضغط &quot;استعراض ملفات Drive&quot; لعرض ملفات Excel وCSV (.xlsx / .xls / .csv) المخزنة في حسابك.
             </div>
           )}
-        </div>
+        </Card>
       </div>
 
       <div className="flex items-center justify-between gap-3">
         {(stagedFiles.length > 0 || selectedDriveIds.length > 0) ? (
-          <button
-            type="button"
+          <Button
+            variant="ghost"
+            size="sm"
             onClick={() => {
               setStagedFiles([]);
               setSelectedDriveIds([]);
               setPreviewData(null);
             }}
-            className="text-xs font-semibold text-slate-500 hover:text-slate-800 dark:text-slate-400 dark:hover:text-slate-200"
           >
             مسح قائمة الملفات المحددة
-          </button>
+          </Button>
         ) : (
           <div />
         )}
-        <button
-          type="button"
+        <Button
+          variant="primary"
+          size="lg"
+          loading={previewLoading}
           disabled={!canImport || previewLoading || totalStagedCount === 0}
           onClick={handlePreview}
-          className="inline-flex items-center gap-2 rounded-lg bg-slate-900 px-5 py-2.5 text-sm font-semibold text-white hover:bg-slate-800 disabled:opacity-50 whitespace-nowrap shrink-0 dark:bg-white dark:text-slate-900 dark:hover:bg-slate-200"
+          icon={<Upload className="h-4 w-4" />}
         >
-          {previewLoading ? (
-            <RefreshCw className="h-4 w-4 animate-spin" />
-          ) : (
-            <Upload className="h-4 w-4" />
-          )}
-          <span>
-            {previewLoading
-              ? 'جاري تحليل وفحص الملفات...'
-              : `تحليل ومعاينة البيانات (${totalStagedCount}) قبل الحفظ`}
-          </span>
-        </button>
+          {previewLoading
+            ? 'جاري تحليل وفحص الملفات...'
+            : `تحليل ومعاينة البيانات (${totalStagedCount}) قبل الحفظ`}
+        </Button>
       </div>
 
       {/* Preview Diagnostics */}
       {previewData && (
-        <div className="rounded-xl border border-slate-300 bg-white p-6 space-y-5 dark:border-slate-700 dark:bg-slate-900">
-          <div className="flex flex-wrap items-center justify-between gap-4 border-b border-slate-200 pb-4 dark:border-slate-700">
-            <div>
-              <h3 className="text-base font-bold text-slate-900 dark:text-white">
-                نتائج المعاينة والتحقق قبل الحفظ ({previewData.files.length} ملف)
-              </h3>
-              <p className="text-xs text-slate-500 dark:text-slate-400">
-                راجع أعداد السجلات الجديدة والمحدثة والمكررة والمرفوضة وبصمة SHA-256 قبل تأكيد الإدراج في Cloud Firestore
-              </p>
-            </div>
-            <button
-              type="button"
-              disabled={commitLoading}
-              onClick={handleCommit}
-              className="inline-flex items-center gap-2 rounded-lg bg-emerald-700 px-5 py-2.5 text-sm font-semibold text-white hover:bg-emerald-800 disabled:opacity-50 whitespace-nowrap shrink-0"
-            >
-              <CheckCircle2 className="h-4 w-4" />
-              <span>
+        <Card padding="lg" className="space-y-5">
+          <SectionHeader
+            title={`نتائج المعاينة والتحقق قبل الحفظ (${previewData.files.length} ملف)`}
+            subtitle="راجع أعداد السجلات الجديدة والمحدثة والمكررة والمرفوضة وبصمة SHA-256 قبل تأكيد الإدراج في Cloud Firestore"
+            className="border-b border-slate-200 dark:border-slate-800 pb-4"
+            actions={
+              <Button
+                variant="accent"
+                size="lg"
+                loading={commitLoading}
+                disabled={commitLoading}
+                onClick={handleCommit}
+                icon={<CheckCircle2 className="h-4 w-4" />}
+              >
                 {commitLoading ? 'جاري الحفظ وتحديث الملخصات...' : 'تأكيد الاستيراد والحفظ الدائم'}
-              </span>
-            </button>
-          </div>
+              </Button>
+            }
+          />
 
           {previewData.files.map((file) => {
             const duplicateHashBatch = batchByHash.get(file.fileHash);
             return (
               <div
                 key={file.fileHash + file.fileName}
-                className="space-y-4 border-b border-slate-200 pb-5 last:border-b-0 last:pb-0 dark:border-slate-800"
+                className="space-y-4 border-b border-slate-200 dark:border-slate-800 pb-5 last:border-b-0 last:pb-0"
               >
                 <div className="flex flex-wrap items-center justify-between gap-3">
                   <div>
-                    <div className="text-sm font-bold text-slate-900 dark:text-white">
-                      {file.fileName} · المنصة المكتشفة:{' '}
-                      <span className="text-emerald-700 dark:text-emerald-400">
-                        {file.platform === 'hungerstation' ? 'HungerStation' : 'Keeta'}
-                      </span>
+                    <div className="flex flex-wrap items-center gap-2 text-sm font-bold text-slate-900 dark:text-white">
+                      <span>{file.fileName}</span>
+                      <StatusBadge
+                        label={file.platform === 'hungerstation' ? 'HungerStation' : 'Keeta'}
+                        tone="success"
+                      />
                     </div>
-                    <div className="mt-0.5 text-xs text-slate-500 font-mono-num dark:text-slate-400">
+                    <div className="mt-1 text-xs text-slate-500 font-mono-num dark:text-slate-400">
                       الفترة: {file.detectedPeriodStart || 'غير محدد'} →{' '}
                       {file.detectedPeriodEnd || 'غير محدد'} · الشيتات:{' '}
                       {file.sheetsDetected.join('، ')} · البصمة: {file.fileHash.slice(0, 12)}
@@ -680,29 +742,21 @@ export function ImportCenter({
                 </div>
 
                 {duplicateHashBatch && (
-                  <div className="flex items-start gap-2 rounded-lg border border-amber-300 bg-amber-50 px-3.5 py-2.5 text-xs text-amber-900 dark:border-amber-700/60 dark:bg-amber-950/40 dark:text-amber-200">
-                    <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-amber-700 dark:text-amber-400" />
-                    <div>
-                      <span className="font-bold">تحذير تكرار ملف: </span>
-                      تم استيراد ملف مطابق تمامًا مسبقًا بنفس البصمة الرقمية (SHA-256) باسم &quot;
-                      {duplicateHashBatch.fileName}&quot; للفترة (
-                      {duplicateHashBatch.detectedPeriodStart || '-'} →{' '}
-                      {duplicateHashBatch.detectedPeriodEnd || '-'}). سيتجاهل النظام السجلات المكررة تلقائيًا عند التأكيد.
-                    </div>
-                  </div>
+                  <ToastBanner
+                    type="warn"
+                    message={`تحذير تكرار ملف: تم استيراد ملف مطابق تمامًا مسبقًا بنفس البصمة الرقمية (SHA-256) باسم "${duplicateHashBatch.fileName}" للفترة (${duplicateHashBatch.detectedPeriodStart || '-'} → ${duplicateHashBatch.detectedPeriodEnd || '-'}). سيتجاهل النظام السجلات المكررة تلقائيًا عند التأكيد.`}
+                  />
                 )}
 
                 {!allowUpdates && file.updatedCount > 0 && (
-                  <div className="flex items-start gap-2 rounded-lg border border-slate-300 bg-slate-50 px-3.5 py-2.5 text-xs text-slate-800 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-200">
-                    <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-amber-600 dark:text-amber-400" />
-                    <span>
-                      ملاحظة سياسة الاستيراد: الإعداد الحالي يعطل تعديل السجلات السابقة؛ يوجد {file.updatedCount} سجل متغير مقارنة بالبيانات المخزنة.
-                    </span>
-                  </div>
+                  <ToastBanner
+                    type="info"
+                    message={`ملاحظة سياسة الاستيراد: الإعداد الحالي يعطل تعديل السجلات السابقة؛ يوجد ${file.updatedCount} سجل متغير مقارنة بالبيانات المخزنة.`}
+                  />
                 )}
 
                 <div className="grid grid-cols-2 gap-3 sm:grid-cols-5">
-                  <div className="rounded-lg border border-slate-200 bg-slate-50 p-3 dark:border-slate-700 dark:bg-slate-800/60">
+                  <div className="rounded-lg border border-slate-200 dark:border-slate-800 bg-slate-50/70 dark:bg-slate-950/60 p-3">
                     <div className="text-xs text-slate-500 dark:text-slate-400">
                       إجمالي السجلات الصالحة
                     </div>
@@ -710,13 +764,13 @@ export function ImportCenter({
                       {file.totalValid}
                     </div>
                   </div>
-                  <div className="rounded-lg border border-emerald-200 bg-emerald-50 p-3 dark:border-emerald-800/50 dark:bg-emerald-950/30">
+                  <div className="rounded-lg border border-emerald-200 dark:border-emerald-800/60 bg-emerald-50/70 dark:bg-emerald-950/30 p-3">
                     <div className="text-xs text-emerald-700 dark:text-emerald-400">سجلات جديدة</div>
                     <div className="mt-1 text-lg font-bold font-mono-num text-emerald-800 dark:text-emerald-300">
                       {file.newCount}
                     </div>
                   </div>
-                  <div className="rounded-lg border border-amber-200 bg-amber-50 p-3 dark:border-amber-800/50 dark:bg-amber-950/30">
+                  <div className="rounded-lg border border-amber-200 dark:border-amber-800/60 bg-amber-50/70 dark:bg-amber-950/30 p-3">
                     <div className="text-xs text-amber-700 dark:text-amber-400">
                       تحديث بيانات متغيرة
                     </div>
@@ -724,7 +778,7 @@ export function ImportCenter({
                       {file.updatedCount}
                     </div>
                   </div>
-                  <div className="rounded-lg border border-slate-200 bg-slate-50 p-3 dark:border-slate-700 dark:bg-slate-800/60">
+                  <div className="rounded-lg border border-slate-200 dark:border-slate-800 bg-slate-50/70 dark:bg-slate-950/60 p-3">
                     <div className="text-xs text-slate-500 dark:text-slate-400">
                       مكرر مطابق (يُتجاهل)
                     </div>
@@ -732,7 +786,7 @@ export function ImportCenter({
                       {file.duplicateCount}
                     </div>
                   </div>
-                  <div className="rounded-lg border border-red-200 bg-red-50 p-3 dark:border-red-800/50 dark:bg-red-950/30">
+                  <div className="rounded-lg border border-red-200 dark:border-red-800/60 bg-red-50/70 dark:bg-red-950/30 p-3">
                     <div className="text-xs text-red-700 dark:text-red-400">سجلات مرفوضة</div>
                     <div className="mt-1 text-lg font-bold font-mono-num text-red-800 dark:text-red-300">
                       {file.rejectedCount}
@@ -741,157 +795,264 @@ export function ImportCenter({
                 </div>
 
                 {file.missingExpectedSheets.length > 0 && (
-                  <div className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-900 dark:border-amber-800/50 dark:bg-amber-950/30 dark:text-amber-200">
-                    تنبيه شيتات ناقصة: لم يتم العثور على الشيتات التالية في هذا الملف:{' '}
-                    {file.missingExpectedSheets.join('، ')}
-                  </div>
+                  <ToastBanner
+                    type="warn"
+                    message={`تنبيه شيتات ناقصة: لم يتم العثور على الشيتات التالية في هذا الملف: ${file.missingExpectedSheets.join('، ')}`}
+                  />
                 )}
 
                 {file.unknownColumns.length > 0 && (
-                  <div className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-xs text-slate-700 dark:border-slate-700 dark:bg-slate-800/60 dark:text-slate-300">
-                    أعمدة غير معروفة محفوظة باسمها الأصلي (دون تخمين):{' '}
-                    <span className="font-mono-num">{file.unknownColumns.join(' | ')}</span>
-                  </div>
+                  <ToastBanner
+                    type="info"
+                    message={`أعمدة غير معروفة محفوظة باسمها الأصلي (دون تخمين): ${file.unknownColumns.join(' | ')}`}
+                  />
                 )}
 
-                {/* Sheet diagnostics */}
-                <div className="overflow-x-auto rounded-lg border border-slate-200 dark:border-slate-700">
-                  <table className="w-full text-xs">
-                    <thead className="bg-slate-50 text-slate-600 dark:bg-slate-800 dark:text-slate-300">
-                      <tr>
-                        <th className="px-3 py-2 text-right">الشيت</th>
-                        <th className="px-3 py-2 text-center">صالح</th>
-                        <th className="px-3 py-2 text-center">عناوين مكررة محذوفة</th>
-                        <th className="px-3 py-2 text-center">صفوف فارغة محذوفة</th>
-                        <th className="px-3 py-2 text-center">مرفوض</th>
-                      </tr>
-                    </thead>
-                    <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
-                      {file.sheetDiagnostics.map((sd) => (
-                        <tr key={sd.sheetName}>
-                          <td className="px-3 py-2 font-medium text-slate-900 dark:text-slate-100">
-                            {sd.sheetName}
-                          </td>
-                          <td className="px-3 py-2 text-center font-mono-num text-emerald-700 dark:text-emerald-400">
-                            {sd.validCount}
-                          </td>
-                          <td className="px-3 py-2 text-center font-mono-num text-slate-600 dark:text-slate-400">
-                            {sd.duplicateHeadersSkipped}
-                          </td>
-                          <td className="px-3 py-2 text-center font-mono-num text-slate-600 dark:text-slate-400">
-                            {sd.emptyRowsSkipped}
-                          </td>
-                          <td className="px-3 py-2 text-center font-mono-num text-red-700 dark:text-red-400">
-                            {sd.rejectedCount}
-                          </td>
+                {/* Sheet diagnostics & column integrity */}
+                <div className="space-y-2">
+                  <div className="flex items-center justify-between">
+                    <span className="text-xs font-bold text-slate-800 dark:text-slate-200">
+                      تشخيص الشيتات ومطابقة الأعمدة (Column Integrity)
+                    </span>
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      onClick={() =>
+                        setExpandedSheetDiagByFile((prev) => ({
+                          ...prev,
+                          [file.fileHash]: !prev[file.fileHash],
+                        }))
+                      }
+                    >
+                      {expandedSheetDiagByFile[file.fileHash]
+                        ? 'إخفاء تفاصيل الأعمدة'
+                        : 'عرض الأعمدة المكتشفة والمفقودة'}
+                    </Button>
+                  </div>
+                  <div className="overflow-x-auto rounded-lg border border-slate-200 dark:border-slate-800">
+                    <table className="w-full text-xs">
+                      <thead className="bg-slate-50 text-slate-600 dark:bg-slate-950 dark:text-slate-400">
+                        <tr>
+                          <th className="px-3 py-2 text-right font-semibold">الشيت</th>
+                          <th className="px-3 py-2 text-center font-semibold">صالح</th>
+                          <th className="px-3 py-2 text-center font-semibold">أعمدة متوقعة / مكتشفة</th>
+                          <th className="px-3 py-2 text-center font-semibold">عناوين مكررة محذوفة</th>
+                          <th className="px-3 py-2 text-center font-semibold">تضارب مكرر بالملف</th>
+                          <th className="px-3 py-2 text-center font-semibold">صفوف فارغة محذوفة</th>
+                          <th className="px-3 py-2 text-center font-semibold">مرفوض</th>
                         </tr>
+                      </thead>
+                      <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
+                        {file.sheetDiagnostics.map((sd) => {
+                          const expCount = sd.expectedColumns?.length ?? 0;
+                          const detCount = sd.detectedColumns?.length ?? 0;
+                          const missCount = sd.missingColumns?.length ?? 0;
+                          const dupConflicts = sd.withinFileDuplicateConflicts ?? 0;
+                          return (
+                            <tr key={sd.sheetName} className="hover:bg-slate-50/70 dark:hover:bg-slate-800/40">
+                              <td className="px-3 py-2 font-medium text-slate-900 dark:text-slate-100">
+                                {sd.sheetName}
+                              </td>
+                              <td className="px-3 py-2 text-center font-mono-num text-emerald-700 dark:text-emerald-400">
+                                {sd.validCount}
+                              </td>
+                              <td className="px-3 py-2 text-center font-mono-num">
+                                <span className="text-slate-800 dark:text-slate-200">
+                                  {detCount}/{expCount || detCount}
+                                </span>
+                                {missCount > 0 && (
+                                  <span className="mr-1 text-amber-700 dark:text-amber-400">
+                                    (ناقص {missCount})
+                                  </span>
+                                )}
+                              </td>
+                              <td className="px-3 py-2 text-center font-mono-num text-slate-600 dark:text-slate-400">
+                                {sd.duplicateHeadersSkipped}
+                              </td>
+                              <td className="px-3 py-2 text-center font-mono-num text-amber-700 dark:text-amber-400">
+                                {dupConflicts}
+                              </td>
+                              <td className="px-3 py-2 text-center font-mono-num text-slate-600 dark:text-slate-400">
+                                {sd.emptyRowsSkipped}
+                              </td>
+                              <td className="px-3 py-2 text-center font-mono-num text-red-700 dark:text-red-400">
+                                {sd.rejectedCount}
+                              </td>
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
+
+                  {expandedSheetDiagByFile[file.fileHash] && (
+                    <div className="space-y-2 rounded-lg border border-slate-200 dark:border-slate-800 bg-slate-50/70 dark:bg-slate-950/60 p-3 text-xs">
+                      {file.sheetDiagnostics.map((sd) => (
+                        <div key={`col_${sd.sheetName}`} className="space-y-1 border-b border-slate-200 pb-2 last:border-b-0 last:pb-0 dark:border-slate-800">
+                          <div className="font-bold text-slate-900 dark:text-slate-100">{sd.sheetName}</div>
+                          {sd.detectedColumns && sd.detectedColumns.length > 0 && (
+                            <div className="text-slate-600 dark:text-slate-300">
+                              <span className="font-semibold">الأعمدة المكتشفة ({sd.detectedColumns.length}): </span>
+                              <span className="font-mono-num">{sd.detectedColumns.join(' · ')}</span>
+                            </div>
+                          )}
+                          {sd.missingColumns && sd.missingColumns.length > 0 && (
+                            <div className="text-amber-800 dark:text-amber-300">
+                              <span className="font-semibold">أعمدة متوقعة غير موجودة في هذا الملف ({sd.missingColumns.length}): </span>
+                              <span className="font-mono-num">{sd.missingColumns.join(' · ')}</span>
+                            </div>
+                          )}
+                        </div>
                       ))}
-                    </tbody>
-                  </table>
+                    </div>
+                  )}
                 </div>
 
                 {file.rejectedSample.length > 0 && (
-                  <div className="rounded-lg border border-red-200 bg-red-50/50 p-3 dark:border-red-800/50 dark:bg-red-950/20">
-                    <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
+                  <div className="rounded-lg border border-red-200 bg-red-50/50 p-3.5 space-y-2.5 dark:border-red-800/50 dark:bg-red-950/20">
+                    <div className="flex flex-wrap items-center justify-between gap-2">
                       <div className="text-xs font-bold text-red-800 dark:text-red-300">
-                        عينة من السجلات المرفوضة وسبب الرفض ({file.rejectedSample.length} سجل معروض):
+                        عينة من السجلات المرفوضة وسبب الرفض ({file.rejectedSample.length} سجل معروض من أصل {file.rejectedCount}):
                       </div>
                       <div className="flex items-center gap-2">
-                        <button
-                          type="button"
+                        <Button
+                          variant="secondary"
+                          size="sm"
                           onClick={() => downloadRejectedCsv(file)}
-                          className="inline-flex items-center gap-1 rounded-md border border-red-300 bg-white px-2.5 py-1 text-xs font-semibold text-red-800 hover:bg-red-50 dark:border-red-700 dark:bg-slate-900 dark:text-red-300 dark:hover:bg-red-950/40"
+                          icon={<Download className="h-3.5 w-3.5" />}
                         >
-                          <Download className="h-3.5 w-3.5" />
-                          <span>تصدير المرفوضات (CSV)</span>
-                        </button>
-                        <button
-                          type="button"
+                          تصدير المرفوضات (CSV)
+                        </Button>
+                        <Button
+                          variant="secondary"
+                          size="sm"
+                          loading={exportingRejectedHash === file.fileHash}
                           disabled={exportingRejectedHash === file.fileHash}
                           onClick={() => handleExportRejectedExcel(file)}
-                          className="inline-flex items-center gap-1 rounded-md border border-red-300 bg-white px-2.5 py-1 text-xs font-semibold text-red-800 hover:bg-red-50 disabled:opacity-50 dark:border-red-700 dark:bg-slate-900 dark:text-red-300 dark:hover:bg-red-950/40"
+                          icon={<Download className="h-3.5 w-3.5" />}
                         >
-                          <Download className="h-3.5 w-3.5" />
-                          <span>
-                            {exportingRejectedHash === file.fileHash
-                              ? 'جاري التصدير...'
-                              : 'تصدير المرفوضات (Excel)'}
-                          </span>
-                        </button>
+                          {exportingRejectedHash === file.fileHash
+                            ? 'جاري التصدير...'
+                            : 'تصدير المرفوضات (Excel)'}
+                        </Button>
                       </div>
                     </div>
-                    <div className="max-h-36 overflow-y-auto space-y-1 text-xs text-red-900 dark:text-red-200">
+                    <div className="rounded-lg border border-red-200/80 bg-white/85 px-3 py-2 text-[11px] text-red-900 dark:border-red-800/40 dark:bg-slate-900/70 dark:text-red-200">
+                      إرشاد التصحيح: صدّر ملف المرفوضات وصحّح العمود المذكور (مثل التاريخ أو معرف المندوب) ثم أعد رفع الملف؛ السجلات الصالحة المخزنة سابقًا سيتم تجاهلها تلقائيًا بفضل نظام Idempotency.
+                    </div>
+                    <div className="max-h-40 overflow-y-auto erp-scroll space-y-1 text-xs text-red-900 dark:text-red-200">
                       {file.rejectedSample.map((rej, idx) => (
                         <div key={idx} className="font-mono-num">
-                          [{rej.sheetName} · صف {rej.rowNumber}] معرف: {rej.riderIdRaw || '(فارغ)'} —{' '}
-                          {rej.reason}
+                          [{rej.sheetName} · صف {rej.rowNumber}] معرف: {rej.riderIdRaw || '(فارغ)'}
+                          {rej.columnName ? ` · العمود: ${rej.columnName}` : ''}
+                          {rej.rawValue ? ` (القيمة: ${rej.rawValue})` : ''} — {rej.reason}
                         </div>
                       ))}
                     </div>
                   </div>
                 )}
 
-                {file.previewRows.length > 0 && (
-                  <div className="overflow-x-auto rounded-lg border border-slate-200 dark:border-slate-700">
-                    <table className="w-full text-xs">
-                      <thead className="bg-slate-50 text-slate-600 dark:bg-slate-800 dark:text-slate-300">
-                        <tr>
-                          <th className="px-3 py-2 text-right">الشيت</th>
-                          <th className="px-3 py-2 text-right">معرف المندوب</th>
-                          <th className="px-3 py-2 text-right">التاريخ / الفترة</th>
-                          <th className="px-3 py-2 text-right">ملخص السجل</th>
-                          <th className="px-3 py-2 text-center">الحالة</th>
-                        </tr>
-                      </thead>
-                      <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
-                        {file.previewRows.slice(0, 12).map((pr) => (
-                          <tr key={pr.recordKey}>
-                            <td className="px-3 py-2 text-slate-600 dark:text-slate-400">
-                              {pr.sheetName}
-                            </td>
-                            <td className="px-3 py-2 font-mono-num font-semibold text-slate-900 dark:text-white">
-                              {pr.riderId}
-                            </td>
-                            <td className="px-3 py-2 font-mono-num text-slate-700 dark:text-slate-300">
-                              {pr.dateOrPeriod}
-                            </td>
-                            <td className="px-3 py-2 text-slate-700 dark:text-slate-300">
-                              {pr.summaryText}
-                            </td>
-                            <td className="px-3 py-2 text-center font-semibold">
-                              {pr.changeStatus === 'new' ? (
-                                <span className="text-emerald-700 dark:text-emerald-400">جديد</span>
-                              ) : pr.changeStatus === 'update' ? (
-                                <span className="text-amber-700 dark:text-amber-400">تحديث</span>
-                              ) : (
-                                <span className="text-slate-500 dark:text-slate-400">مكرر</span>
-                              )}
-                            </td>
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
-                  </div>
-                )}
+                {file.previewRows.length > 0 && (() => {
+                  const previewSheets = Array.from(new Set(file.previewRows.map((p) => p.sheetName)));
+                  const selectedSheetTab = previewSheetTabByFile[file.fileHash] || 'all';
+                  const visiblePreview =
+                    selectedSheetTab === 'all'
+                      ? file.previewRows.slice(0, 20)
+                      : file.previewRows.filter((p) => p.sheetName === selectedSheetTab).slice(0, 20);
+                  return (
+                    <div className="space-y-2.5">
+                      <div className="flex flex-wrap items-center justify-between gap-2">
+                        <span className="text-xs font-bold text-slate-800 dark:text-slate-200">
+                          معاينة الصفوف قبل الحفظ ({visiblePreview.length} من {file.previewRows.length})
+                        </span>
+                        {previewSheets.length > 1 && (
+                          <Tabs
+                            variant="segmented"
+                            activeKey={selectedSheetTab}
+                            onChange={(sn) =>
+                              setPreviewSheetTabByFile((prev) => ({ ...prev, [file.fileHash]: sn }))
+                            }
+                            items={[
+                              { key: 'all', label: 'الكل' },
+                              ...previewSheets.map((sn) => ({ key: sn, label: sn })),
+                            ]}
+                          />
+                        )}
+                      </div>
+                      <div className="overflow-x-auto rounded-lg border border-slate-200 dark:border-slate-800">
+                        <table className="w-full text-xs">
+                          <thead className="bg-slate-50 text-slate-600 dark:bg-slate-950 dark:text-slate-400">
+                            <tr>
+                              <th className="px-3 py-2 text-right font-semibold">الشيت</th>
+                              <th className="px-3 py-2 text-right font-semibold">معرف المندوب</th>
+                              <th className="px-3 py-2 text-right font-semibold">التاريخ / الفترة</th>
+                              <th className="px-3 py-2 text-right font-semibold">ملخص السجل</th>
+                              <th className="px-3 py-2 text-center font-semibold">الحالة</th>
+                            </tr>
+                          </thead>
+                          <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
+                            {visiblePreview.map((pr) => (
+                              <tr key={pr.recordKey} className="hover:bg-slate-50/70 dark:hover:bg-slate-800/40">
+                                <td className="px-3 py-2 text-slate-600 dark:text-slate-400">
+                                  {pr.sheetName}
+                                </td>
+                                <td className="px-3 py-2 font-mono-num font-semibold text-slate-900 dark:text-white">
+                                  {pr.riderId}
+                                </td>
+                                <td className="px-3 py-2 font-mono-num text-slate-700 dark:text-slate-300">
+                                  {pr.dateOrPeriod}
+                                </td>
+                                <td className="px-3 py-2 text-slate-700 dark:text-slate-300">
+                                  {pr.summaryText}
+                                </td>
+                                <td className="px-3 py-2 text-center">
+                                  {pr.changeStatus === 'new' ? (
+                                    <StatusBadge label="جديد" tone="success" />
+                                  ) : pr.changeStatus === 'update' ? (
+                                    <StatusBadge label="تحديث" tone="warning" />
+                                  ) : (
+                                    <StatusBadge label="مكرر" tone="neutral" />
+                                  )}
+                                </td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                    </div>
+                  );
+                })()}
               </div>
             );
           })}
-        </div>
+        </Card>
       )}
 
       {/* Import History */}
       <div className="space-y-3">
-        <h3 className="text-sm font-bold text-slate-900 dark:text-white">
-          سجل عمليات الاستيراد السابقة
-        </h3>
+        <SectionHeader
+          title={
+            lockedPlatform === 'hungerstation'
+              ? 'سجل عمليات استيراد HungerStation'
+              : lockedPlatform === 'keeta'
+                ? 'سجل عمليات استيراد Keeta'
+                : 'سجل عمليات الاستيراد السابقة'
+          }
+        />
         <DataTable
-          rows={importBatches}
+          rows={scopedBatches}
           columns={batchCols}
           rowKey={(r) => r.batchId}
           searchPlaceholder="ابحث باسم الملف أو البريد..."
           searchText={(r) => `${r.fileName} ${r.platform} ${r.importedByEmail || ''}`}
           emptyTitle="لا توجد عمليات استيراد مسجلة بعد"
-          emptySubtitle="ابدأ برفع ملف HungerStation أو Keeta أعلاه لبناء السجل التاريخي."
+          emptySubtitle={
+            lockedPlatform === 'hungerstation'
+              ? 'ابدأ برفع ملف HungerStation أعلاه لبناء السجل التاريخي.'
+              : lockedPlatform === 'keeta'
+                ? 'ابدأ برفع ملف Keeta أعلاه لبناء السجل التاريخي.'
+                : 'ابدأ برفع ملف HungerStation أو Keeta أعلاه لبناء السجل التاريخي.'
+          }
         />
       </div>
     </div>

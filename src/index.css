@@ -2,34 +2,61 @@
 @custom-variant dark (&:where(.dark, .dark *));
 
 :root {
+  /* 60% Neutral Canvas */
   --bg-canvas: #f8fafc;
   --bg-surface: #ffffff;
   --bg-elevated: #f1f5f9;
+  --bg-subtle-hover: #f8fafc;
+
+  /* 30% Structural Surfaces & Enterprise Navy */
+  --bg-sidebar: #0b1628;
+  --bg-sidebar-elevated: #13223a;
+  --border-sidebar: #1e2f4d;
   --border-subtle: #e2e8f0;
   --border-strong: #cbd5e1;
+
+  /* Typography Hierarchy */
   --text-primary: #0f172a;
   --text-secondary: #475569;
   --text-muted: #64748b;
-  --accent-navy: #0f172a;
-  --accent-navy-soft: #1e293b;
-  --accent-blue: #1d4ed8;
+
+  /* 10% Brand Navy & Calm Blue Accents */
+  --accent-navy: #0f1e36;
+  --accent-navy-hover: #172c4d;
+  --accent-blue: #2563eb;
+  --accent-blue-hover: #1d4ed8;
+  --accent-blue-soft: #eff6ff;
+  --focus-ring: rgba(37, 99, 235, 0.25);
+
+  /* Semantic Data States */
   --status-success: #15803d;
   --status-warning: #b45309;
   --status-danger: #b91c1c;
 }
 
 .dark {
-  --bg-canvas: #020617;
+  --bg-canvas: #060b16;
   --bg-surface: #0f172a;
   --bg-elevated: #1e293b;
+  --bg-subtle-hover: #162235;
+
+  --bg-sidebar: #070d19;
+  --bg-sidebar-elevated: #111c33;
+  --border-sidebar: #1b2842;
   --border-subtle: #1e293b;
   --border-strong: #334155;
+
   --text-primary: #f8fafc;
   --text-secondary: #cbd5e1;
   --text-muted: #94a3b8;
-  --accent-navy: #020617;
-  --accent-navy-soft: #1e293b;
-  --accent-blue: #60a5fa;
+
+  --accent-navy: #0f1e36;
+  --accent-navy-hover: #1e3256;
+  --accent-blue: #3b82f6;
+  --accent-blue-hover: #2563eb;
+  --accent-blue-soft: rgba(37, 99, 235, 0.14);
+  --focus-ring: rgba(59, 130, 246, 0.3);
+
   --status-success: #4ade80;
   --status-warning: #fbbf24;
   --status-danger: #f87171;
@@ -40,6 +67,9 @@
     font-family: "IBM Plex Sans Arabic", "Plus Jakarta Sans", system-ui, -apple-system, sans-serif;
     background-color: var(--bg-canvas);
     color: var(--text-primary);
+    font-size: 14px;
+    line-height: 1.55;
+    -webkit-font-smoothing: antialiased;
   }
 
   body {
@@ -48,14 +78,51 @@
     transition: background-color 150ms cubic-bezier(0.16, 1, 0.3, 1), color 150ms cubic-bezier(0.16, 1, 0.3, 1);
   }
 
+  button,
+  [role="button"] {
+    cursor: pointer;
+  }
+
+  button:disabled {
+    cursor: not-allowed;
+  }
+
   .font-mono-num {
-    font-family: "JetBrains Mono", monospace;
+    font-family: "JetBrains Mono", "IBM Plex Sans Arabic", monospace;
     font-variant-numeric: tabular-nums;
   }
 }
 
 .tabular-nums {
   font-variant-numeric: tabular-nums;
+}
+
+/* Subtle SaaS Scrollbar */
+.erp-scroll::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+.erp-scroll::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.erp-scroll::-webkit-scrollbar-thumb {
+  background-color: rgba(148, 163, 184, 0.35);
+  border-radius: 9999px;
+}
+
+.erp-scroll::-webkit-scrollbar-thumb:hover {
+  background-color: rgba(100, 116, 139, 0.55);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    transition-duration: 0.01ms !important;
+    animation-duration: 0.01ms !important;
+  }
 }
 
 @media print {
@@ -73,7 +140,7 @@
   user-select: none;
   background-color: #ffffff;
   border: 1px solid #cbd5e1;
-  border-radius: 8px;
+  border-radius: 10px;
   box-sizing: border-box;
   color: #0f172a;
   cursor: pointer;
