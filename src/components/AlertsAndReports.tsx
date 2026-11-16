@@ -1,8 +1,8 @@
-import { CloudUpload, Download, FileText, Printer, RotateCcw, Settings } from 'lucide-react';
+import { CloudUpload, Download, FileText, Image as ImageIcon, Printer, RotateCcw, Settings } from 'lucide-react';
 import { useEffect, useMemo, useState } from 'react';
 import { exportExcelInBrowser } from '../lib/clientExcelFallback';
 import { computeErrorCodeIntelligence, generateErrorIntelligenceAlerts } from '../lib/errorIntelligence';
-import { auth, getDriveAccessToken, refreshDriveTokenWithPopup } from '../lib/firebase';
+import { getActiveAuthToken, getDriveAccessToken, refreshDriveTokenWithPopup } from '../lib/firebase';
 import {
   buildUnifiedDailyRows,
   fmtNum,
@@ -13,6 +13,7 @@ import {
 } from '../lib/fleetAnalytics';
 import { generateKeetaIntelligenceAlerts } from '../lib/keetaIntelligence';
 import { exportArabicTableToPdf } from '../lib/pdfExport';
+import type { ReportImageKpi } from '../lib/reportImageExport';
 import { ApiHtmlFallbackError, safeParseJsonResponse } from '../lib/safeFetch';
 import {
   computeBranchScorecards,
@@ -48,6 +49,7 @@ import { ConfirmModal } from './ConfirmModal';
 import { CustomReportDesigner } from './CustomReportDesigner';
 import { DataTable, type TableColumn } from './DataTable';
 import { KpiCard } from './KpiCard';
+import { ReportImageShareModal } from './ReportImageShareModal';
 import {
   Button,
   Card,
@@ -451,6 +453,7 @@ export function ReportsExportsView({
 
   const [exportBusy, setExportBusy] = useState(false);
   const [driveConfirmOpen, setDriveConfirmOpen] = useState(false);
+  const [imageModalOpen, setImageModalOpen] = useState(false);
   const [exportMsg, setExportMsg] = useState<{ type: 'ok' | 'err'; text: string } | null>(null);
 
   useEffect(() => {
@@ -997,11 +1000,11 @@ export function ReportsExportsView({
   }, [availableReports, activeReportKind, reportRows, dataset, executiveSummary, errorIntel, effectivePlatformFilter, lockedPlatform, monthFilter, startDate, endDate, cityFilter, branchFilter, keetaActive, vehicles, vehicleAssignments, vehicleMaintenance, platformAccounts, privateDocs, auditLogs, settings]);
 
   const handleExportExcel = async (saveToDrive = false) => {
-    if (!auth.currentUser) return;
+    const idToken = await getActiveAuthToken();
+    if (!idToken) return;
     setExportBusy(true);
     setExportMsg(null);
     try {
-      const idToken = await auth.currentUser.getIdToken();
       let driveToken = getDriveAccessToken();
       if (saveToDrive && !driveToken) {
         driveToken = await refreshDriveTokenWithPopup();
@@ -1112,6 +1115,63 @@ export function ReportsExportsView({
     }
   };
 
+  const reportImageKpis: ReportImageKpi[] = useMemo(() => {
+    if (
+      activeReportKind === 'executive_report' ||
+      activeReportKind === 'daily_operations' ||
+      activeReportKind === 'monthly_performance' ||
+      activeReportKind === 'rider_ranking' ||
+      activeReportKind === 'branch_performance' ||
+      activeReportKind === 'supervisor_performance'
+    ) {
+      return [
+        { label: 'الطلبات المكتملة', value: fmtNum(executiveSummary.totalOrders), tone: 'good' },
+        { label: 'المندوبون النشطون', value: `${executiveSummary.activeRiders} / ${executiveSummary.totalRiders}` },
+        { label: 'ساعات العمل', value: fmtNum(executiveSummary.totalHours, 1) },
+        { label: 'متوسط الحضور', value: fmtPct(executiveSummary.avgAttendance) },
+        {
+          label: 'الأخطاء / المفتوحة',
+          value: `${executiveSummary.errorEventsCount} / ${executiveSummary.openCasesCount}`,
+          tone: executiveSummary.overdueCasesCount > 0 ? 'critical' : 'warn',
+        },
+      ];
+    }
+    if (activeReportKind === 'hr_riders_report') {
+      const activeCount = dataset.riderMaster.filter((r) => r.status === 'active').length;
+      return [
+        { label: 'إجمالي السجلات', value: fmtNum(reportPayload.rows.length) },
+        { label: 'على رأس العمل', value: fmtNum(activeCount), tone: 'good' },
+        { label: 'غير نشط / موقوف', value: fmtNum(Math.max(0, dataset.riderMaster.length - activeCount)), tone: 'warn' },
+      ];
+    }
+    if (activeReportKind === 'fleet_vehicles_report') {
+      const assigned = vehicles.filter((v) => v.status === 'assigned').length;
+      const available = vehicles.filter((v) => v.status === 'available').length;
+      const maint = vehicles.filter((v) => v.status === 'maintenance').length;
+      return [
+        { label: 'إجمالي المركبات', value: fmtNum(vehicles.length) },
+        { label: 'مسلمة للمندوبين', value: fmtNum(assigned), tone: 'good' },
+        { label: 'متاحة بالأسطول', value: fmtNum(available) },
+        { label: 'تحت الصيانة', value: fmtNum(maint), tone: maint > 0 ? 'warn' : 'neutral' },
+      ];
+    }
+    if (activeReportKind === 'maintenance_cost_report') {
+      const totalCost = vehicleMaintenance.reduce((s, m) => s + (m.cost ?? 0), 0);
+      return [
+        { label: 'عدد أوامر الصيانة', value: fmtNum(vehicleMaintenance.length) },
+        { label: 'إجمالي التكلفة (ر.س)', value: fmtNum(totalCost, 0), tone: 'warn' },
+      ];
+    }
+    return [];
+  }, [activeReportKind, executiveSummary, reportPayload.rows.length, dataset.riderMaster, vehicles, vehicleMaintenance]);
+
+  const reportPeriodLabel = useMemo(() => {
+    if (startDate || endDate) return `${startDate || 'البداية'} → ${endDate || 'الآن'}`;
+    if (monthFilter) return monthFilter;
+    if (executiveSummary.periodStart !== '-') return `${executiveSummary.periodStart} → ${executiveSummary.periodEnd}`;
+    return undefined;
+  }, [startDate, endDate, monthFilter, executiveSummary.periodStart, executiveSummary.periodEnd]);
+
   const tableCols: TableColumn<Record<string, unknown>>[] = reportPayload.columns.map((c) => ({
     key: c.key,
     header: c.header,
@@ -1172,6 +1232,14 @@ export function ReportsExportsView({
               </Button>
               <Button
                 variant="accent"
+                disabled={exportBusy || reportPayload.rows.length === 0}
+                onClick={() => setImageModalOpen(true)}
+                icon={<ImageIcon className="h-3.5 w-3.5" />}
+              >
+                صورة ومشاركة
+              </Button>
+              <Button
+                variant="secondary"
                 disabled={exportBusy || reportPayload.rows.length === 0}
                 onClick={() => setDriveConfirmOpen(true)}
                 icon={<CloudUpload className="h-3.5 w-3.5" />}
@@ -1420,6 +1488,20 @@ export function ReportsExportsView({
         busy={exportBusy}
         onConfirm={() => handleExportExcel(true)}
         onCancel={() => setDriveConfirmOpen(false)}
+      />
+
+      <ReportImageShareModal
+        open={imageModalOpen}
+        onClose={() => setImageModalOpen(false)}
+        title={reportPayload.def.label}
+        subtitle={reportPayload.def.note}
+        columns={reportPayload.columns}
+        rows={reportPayload.rows}
+        fileName={`${lockedPlatform === 'hungerstation' ? 'hs' : lockedPlatform === 'keeta' ? 'kt' : 'fleet'}_${activeReportKind}_${new Date().toISOString().slice(0, 10)}.png`}
+        branding={companyBranding}
+        preparer={currentUser?.displayName || currentUser?.email}
+        periodLabel={reportPeriodLabel}
+        kpis={reportImageKpis}
       />
         </>
       )}

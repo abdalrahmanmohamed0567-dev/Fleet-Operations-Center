@@ -1,5 +1,5 @@
-import { deleteDoc, doc, serverTimestamp, setDoc, updateDoc } from 'firebase/firestore';
-import { Layers, Plus, RefreshCw, Save, Trash2 } from 'lucide-react';
+import { deleteDoc, doc, serverTimestamp, setDoc, updateDoc } from '../lib/erpDb';
+import { Plus, RefreshCw, Save, Trash2 } from 'lucide-react';
 import { useMemo, useState } from 'react';
 import {
   buildEffectiveFormSchema,
@@ -112,8 +112,8 @@ export function CustomPageModule({
 
   const openEdit = (rec: CustomEntityRecord) => {
     setEditingRecord(rec);
-    setTitleAr(rec.titleAr || '');
-    setRecordStatus(rec.status || 'active');
+    setTitleAr(rec.title || '');
+    setRecordStatus(rec.status === 'draft' || rec.status === 'archived' ? rec.status : 'active');
     setCustomValues(rec.customFields ? { ...rec.customFields } : {});
     setCustomErrors({});
     setDrawerOpen(true);
@@ -147,10 +147,12 @@ export function CustomPageModule({
         recordId,
         pageId: page.pageId,
         formId,
-        titleAr: titleAr.trim().slice(0, 180),
+        title: titleAr.trim().slice(0, 200),
         status: recordStatus,
         customFields: cleanCustom,
         createdByUid: editingRecord?.createdByUid || currentUser.uid,
+        createdByEmail: editingRecord?.createdByEmail || currentUser.email,
+        ...(editingRecord ? { updatedByEmail: currentUser.email } : {}),
         allowedUids: teamAllowed.length > 0 ? teamAllowed : [currentUser.uid],
         updatedAt: serverTimestamp(),
       };
@@ -192,19 +194,17 @@ export function CustomPageModule({
       const trashId = `trash_crec_${deleteTarget.recordId}_${Date.now().toString(36)}`;
       await setDoc(doc(db, 'trashItems', trashId), {
         trashId,
+        itemType: 'custom_record',
         sourceCollection: 'customEntityRecords',
         sourceDocId: deleteTarget.recordId,
-        entityType: page.pageId,
-        titleAr: `${page.titleAr}: ${deleteTarget.titleAr || deleteTarget.recordId}`,
-        snapshot: JSON.parse(JSON.stringify(deleteTarget)),
+        titleAr: `${page.titleAr}: ${deleteTarget.title || deleteTarget.recordId}`,
+        snapshotJson: JSON.stringify(deleteTarget),
         deletedByUid: currentUser.uid,
         deletedByEmail: currentUser.email,
-        deletedAt: new Date().toISOString(),
         status: 'deleted',
         createdByUid: currentUser.uid,
         allowedUids: teamAllowed.length > 0 ? teamAllowed : [currentUser.uid],
         createdAt: serverTimestamp(),
-        updatedAt: serverTimestamp(),
       });
       await deleteDoc(doc(db, 'customEntityRecords', deleteTarget.recordId));
       await writeErpAuditLog({
@@ -212,7 +212,7 @@ export function CustomPageModule({
         targetCollection: 'customEntityRecords',
         targetId: deleteTarget.recordId,
         entityType: page.pageId,
-        details: `نقل السجل "${deleteTarget.titleAr}" من صفحة "${page.titleAr}" إلى سلة المحذوفات`,
+        details: `نقل السجل "${deleteTarget.title}" من صفحة "${page.titleAr}" إلى سلة المحذوفات`,
         user: currentUser,
         allowedUids,
       });
@@ -227,22 +227,22 @@ export function CustomPageModule({
   };
 
   const visibleTableFields = useMemo(() => {
-    const allowedSet = page.visibleTableColumns?.length ? new Set(page.visibleTableColumns) : null;
+    const allowedSet = page.tableColumns?.length ? new Set(page.tableColumns) : null;
     return dynamicFields
       .filter((f) => f.formId === formId && !f.archived && canViewDynamicField(f, currentUser))
       .filter((f) => (allowedSet ? allowedSet.has(f.key) : f.showInTable !== false))
       .sort((a, b) => (a.order ?? 0) - (b.order ?? 0))
       .slice(0, 8);
-  }, [dynamicFields, formId, page.visibleTableColumns, currentUser]);
+  }, [dynamicFields, formId, page.tableColumns, currentUser]);
 
   const columns: TableColumn<CustomEntityRecord>[] = [
     {
       key: 'title',
       header: 'العنوان / السجل',
-      sortValue: (r) => r.titleAr || r.recordId,
+      sortValue: (r) => r.title || r.recordId,
       render: (r) => (
         <div>
-          <div className="font-semibold text-slate-900 dark:text-slate-100">{r.titleAr || 'بدون عنوان'}</div>
+          <div className="font-semibold text-slate-900 dark:text-slate-100">{r.title || 'بدون عنوان'}</div>
           <div className="font-mono-num text-[11px] text-slate-500">{r.recordId}</div>
         </div>
       ),
@@ -299,7 +299,7 @@ export function CustomPageModule({
     <div className="space-y-5">
       <PageHeader
         title={page.titleAr}
-        subtitle={page.descriptionAr || `${page.titleEn} · وحدة إدارية مخصصة من منشئ النظام`}
+        subtitle={page.description || `${page.titleEn} · وحدة إدارية مخصصة من منشئ النظام`}
         actions={
           <>
             {canEdit && (
@@ -321,7 +321,7 @@ export function CustomPageModule({
       {toast && <ToastBanner type={toast.type} message={toast.msg} onDismiss={() => setToast(null)} />}
 
       <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
-        <KpiCard label="إجمالي السجلات" value={String(allPageRecordsCount)} icon={<Layers className="h-4 w-4 text-blue-600" />} />
+        <KpiCard label="إجمالي السجلات" value={String(allPageRecordsCount)} />
         <KpiCard
           label="السجلات النشطة"
           value={String(records.filter((r) => r.pageId === page.pageId && (r.status || 'active') === 'active').length)}
@@ -345,12 +345,13 @@ export function CustomPageModule({
       />
 
       <DataTable
+        tableId={`custom_page_${page.pageId}`}
         rows={pageRecords}
         columns={columns}
         rowKey={(r) => r.recordId}
         onRowClick={canEdit ? openEdit : undefined}
         searchPlaceholder="ابحث بالعنوان أو قيم الحقول المخصصة..."
-        searchText={(r) => `${r.recordId} ${r.titleAr || ''} ${Object.values(r.customFields || {}).join(' ')}`}
+        searchText={(r) => `${r.recordId} ${r.title || ''} ${Object.values(r.customFields || {}).join(' ')}`}
         emptyTitle="لا توجد سجلات بعد في هذه الصفحة"
         emptySubtitle="استخدم زر «إضافة سجل جديد» لإدخال البيانات أو أضف حقولًا لهذا النموذج من مركز التحكم والتخصيص."
         toolbarExtra={
@@ -371,7 +372,7 @@ export function CustomPageModule({
         open={drawerOpen}
         onClose={() => setDrawerOpen(false)}
         size="lg"
-        title={editingRecord ? `تعديل: ${editingRecord.titleAr}` : `إضافة سجل — ${page.titleAr}`}
+        title={editingRecord ? `تعديل: ${editingRecord.title}` : `إضافة سجل — ${page.titleAr}`}
         subtitle="يتم التحقق تلقائيًا من قواعد الإلزام والصيغ والبيانات حسب إعدادات منشئ النظام"
         footer={
           <>
@@ -424,7 +425,7 @@ export function CustomPageModule({
       <ConfirmModal
         open={Boolean(deleteTarget)}
         title="نقل السجل إلى سلة المحذوفات"
-        description={`سيتم نقل السجل "${deleteTarget?.titleAr || ''}" إلى سلة المحذوفات ويمكن استعادته لاحقًا من مركز التحكم.`}
+        description={`سيتم نقل السجل "${deleteTarget?.title || ''}" إلى سلة المحذوفات ويمكن استعادته لاحقًا من مركز التحكم.`}
         danger
         busy={busy}
         onCancel={() => setDeleteTarget(null)}

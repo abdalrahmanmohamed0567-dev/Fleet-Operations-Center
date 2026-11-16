@@ -1,42 +1,64 @@
-import { initializeApp } from 'firebase/app';
-import {
-  getAuth,
-  GoogleAuthProvider,
-  onAuthStateChanged,
-  signInWithPopup,
-  signOut,
-  type User,
-} from 'firebase/auth';
+import type { OperationalSettings, UserProfile } from '../types/fleet';
 import {
   doc,
+  erpDbClient,
   getDoc,
-  getDocFromServer,
-  getFirestore,
+  readStoredSessionToken,
   serverTimestamp,
   setDoc,
-} from 'firebase/firestore';
-import firebaseConfig from '../../firebase-applet-config.json';
-import type { OperationalSettings, UserProfile } from '../types/fleet';
+  writeStoredSessionToken,
+} from './erpDb';
+import { safeParseJsonResponse } from './safeFetch';
 
 export const DRIVE_SCOPES = [
   'https://www.googleapis.com/auth/drive.readonly',
   'https://www.googleapis.com/auth/drive.file',
 ];
 
-const typedFirebaseConfig = firebaseConfig as typeof firebaseConfig & { firestoreDatabaseId?: string };
-const app = initializeApp(typedFirebaseConfig);
-export const db = getFirestore(app, typedFirebaseConfig.firestoreDatabaseId || '(default)');
-export const auth = getAuth(app);
+export const db = erpDbClient;
 
-const provider = new GoogleAuthProvider();
-for (const scope of DRIVE_SCOPES) {
-  provider.addScope(scope);
-}
-provider.setCustomParameters({ prompt: 'select_account' });
+// Retained lightweight auth handle for backward compatibility; session state is managed via server session tokens
+export const auth: {
+  currentUser: {
+    uid: string;
+    email: string;
+    getIdToken: () => Promise<string>;
+  } | null;
+} = {
+  currentUser: null,
+};
 
-// Strict in-memory token cache (never localStorage/sessionStorage)
 let cachedDriveAccessToken: string | null = null;
-let isSigningIn = false;
+let cachedSessionProfile: UserProfile | null = null;
+
+export function syncAuthHandle(profile: UserProfile | null): void {
+  cachedSessionProfile = profile;
+  if (!profile) {
+    auth.currentUser = null;
+  } else {
+    auth.currentUser = {
+      uid: profile.uid,
+      email: profile.email,
+      getIdToken: async () => {
+        const tok = readStoredSessionToken();
+        if (!tok) throw new Error('انتهت جلسة تسجيل الدخول.');
+        return tok;
+      },
+    };
+  }
+}
+
+export function getSessionToken(): string | null {
+  return readStoredSessionToken();
+}
+
+export function setSessionToken(token: string | null): void {
+  writeStoredSessionToken(token);
+}
+
+export async function getActiveAuthToken(): Promise<string | null> {
+  return readStoredSessionToken();
+}
 
 export enum OperationType {
   CREATE = 'create',
@@ -54,10 +76,6 @@ interface FirestoreErrorInfo {
   authInfo: {
     userId?: string | null;
     email?: string | null;
-    emailVerified?: boolean | null;
-    isAnonymous?: boolean | null;
-    tenantId?: string | null;
-    providerInfo?: Array<{ providerId?: string | null; email?: string | null }>;
   };
 }
 
@@ -69,72 +87,81 @@ export function handleFirestoreError(
   const errInfo: FirestoreErrorInfo = {
     error: error instanceof Error ? error.message : String(error),
     authInfo: {
-      userId: auth.currentUser?.uid,
-      email: auth.currentUser?.email,
-      emailVerified: auth.currentUser?.emailVerified,
-      isAnonymous: auth.currentUser?.isAnonymous,
-      tenantId: auth.currentUser?.tenantId,
-      providerInfo:
-        auth.currentUser?.providerData?.map((p) => ({
-          providerId: p.providerId,
-          email: p.email,
-        })) || [],
+      userId: cachedSessionProfile?.uid || auth.currentUser?.uid || null,
+      email: cachedSessionProfile?.email || auth.currentUser?.email || null,
     },
     operationType,
     path,
   };
-  console.error('Firestore Error: ', JSON.stringify(errInfo));
-  throw new Error(JSON.stringify(errInfo));
+  console.error('Database Error: ', JSON.stringify(errInfo));
+  throw new Error(error instanceof Error ? error.message : JSON.stringify(errInfo));
 }
-
-async function testConnection() {
-  try {
-    await getDocFromServer(doc(db, 'test', 'connection'));
-  } catch (error) {
-    if (error instanceof Error && error.message.includes('the client is offline')) {
-      console.error('Please check your Firebase configuration.');
-    }
-  }
-}
-void testConnection();
 
 export function getDriveAccessToken(): string | null {
   return cachedDriveAccessToken;
 }
 
-export function isSigningInNow(): boolean {
-  return isSigningIn;
+export async function refreshDriveTokenWithPopup(): Promise<string | null> {
+  return cachedDriveAccessToken;
 }
 
-export async function signInWithGoogle(): Promise<{ user: User; driveAccessToken: string | null }> {
+export async function loginWithPhonePassword(
+  phone: string,
+  password: string
+): Promise<{ token: string; profile: UserProfile }> {
+  const res = await fetch('/api/auth/login', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ phone, password }),
+  });
+  const json = await safeParseJsonResponse<{ ok?: boolean; token?: string; profile?: UserProfile; error?: string }>(res);
+  if (!res.ok || !json.token || !json.profile) {
+    throw new Error(json.error || 'رقم الجوال أو كلمة المرور غير صحيحة.');
+  }
+  writeStoredSessionToken(json.token);
+  syncAuthHandle(json.profile);
+  return { token: json.token, profile: json.profile };
+}
+
+export async function fetchCurrentSessionProfile(): Promise<UserProfile | null> {
+  const token = readStoredSessionToken();
+  if (!token) {
+    syncAuthHandle(null);
+    return null;
+  }
   try {
-    isSigningIn = true;
-    const result = await signInWithPopup(auth, provider);
-    const credential = GoogleAuthProvider.credentialFromResult(result);
-    cachedDriveAccessToken = credential?.accessToken ?? null;
-    return { user: result.user, driveAccessToken: cachedDriveAccessToken };
-  } finally {
-    isSigningIn = false;
+    const res = await fetch('/api/auth/me', {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    if (!res.ok) {
+      writeStoredSessionToken(null);
+      syncAuthHandle(null);
+      return null;
+    }
+    const json = await safeParseJsonResponse<{ ok?: boolean; profile?: UserProfile }>(res);
+    if (!json.profile) {
+      writeStoredSessionToken(null);
+      syncAuthHandle(null);
+      return null;
+    }
+    syncAuthHandle(json.profile);
+    return json.profile;
+  } catch {
+    return null;
   }
 }
 
-export async function refreshDriveTokenWithPopup(): Promise<string | null> {
-  const { driveAccessToken } = await signInWithGoogle();
-  return driveAccessToken;
-}
-
 export async function logoutUser(): Promise<void> {
+  const token = readStoredSessionToken();
   cachedDriveAccessToken = null;
-  await signOut(auth);
-}
-
-export function subscribeAuth(cb: (user: User | null) => void) {
-  return onAuthStateChanged(auth, (user) => {
-    if (!user) {
-      cachedDriveAccessToken = null;
-    }
-    cb(user);
-  });
+  writeStoredSessionToken(null);
+  syncAuthHandle(null);
+  if (token) {
+    await fetch('/api/auth/logout', {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${token}` },
+    }).catch(() => {});
+  }
 }
 
 export const BOOTSTRAPPED_OWNER_EMAIL = 'abdalrahmanmohamed0567@gmail.com';
@@ -158,48 +185,6 @@ export function canAccessGlobalHub(profile: UserProfile | null | undefined): boo
     return platforms.includes('hungerstation') && platforms.includes('keeta');
   }
   return false;
-}
-
-export async function ensureUserProfile(user: User): Promise<UserProfile> {
-  const path = `users/${user.uid}`;
-  const ref = doc(db, 'users', user.uid);
-  let snap;
-  try {
-    snap = await getDoc(ref);
-  } catch (error) {
-    handleFirestoreError(error, OperationType.GET, path);
-  }
-
-  if (snap.exists()) {
-    return snap.data() as UserProfile;
-  }
-
-  const isOwner =
-    user.emailVerified &&
-    (user.email || '').trim().toLowerCase() === BOOTSTRAPPED_OWNER_EMAIL;
-
-  const email = (user.email || '').trim().slice(0, 200);
-  const rawName = (user.displayName || email.split('@')[0] || 'مستخدم').trim();
-  const displayName = (rawName || 'مستخدم').slice(0, 120);
-
-  const profilePayload = {
-    uid: user.uid,
-    email,
-    displayName,
-    role: isOwner ? 'owner' : 'viewer',
-    active: isOwner ? true : false,
-    allowedPlatforms: ['hungerstation', 'keeta'],
-    createdAt: serverTimestamp(),
-    updatedAt: serverTimestamp(),
-  };
-
-  try {
-    await setDoc(ref, profilePayload);
-    const createdSnap = await getDoc(ref);
-    return createdSnap.data() as UserProfile;
-  } catch (error) {
-    handleFirestoreError(error, OperationType.CREATE, path);
-  }
 }
 
 export const DEFAULT_OPERATIONAL_SETTINGS: Omit<OperationalSettings, 'createdByUid' | 'allowedUids' | 'updatedAt'> = {
@@ -293,7 +278,7 @@ export async function ensureOperationalSettings(
   }
 
   if (snap.exists()) {
-    return hydrateOperationalSettings(snap.data() as OperationalSettings);
+    return hydrateOperationalSettings(snap.data() as Partial<OperationalSettings>);
   }
 
   if (!canCreate) {
@@ -315,7 +300,7 @@ export async function ensureOperationalSettings(
   try {
     await setDoc(ref, payload);
     const created = await getDoc(ref);
-    return hydrateOperationalSettings(created.data() as OperationalSettings);
+    return hydrateOperationalSettings((created.data() || payload) as Partial<OperationalSettings>);
   } catch (error) {
     handleFirestoreError(error, OperationType.CREATE, path);
   }
@@ -331,4 +316,3 @@ export const DEFAULT_DOCUMENT_TYPES = [
   { typeId: 'vehicle_inspection', nameAr: 'الفحص الدوري', nameEn: 'Periodic Inspection', targetEntity: 'vehicle' as const, requiresExpiry: true, isDefault: true, active: true },
   { typeId: 'handover_photo', nameAr: 'صور تسليم/استلام العهدة', nameEn: 'Handover Photo', targetEntity: 'handover' as const, requiresExpiry: false, isDefault: true, active: true },
 ];
-

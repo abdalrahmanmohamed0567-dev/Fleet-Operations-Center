@@ -5,19 +5,23 @@ import {
   Award,
   BarChart3,
   Bell,
+  Building2,
   CalendarCheck,
   Car,
   ChevronDown,
   ChevronLeft,
   ChevronRight,
   Clock,
+  DatabaseBackup,
   FileCheck2,
   FileSearch,
   FileSpreadsheet,
   FolderLock,
   Globe,
   Home,
+  Info,
   KeyRound,
+  Layers,
   LayoutDashboard,
   Link2,
   LogOut,
@@ -28,6 +32,7 @@ import {
   ScanFace,
   Search,
   Settings,
+  Sliders,
   SlidersHorizontal,
   Smartphone,
   Sun,
@@ -39,14 +44,17 @@ import {
   Wrench,
   X,
 } from 'lucide-react';
-import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
+import { useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from 'react';
+import { DEFAULT_COMPANY_BRANDING, DEFAULT_SYSTEM_SECTIONS } from '../lib/dynamicSchemaEngine';
 import { computeAllDocumentExpiries } from '../lib/erpHelpers';
 import { computeErrorCodeIntelligence, generateErrorIntelligenceAlerts } from '../lib/errorIntelligence';
 import { generateOperationalAlerts, type FleetDataset } from '../lib/fleetAnalytics';
-import { hasPermission, isKeetaActive, mapLegacyRoleToTemplateId } from '../shared/rbacCore';
+import { hasCapability, hasPermission, isKeetaActive, mapLegacyRoleToTemplateId } from '../shared/rbacCore';
 import type {
+  CompanyBrandingDoc,
   ErrorCodeDictionaryEntry,
   FilterState,
+  NotificationRuleConfig,
   OperationalCase,
   OperationalSettings,
   PermissionAction,
@@ -57,6 +65,8 @@ import type {
   PrivateDocumentRecord,
   RiderErrorCase,
   RoleTemplate,
+  SystemPageConfig,
+  SystemSectionConfig,
   UserProfile,
   UserRole,
   VehicleMaster,
@@ -99,16 +109,22 @@ export type NavKey =
   | 'import'
   // التقارير والتحليلات
   | 'reports'
-  // إدارة النظام
+  // إدارة النظام والتخصيص
   | 'settings'
+  | 'company_branding'
+  | 'about_credits'
+  | 'system_builder'
+  | 'system_backup_reset'
   | 'rbac_users'
   | 'rbac_roles'
-  | 'rbac_audit';
+  | 'rbac_audit'
+  | `custom_page_${string}`;
 
 export interface NavItemDef {
   key: NavKey;
   label: string;
   group: string;
+  sectionId?: string;
   icon: typeof LayoutDashboard;
   module?: PermissionModule;
   action?: PermissionAction;
@@ -122,6 +138,8 @@ export function getNavItemsForWorkspace(
     settings?: OperationalSettings | null;
     platformCatalog?: PlatformCatalogEntry[];
     allowedPlatforms?: Platform[];
+    systemSections?: SystemSectionConfig[];
+    systemPages?: SystemPageConfig[];
   }
 ): NavItemDef[] {
   const user = options?.userProfile;
@@ -136,10 +154,8 @@ export function getNavItemsForWorkspace(
     return hasPermission(user, templates, mod, act);
   };
 
-  let raw: NavItemDef[];
-
   if (workspaceMode === 'hungerstation') {
-    raw = [
+    const raw: NavItemDef[] = [
       { key: 'hungerstation', label: 'لوحة تحكم HungerStation', group: 'القيادة والتحكم', icon: Truck, module: 'operations' },
       { key: 'operations', label: 'التحكم والحالات', group: 'القيادة والتحكم', icon: SlidersHorizontal, module: 'operations' },
       { key: 'alerts', label: 'تنبيهات HungerStation', group: 'القيادة والتحكم', icon: Bell, module: 'alerts' },
@@ -153,8 +169,11 @@ export function getNavItemsForWorkspace(
       { key: 'reports', label: 'تقارير HungerStation', group: 'البيانات والتقارير', icon: FileSpreadsheet, module: 'reports' },
       { key: 'import', label: 'مركز استيراد هنقر', group: 'البيانات والتقارير', icon: Upload, module: 'operations', action: 'add' },
     ];
-  } else if (workspaceMode === 'keeta' && keetaActive) {
-    raw = [
+    return raw.filter((item) => can(item.module, item.action || 'view'));
+  }
+
+  if (workspaceMode === 'keeta' && keetaActive) {
+    const raw: NavItemDef[] = [
       { key: 'keeta', label: 'لوحة تحكم Keeta', group: 'القيادة والتحكم', icon: Activity, module: 'operations' },
       { key: 'operations', label: 'التحكم والحالات', group: 'القيادة والتحكم', icon: SlidersHorizontal, module: 'operations' },
       { key: 'alerts', label: 'تنبيهات Keeta', group: 'القيادة والتحكم', icon: Bell, module: 'alerts' },
@@ -168,72 +187,161 @@ export function getNavItemsForWorkspace(
       { key: 'reports', label: 'تقارير Keeta', group: 'البيانات والتقارير', icon: FileSpreadsheet, module: 'reports' },
       { key: 'import', label: 'مركز استيراد كيتا', group: 'البيانات والتقارير', icon: Upload, module: 'operations', action: 'add' },
     ];
-  } else {
-    raw = [
-      // 1. الرئيسية
-      { key: 'executive_admin', label: 'الإدارة والتحكم التنفيذي', group: 'الرئيسية', icon: LayoutDashboard, module: 'executive' },
-      {
-        key: 'overview',
-        label: keetaActive ? 'الملخص التنفيذي ومقارنة المنصتين' : 'الملخص التنفيذي للعمليات',
-        group: 'الرئيسية',
-        icon: Globe,
-        module: 'executive',
-      },
-      { key: 'alerts', label: 'التنبيهات وانتهاء الوثائق', group: 'الرئيسية', icon: Bell, module: 'alerts' },
-
-      // 2. الموارد البشرية HR
-      { key: 'hr_dashboard', label: 'لوحة الموارد البشرية', group: 'الموارد البشرية HR', icon: Users, module: 'hr' },
-      { key: 'hr_riders', label: 'ملفات المندوبين', group: 'الموارد البشرية HR', icon: UserCheck, module: 'hr' },
-      { key: 'hr_docs', label: 'خزينة المستندات الخاصة', group: 'الموارد البشرية HR', icon: FolderLock, module: 'documents' },
-      { key: 'hr_expiries', label: 'متابعة انتهاء الإقامات والرخص', group: 'الموارد البشرية HR', icon: FileCheck2, module: 'hr' },
-      { key: 'hr_status', label: 'حالات المندوبين وسجل الحركة', group: 'الموارد البشرية HR', icon: Activity, module: 'hr' },
-
-      // 3. التطبيقات والمنصات
-      { key: 'apps_active', label: 'المنصات المفعلة والحسابات', group: 'التطبيقات والمنصات', icon: Smartphone, module: 'applications' },
-      { key: 'apps_accounts', label: 'حسابات المناديب بالتطبيقات', group: 'التطبيقات والمنصات', icon: Users, module: 'applications' },
-      { key: 'apps_linking', label: 'محرك الربط وتعارض المعرفات', group: 'التطبيقات والمنصات', icon: Link2, module: 'applications' },
-      ...(allowHs
-        ? [
-            { key: 'hungerstation' as NavKey, label: 'عمليات HungerStation', group: 'التطبيقات والمنصات', icon: Truck, module: 'operations' as PermissionModule },
-            { key: 'error_intel' as NavKey, label: 'مركز أكواد الأخطاء (HS)', group: 'التطبيقات والمنصات', icon: AlertTriangle, module: 'operations' as PermissionModule },
-          ]
-        : []),
-      ...(allowKt
-        ? [{ key: 'keeta' as NavKey, label: 'عمليات Keeta', group: 'التطبيقات والمنصات', icon: Activity, module: 'operations' as PermissionModule }]
-        : []),
-
-      // 4. الأسطول والمركبات
-      { key: 'fleet_dashboard', label: 'لوحة تحكم الأسطول', group: 'الأسطول والمركبات', icon: Car, module: 'fleet' },
-      { key: 'fleet_vehicles', label: 'سجل المركبات والسيارات', group: 'الأسطول والمركبات', icon: Truck, module: 'fleet' },
-      { key: 'fleet_handover', label: 'عهدة التسليم والاستلام', group: 'الأسطول والمركبات', icon: ArrowLeftRight, module: 'fleet' },
-      { key: 'fleet_docs', label: 'وثائق المركبات والانتهاء', group: 'الأسطول والمركبات', icon: FolderLock, module: 'fleet' },
-      { key: 'fleet_maintenance', label: 'سجل الصيانة والأعطال', group: 'الأسطول والمركبات', icon: Wrench, module: 'fleet' },
-
-      // 5. العمليات
-      { key: 'operations', label: 'التحكم والحالات التشغيلية', group: 'العمليات', icon: SlidersHorizontal, module: 'operations' },
-      { key: 'riders', label: 'ملفات المناديب 360° والربط', group: 'العمليات', icon: Users, module: 'operations' },
-      { key: 'daily_ops', label: 'العمليات اليومية', group: 'العمليات', icon: Clock, module: 'operations' },
-      { key: 'rider_perf', label: 'تقييم أداء المندوبين', group: 'العمليات', icon: BarChart3, module: 'operations' },
-      { key: 'attendance', label: 'الحضور والالتزام', group: 'العمليات', icon: CalendarCheck, module: 'operations' },
-      { key: 'distance_wallet', label: 'المسافات والمحافظ', group: 'العمليات', icon: MapPin, module: 'operations' },
-      { key: 'quality', label: 'جودة التسليم الشهرية', group: 'العمليات', icon: Award, module: 'operations' },
-      ...(allowKt
-        ? [{ key: 'facial' as NavKey, label: 'التحقق من الهوية (Keeta)', group: 'العمليات', icon: ScanFace, module: 'operations' as PermissionModule }]
-        : []),
-      { key: 'import', label: 'مركز استيراد Excel', group: 'العمليات', icon: Upload, module: 'operations', action: 'add' },
-
-      // 6. التقارير والتحليلات
-      { key: 'reports', label: 'مركز التقارير الشاملة والتصدير', group: 'التقارير والتحليلات', icon: FileSpreadsheet, module: 'reports' },
-
-      // 7. إدارة النظام
-      { key: 'settings', label: 'إعدادات النظام والمنصات', group: 'إدارة النظام', icon: Settings, module: 'settings' },
-      { key: 'rbac_users', label: 'المستخدمون ونطاق البيانات', group: 'إدارة النظام', icon: Users, module: 'users' },
-      { key: 'rbac_roles', label: 'مصفوفة الصلاحيات والأدوار', group: 'إدارة النظام', icon: KeyRound, module: 'roles' },
-      { key: 'rbac_audit', label: 'سجل النشاط والتدقيق المركزي', group: 'إدارة النظام', icon: FileSearch, module: 'audit' },
-    ];
+    return raw.filter((item) => can(item.module, item.action || 'view'));
   }
 
-  return raw.filter((item) => can(item.module, item.action || 'view'));
+  // Global ERP Mode — supports SystemSections customization & Custom SystemPages
+  const sectionMap = new Map<string, SystemSectionConfig>();
+  for (const def of DEFAULT_SYSTEM_SECTIONS) {
+    sectionMap.set(def.sectionId, { ...def, createdByUid: '', allowedUids: [] });
+  }
+  for (const customSec of options?.systemSections || []) {
+    if (!customSec.archived) {
+      sectionMap.set(customSec.sectionId, customSec);
+    } else {
+      sectionMap.delete(customSec.sectionId);
+    }
+  }
+
+  const userRoleId = user ? user.customRoleId || mapLegacyRoleToTemplateId(user.role) : 'super_admin';
+  const isOwnerOrSuper = !user || user.role === 'owner' || userRoleId === 'super_admin';
+
+  const isSectionAllowed = (sec?: SystemSectionConfig) => {
+    if (!sec) return true;
+    if (sec.visible === false && sec.sectionId !== 'builder') return false;
+    if (sec.allowedRoles && sec.allowedRoles.length > 0 && !isOwnerOrSuper) {
+      if (!sec.allowedRoles.includes(userRoleId) && !sec.allowedRoles.includes(user?.role || '')) {
+        return false;
+      }
+    }
+    return true;
+  };
+
+  const titleFor = (sectionId: string, fallback: string) => sectionMap.get(sectionId)?.titleAr || fallback;
+
+  const canSeeBranding =
+    can('branding', 'view') ||
+    can('company', 'view') ||
+    (user ? hasCapability(user, templates, 'change_branding') || hasCapability(user, templates, 'manage_company') : true);
+
+  const canSeeBuilder =
+    can('builder', 'view') ||
+    (user
+      ? hasCapability(user, templates, 'manage_forms') ||
+        hasCapability(user, templates, 'create_fields') ||
+        hasCapability(user, templates, 'manage_sections')
+      : true);
+
+  const builtInItems: NavItemDef[] = [
+    // 1. الإدارة العليا
+    { key: 'executive_admin', label: 'الإدارة والتحكم التنفيذي', sectionId: 'executive', group: titleFor('executive', 'الإدارة العليا'), icon: LayoutDashboard, module: 'executive' },
+    {
+      key: 'overview',
+      label: keetaActive ? 'الملخص التنفيذي ومقارنة المنصتين' : 'الملخص التنفيذي للعمليات',
+      sectionId: 'executive',
+      group: titleFor('executive', 'الإدارة العليا'),
+      icon: Globe,
+      module: 'executive',
+    },
+    { key: 'alerts', label: 'التنبيهات وانتهاء الوثائق', sectionId: 'executive', group: titleFor('executive', 'الإدارة العليا'), icon: Bell, module: 'alerts' },
+
+    // 2. الموارد البشرية
+    { key: 'hr_dashboard', label: 'لوحة الموارد البشرية', sectionId: 'hr', group: titleFor('hr', 'الموارد البشرية'), icon: Users, module: 'hr' },
+    { key: 'hr_riders', label: 'ملفات المندوبين', sectionId: 'hr', group: titleFor('hr', 'الموارد البشرية'), icon: UserCheck, module: 'hr' },
+    { key: 'hr_docs', label: 'خزينة المستندات الخاصة', sectionId: 'hr', group: titleFor('hr', 'الموارد البشرية'), icon: FolderLock, module: 'documents' },
+    { key: 'hr_expiries', label: 'متابعة انتهاء الإقامات والرخص', sectionId: 'hr', group: titleFor('hr', 'الموارد البشرية'), icon: FileCheck2, module: 'hr' },
+    { key: 'hr_status', label: 'حالات المندوبين وسجل الحركة', sectionId: 'hr', group: titleFor('hr', 'الموارد البشرية'), icon: Activity, module: 'hr' },
+
+    // 3. التطبيقات والمنصات
+    { key: 'apps_active', label: 'المنصات المفعلة والحسابات', sectionId: 'applications', group: titleFor('applications', 'التطبيقات والمنصات'), icon: Smartphone, module: 'applications' },
+    { key: 'apps_accounts', label: 'حسابات المناديب بالتطبيقات', sectionId: 'applications', group: titleFor('applications', 'التطبيقات والمنصات'), icon: Users, module: 'applications' },
+    { key: 'apps_linking', label: 'محرك الربط وتعارض المعرفات', sectionId: 'applications', group: titleFor('applications', 'التطبيقات والمنصات'), icon: Link2, module: 'applications' },
+    ...(allowHs
+      ? [
+          { key: 'hungerstation' as NavKey, label: 'عمليات HungerStation', sectionId: 'applications', group: titleFor('applications', 'التطبيقات والمنصات'), icon: Truck, module: 'operations' as PermissionModule },
+          { key: 'error_intel' as NavKey, label: 'مركز أكواد الأخطاء (HS)', sectionId: 'applications', group: titleFor('applications', 'التطبيقات والمنصات'), icon: AlertTriangle, module: 'operations' as PermissionModule },
+        ]
+      : []),
+    ...(allowKt
+      ? [{ key: 'keeta' as NavKey, label: 'عمليات Keeta', sectionId: 'applications', group: titleFor('applications', 'التطبيقات والمنصات'), icon: Activity, module: 'operations' as PermissionModule }]
+      : []),
+
+    // 4. الأسطول
+    { key: 'fleet_dashboard', label: 'لوحة تحكم الأسطول', sectionId: 'fleet', group: titleFor('fleet', 'إدارة الأسطول'), icon: Car, module: 'fleet' },
+    { key: 'fleet_vehicles', label: 'سجل المركبات والسيارات', sectionId: 'fleet', group: titleFor('fleet', 'إدارة الأسطول'), icon: Truck, module: 'fleet' },
+    { key: 'fleet_handover', label: 'عهدة التسليم والاستلام', sectionId: 'fleet', group: titleFor('fleet', 'إدارة الأسطول'), icon: ArrowLeftRight, module: 'fleet' },
+    { key: 'fleet_docs', label: 'وثائق المركبات والانتهاء', sectionId: 'fleet', group: titleFor('fleet', 'إدارة الأسطول'), icon: FolderLock, module: 'fleet' },
+    { key: 'fleet_maintenance', label: 'سجل الصيانة والأعطال', sectionId: 'fleet', group: titleFor('fleet', 'إدارة الأسطول'), icon: Wrench, module: 'fleet' },
+
+    // 5. العمليات والتقارير
+    { key: 'operations', label: 'التحكم والحالات التشغيلية', sectionId: 'operations', group: titleFor('operations', 'العمليات والتقارير'), icon: SlidersHorizontal, module: 'operations' },
+    { key: 'riders', label: 'ملفات المناديب 360° والربط', sectionId: 'operations', group: titleFor('operations', 'العمليات والتقارير'), icon: Users, module: 'operations' },
+    { key: 'daily_ops', label: 'العمليات اليومية', sectionId: 'operations', group: titleFor('operations', 'العمليات والتقارير'), icon: Clock, module: 'operations' },
+    { key: 'rider_perf', label: 'تقييم أداء المندوبين', sectionId: 'operations', group: titleFor('operations', 'العمليات والتقارير'), icon: BarChart3, module: 'operations' },
+    { key: 'attendance', label: 'الحضور والالتزام', sectionId: 'operations', group: titleFor('operations', 'العمليات والتقارير'), icon: CalendarCheck, module: 'operations' },
+    { key: 'distance_wallet', label: 'المسافات والمحافظ', sectionId: 'operations', group: titleFor('operations', 'العمليات والتقارير'), icon: MapPin, module: 'operations' },
+    { key: 'quality', label: 'جودة التسليم الشهرية', sectionId: 'operations', group: titleFor('operations', 'العمليات والتقارير'), icon: Award, module: 'operations' },
+    ...(allowKt
+      ? [{ key: 'facial' as NavKey, label: 'التحقق من الهوية (Keeta)', sectionId: 'operations', group: titleFor('operations', 'العمليات والتقارير'), icon: ScanFace, module: 'operations' as PermissionModule }]
+      : []),
+    { key: 'import', label: 'مركز استيراد Excel', sectionId: 'operations', group: titleFor('operations', 'العمليات والتقارير'), icon: Upload, module: 'operations', action: 'add' },
+    { key: 'reports', label: 'مركز التقارير الشاملة والتصدير', sectionId: 'operations', group: titleFor('operations', 'العمليات والتقارير'), icon: FileSpreadsheet, module: 'reports' },
+
+    // 6. الصلاحيات والإدارة
+    { key: 'settings', label: 'إعدادات النظام والمنصات', sectionId: 'admin', group: titleFor('admin', 'الصلاحيات والإدارة'), icon: Settings, module: 'settings' },
+    ...(canSeeBranding
+      ? [{ key: 'company_branding' as NavKey, label: 'بيانات الشركة والهوية البصرية', sectionId: 'admin', group: titleFor('admin', 'الصلاحيات والإدارة'), icon: Building2 }]
+      : []),
+    { key: 'rbac_users', label: 'المستخدمون ونطاق البيانات', sectionId: 'admin', group: titleFor('admin', 'الصلاحيات والإدارة'), icon: Users, module: 'users' },
+    { key: 'rbac_roles', label: 'مصفوفة الصلاحيات والأدوار', sectionId: 'admin', group: titleFor('admin', 'الصلاحيات والإدارة'), icon: KeyRound, module: 'roles' },
+    { key: 'rbac_audit', label: 'سجل النشاط والتدقيق المركزي', sectionId: 'admin', group: titleFor('admin', 'الصلاحيات والإدارة'), icon: FileSearch, module: 'audit' },
+    { key: 'about_credits', label: 'حول النظام والاعتمادات', sectionId: 'admin', group: titleFor('admin', 'الصلاحيات والإدارة'), icon: Info },
+
+    // 7. مركز التحكم والتخصيص
+    ...(canSeeBuilder
+      ? [{ key: 'system_builder' as NavKey, label: 'مركز التحكم والتخصيص', sectionId: 'builder', group: titleFor('builder', 'مركز التحكم والتخصيص'), icon: Sliders }]
+      : []),
+    ...(canSeeBuilder || can('settings', 'edit') || user?.role === 'owner' || user?.role === 'admin'
+      ? [
+          {
+            key: 'system_backup_reset' as NavKey,
+            label: 'النسخ الاحتياطي وإعادة ضبط النظام',
+            sectionId: 'builder',
+            group: titleFor('builder', 'مركز التحكم والتخصيص'),
+            icon: DatabaseBackup,
+          },
+        ]
+      : []),
+  ];
+
+  // Dynamic Custom Pages created via System Builder
+  const customPageItems: NavItemDef[] = (options?.systemPages || [])
+    .filter((p) => p.visible && !p.archived)
+    .filter((p) => {
+      if (!p.allowedRoles || p.allowedRoles.length === 0 || isOwnerOrSuper) return true;
+      return p.allowedRoles.includes(userRoleId) || p.allowedRoles.includes(user?.role || '');
+    })
+    .slice()
+    .sort((a, b) => (a.order ?? 99) - (b.order ?? 99))
+    .map((page) => {
+      const targetSec = sectionMap.get(page.sectionId);
+      return {
+        key: `custom_page_${page.pageId}` as NavKey,
+        label: page.titleAr,
+        sectionId: page.sectionId,
+        group: targetSec?.titleAr || 'صفحات مخصصة',
+        icon: Layers,
+      };
+    });
+
+  const combined = [...builtInItems, ...customPageItems].filter((item) => {
+    if (item.sectionId && !isSectionAllowed(sectionMap.get(item.sectionId))) return false;
+    return can(item.module, item.action || 'view');
+  });
+
+  // Sort items by their section's configured order while preserving relative order inside each section
+  const orderOfSection = (secId?: string) => (secId ? sectionMap.get(secId)?.order ?? 99 : 99);
+  return combined.sort((a, b) => orderOfSection(a.sectionId) - orderOfSection(b.sectionId));
 }
 
 const ROLE_PERMISSION_NOTES: Record<UserRole, string> = {
@@ -300,6 +408,10 @@ interface EnterpriseShellProps {
   vehicles?: VehicleMaster[];
   platformAccounts?: PlatformAccount[];
   privateDocs?: PrivateDocumentRecord[];
+  companyBranding?: CompanyBrandingDoc;
+  systemSections?: SystemSectionConfig[];
+  systemPages?: SystemPageConfig[];
+  notificationRules?: NotificationRuleConfig[];
   onSignOut: () => void;
   onRefreshData: () => void;
   dataLoading: boolean;
@@ -329,6 +441,10 @@ export function EnterpriseShell({
   vehicles = [],
   platformAccounts = [],
   privateDocs = [],
+  companyBranding,
+  systemSections = [],
+  systemPages = [],
+  notificationRules = [],
   onSignOut,
   onRefreshData,
   dataLoading,
@@ -363,6 +479,7 @@ export function EnterpriseShell({
   const [notifOpen, setNotifOpen] = useState(false);
   const [profileOpen, setProfileOpen] = useState(false);
   const [switcherOpen, setSwitcherOpen] = useState(false);
+  const [logoError, setLogoError] = useState(false);
 
   const notifRef = useRef<HTMLDivElement>(null);
   const profileRef = useRef<HTMLDivElement>(null);
@@ -379,8 +496,10 @@ export function EnterpriseShell({
         settings,
         platformCatalog,
         allowedPlatforms,
+        systemSections,
+        systemPages,
       }),
-    [workspaceMode, userProfile, roleTemplates, settings, platformCatalog, allowedPlatforms]
+    [workspaceMode, userProfile, roleTemplates, settings, platformCatalog, allowedPlatforms, systemSections, systemPages]
   );
 
   const groups = useMemo(() => Array.from(new Set(navItems.map((n) => n.group))), [navItems]);
@@ -465,6 +584,16 @@ export function EnterpriseShell({
       hasPermission(userProfile, roleTemplates, 'hr', 'view') ||
       hasPermission(userProfile, roleTemplates, 'fleet', 'view');
 
+    const activeExpiryRule = notificationRules.find(
+      (r) =>
+        r.enabled &&
+        (r.eventType === 'iqama_expiry' ||
+          r.eventType === 'license_expiry' ||
+          r.eventType === 'vehicle_expiry' ||
+          r.eventType === 'expiry_threshold')
+    );
+    const maxExpiryThresholdDays = activeExpiryRule?.thresholdDaysOrValue ?? 30;
+
     const expiryNotifs = canSeeExpiries
       ? computeAllDocumentExpiries({
           riders: dataset.riderMaster,
@@ -472,7 +601,7 @@ export function EnterpriseShell({
           privateDocs,
           settings,
         })
-          .filter((e) => ['expired', 'due_today', 'within_7', 'within_30'].includes(e.urgency))
+          .filter((e) => e.daysRemaining <= maxExpiryThresholdDays)
           .slice(0, 10)
           .map((e) => ({
             id: `exp_${e.id}`,
@@ -536,6 +665,7 @@ export function EnterpriseShell({
     operationalCases,
     vehicles,
     privateDocs,
+    notificationRules,
     settings,
     filters,
     userProfile,
@@ -683,17 +813,44 @@ export function EnterpriseShell({
 
   const firstItemInCurrentGroup = navItems.find((i) => i.group === currentNavMeta.group);
 
+  const brandVisual = companyBranding?.branding || DEFAULT_COMPANY_BRANDING.branding;
+  const brandCompany = companyBranding?.company || DEFAULT_COMPANY_BRANDING.company;
+  const sidebarLogoKey =
+    !logoError && (theme === 'dark' ? brandVisual.alternateLogoKey || brandVisual.primaryLogoKey : brandVisual.primaryLogoKey);
+
+  useEffect(() => {
+    setLogoError(false);
+  }, [brandVisual.primaryLogoKey, brandVisual.alternateLogoKey, theme]);
+
+  const shellBrandVars = {
+    '--foc-primary': brandVisual.primaryColor || '#0f1e36',
+    '--foc-secondary': brandVisual.secondaryColor || '#2563eb',
+    '--foc-button': brandVisual.buttonColor || '#1d4ed8',
+  } as CSSProperties;
+
+  const sidebarTitle = workspaceMode === 'global' ? brandVisual.systemNameAr || wsMeta.title : wsMeta.title;
+  const sidebarSubtitle = workspaceMode === 'global' ? brandCompany.companyNameAr || wsMeta.subtitle : wsMeta.subtitle;
+
   const renderSidebarContent = (collapsed: boolean, onItemClick?: () => void) => (
     <>
       <div className={`flex h-16 items-center border-b border-[#1e2f4d] ${collapsed ? 'justify-center px-2' : 'justify-between px-4'}`}>
         <div className="flex items-center gap-3 min-w-0">
-          <div className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-[#13223a] border border-[#24385c] ${wsMeta.accentIconCls}`}>
-            <WsIcon className="h-4 w-4" />
-          </div>
+          {sidebarLogoKey ? (
+            <img
+              src={`/api/branding/logo/${encodeURIComponent(sidebarLogoKey)}`}
+              alt={sidebarTitle}
+              onError={() => setLogoError(true)}
+              className="h-9 w-9 shrink-0 rounded-lg bg-white/95 object-contain p-0.5 border border-[#24385c]"
+            />
+          ) : (
+            <div className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-[#13223a] border border-[#24385c] ${wsMeta.accentIconCls}`}>
+              <WsIcon className="h-4 w-4" />
+            </div>
+          )}
           {!collapsed && (
             <div className="min-w-0">
-              <div className="truncate text-[13px] font-bold text-white">{wsMeta.title}</div>
-              <div className="truncate text-[11px] text-slate-400">{wsMeta.subtitle}</div>
+              <div className="truncate text-[13px] font-bold text-white">{sidebarTitle}</div>
+              <div className="truncate text-[11px] text-slate-400">{sidebarSubtitle}</div>
             </div>
           )}
         </div>
@@ -813,9 +970,10 @@ export function EnterpriseShell({
   );
 
   return (
-    <div className="min-h-screen bg-slate-50 dark:bg-[#060b16] text-slate-900 dark:text-slate-100 flex">
+    <div style={shellBrandVars} className="min-h-screen bg-slate-50 dark:bg-[#060b16] text-slate-900 dark:text-slate-100 flex">
       {/* Desktop Collapsible Right-Side RTL Navy Sidebar */}
       <aside
+        style={theme === 'light' && brandVisual.sidebarColor ? { backgroundColor: brandVisual.sidebarColor } : undefined}
         className={`no-print hidden lg:flex lg:shrink-0 lg:flex-col sticky top-0 h-screen bg-[#0b1628] dark:bg-[#070d19] text-slate-200 border-l border-[#1e2f4d] transition-[width] duration-200 ease-out ${
           sidebarCollapsed ? 'lg:w-[72px]' : 'lg:w-[264px]'
         }`}
@@ -827,7 +985,10 @@ export function EnterpriseShell({
       {mobileMenuOpen && (
         <div className="no-print fixed inset-0 z-50 flex lg:hidden">
           <div className="fixed inset-0 bg-slate-950/70 backdrop-blur-[1px]" onClick={() => setMobileMenuOpen(false)} />
-          <div className="relative z-10 flex w-72 max-w-[85vw] flex-col bg-[#0b1628] text-slate-200 border-l border-[#1e2f4d]">
+          <div
+            style={theme === 'light' && brandVisual.sidebarColor ? { backgroundColor: brandVisual.sidebarColor } : undefined}
+            className="relative z-10 flex w-72 max-w-[85vw] flex-col bg-[#0b1628] text-slate-200 border-l border-[#1e2f4d]"
+          >
             <div className="flex h-12 items-center justify-end border-b border-[#1e2f4d] px-4">
               <button
                 type="button"
@@ -1113,7 +1274,9 @@ export function EnterpriseShell({
                 <div className="absolute left-0 mt-2 w-72 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 p-4 shadow-xl z-50 space-y-3 text-xs">
                   <div className="border-b border-slate-100 dark:border-slate-800 pb-2.5">
                     <div className="font-bold text-slate-900 dark:text-slate-100">{userProfile.displayName}</div>
-                    <div className="font-mono-num text-[11px] text-slate-500 dark:text-slate-400">{userProfile.email}</div>
+                    <div className="font-mono-num text-[11px] text-slate-500 dark:text-slate-400" dir="ltr">
+                      {userProfile.phone || userProfile.email}
+                    </div>
                   </div>
                   <div className="space-y-1.5">
                     <div className="flex justify-between gap-2">

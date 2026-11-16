@@ -1,9 +1,9 @@
-import { doc, serverTimestamp, setDoc } from 'firebase/firestore';
+import { doc, serverTimestamp, setDoc } from '../lib/erpDb';
 import { Building2, Image as ImageIcon, Palette, Save, Upload } from 'lucide-react';
 import { useEffect, useState } from 'react';
 import { DEFAULT_COMPANY_BRANDING } from '../lib/dynamicSchemaEngine';
 import { writeErpAuditLog } from '../lib/erpHelpers';
-import { auth, db } from '../lib/firebase';
+import { db, getActiveAuthToken } from '../lib/firebase';
 import { safeParseJsonResponse } from '../lib/safeFetch';
 import { hasCapability } from '../shared/rbacCore';
 import type { CompanyBrandingDoc, RoleTemplate, UserProfile } from '../types/fleet';
@@ -28,6 +28,25 @@ interface CompanyBrandingModuleProps {
   onRefresh: () => Promise<void>;
 }
 
+function mergeBrandingDoc(branding?: Partial<CompanyBrandingDoc> | null): Omit<CompanyBrandingDoc, 'createdByUid' | 'allowedUids'> {
+  return {
+    brandingId: branding?.brandingId || 'default',
+    company: {
+      ...DEFAULT_COMPANY_BRANDING.company,
+      ...(branding?.company || {}),
+    },
+    branding: {
+      ...DEFAULT_COMPANY_BRANDING.branding,
+      ...(branding?.branding || {}),
+    },
+    credits: {
+      ...DEFAULT_COMPANY_BRANDING.credits,
+      ...(branding?.credits || {}),
+      changelog: branding?.credits?.changelog || DEFAULT_COMPANY_BRANDING.credits.changelog,
+    },
+  };
+}
+
 export function CompanyBrandingModule({
   branding,
   currentUser,
@@ -36,24 +55,30 @@ export function CompanyBrandingModule({
   onRefresh,
 }: CompanyBrandingModuleProps) {
   const [subTab, setSubTab] = useState<'company' | 'visual'>('company');
-  const [form, setForm] = useState<CompanyBrandingDoc>({ ...DEFAULT_COMPANY_BRANDING, ...branding });
+  const [form, setForm] = useState(() => mergeBrandingDoc(branding));
   const [busy, setBusy] = useState(false);
   const [uploadingSlot, setUploadingSlot] = useState<string | null>(null);
   const [toast, setToast] = useState<{ type: 'ok' | 'err'; msg: string } | null>(null);
 
   useEffect(() => {
-    setForm({ ...DEFAULT_COMPANY_BRANDING, ...branding });
+    setForm(mergeBrandingDoc(branding));
   }, [branding]);
 
   const canManageCompany = hasCapability(currentUser, roleTemplates, 'manage_company') || currentUser.role === 'owner' || currentUser.role === 'admin';
   const canChangeBranding = hasCapability(currentUser, roleTemplates, 'change_branding') || currentUser.role === 'owner' || currentUser.role === 'admin';
 
-  const handleUploadLogo = async (slot: 'primary' | 'secondary' | 'icon', file: File) => {
+  const updateCompany = (patch: Partial<CompanyBrandingDoc['company']>) =>
+    setForm((prev) => ({ ...prev, company: { ...prev.company, ...patch } }));
+
+  const updateVisual = (patch: Partial<CompanyBrandingDoc['branding']>) =>
+    setForm((prev) => ({ ...prev, branding: { ...prev.branding, ...patch } }));
+
+  const handleUploadLogo = async (slot: 'primary' | 'alternate' | 'icon', file: File) => {
     if (!canChangeBranding) return;
     setUploadingSlot(slot);
     setToast(null);
     try {
-      const token = await auth.currentUser?.getIdToken();
+      const token = await getActiveAuthToken();
       if (!token) throw new Error('يرجى تسجيل الدخول لرفع الشعار.');
       const fd = new FormData();
       fd.append('file', file);
@@ -67,14 +92,13 @@ export function CompanyBrandingModule({
       if (!res.ok || !json.logoKey) {
         throw new Error(json.error || 'فشل رفع الشعار.');
       }
-      setForm((prev) => ({
-        ...prev,
-        ...(slot === 'primary'
+      updateVisual(
+        slot === 'primary'
           ? { primaryLogoKey: json.logoKey }
-          : slot === 'secondary'
-            ? { secondaryLogoKey: json.logoKey }
-            : { appIconKey: json.logoKey }),
-      }));
+          : slot === 'alternate'
+            ? { alternateLogoKey: json.logoKey }
+            : { iconLogoKey: json.logoKey }
+      );
       setToast({ type: 'ok', msg: 'تم رفع الشعار إلى الخزينة. اضغط "حفظ واعتماد التغييرات" لتعميمه.' });
     } catch (err) {
       setToast({ type: 'err', msg: err instanceof Error ? err.message : 'فشل رفع الشعار.' });
@@ -91,16 +115,19 @@ export function CompanyBrandingModule({
     try {
       const teamAllowed = Array.from(new Set([currentUser.uid, ...allowedUids].filter(Boolean))).slice(0, 20);
       const cleanDoc: Record<string, unknown> = {
-        ...form,
         brandingId: 'default',
+        company: form.company,
+        branding: form.branding,
+        credits: form.credits,
         updatedByEmail: currentUser.email,
-        createdByUid: currentUser.uid,
+        createdByUid: branding?.createdByUid || currentUser.uid,
         allowedUids: teamAllowed.length > 0 ? teamAllowed : [currentUser.uid],
+        ...(branding?.createdAt ? {} : { createdAt: serverTimestamp() }),
         updatedAt: serverTimestamp(),
       };
       await setDoc(doc(db, 'companyBranding', 'default'), cleanDoc, { merge: true });
 
-      const token = await auth.currentUser?.getIdToken();
+      const token = await getActiveAuthToken();
       if (token) {
         await fetch('/api/branding/sync-public', {
           method: 'POST',
@@ -117,9 +144,17 @@ export function CompanyBrandingModule({
         targetCollection: 'companyBranding',
         targetId: 'default',
         entityType: 'branding',
-        details: `تحديث بيانات الشركة والهوية البصرية (${form.companyNameAr} · ${form.systemNameAr})`,
-        oldValue: { companyNameAr: branding.companyNameAr, primaryColor: branding.primaryColor, loginScreenStyle: branding.loginScreenStyle },
-        newValue: { companyNameAr: form.companyNameAr, primaryColor: form.primaryColor, loginScreenStyle: form.loginScreenStyle },
+        details: `تحديث بيانات الشركة والهوية البصرية (${form.company.companyNameAr} · ${form.branding.systemNameAr})`,
+        oldValue: {
+          companyNameAr: branding?.company?.companyNameAr || '',
+          primaryColor: branding?.branding?.primaryColor || '',
+          loginScreenStyle: branding?.branding?.loginScreenStyle || '',
+        },
+        newValue: {
+          companyNameAr: form.company.companyNameAr,
+          primaryColor: form.branding.primaryColor,
+          loginScreenStyle: form.branding.loginScreenStyle,
+        },
         user: currentUser,
         allowedUids,
       });
@@ -177,8 +212,8 @@ export function CompanyBrandingModule({
                   <Input
                     required
                     disabled={!canManageCompany}
-                    value={form.companyNameAr}
-                    onChange={(e) => setForm({ ...form, companyNameAr: e.target.value })}
+                    value={form.company.companyNameAr}
+                    onChange={(e) => updateCompany({ companyNameAr: e.target.value })}
                   />
                 </FormField>
                 <FormField label="اسم الشركة (إنجليزي)" required>
@@ -186,38 +221,38 @@ export function CompanyBrandingModule({
                     required
                     dir="ltr"
                     disabled={!canManageCompany}
-                    value={form.companyNameEn}
-                    onChange={(e) => setForm({ ...form, companyNameEn: e.target.value })}
+                    value={form.company.companyNameEn}
+                    onChange={(e) => updateCompany({ companyNameEn: e.target.value })}
                   />
                 </FormField>
                 <FormField label="الاسم المختصر (Short Name)">
                   <Input
                     disabled={!canManageCompany}
-                    value={form.shortName || ''}
-                    onChange={(e) => setForm({ ...form, shortName: e.target.value })}
+                    value={form.company.shortName || ''}
+                    onChange={(e) => updateCompany({ shortName: e.target.value })}
                   />
                 </FormField>
                 <FormField label="المدير المسؤول">
                   <Input
                     disabled={!canManageCompany}
-                    value={form.responsibleManager || ''}
-                    onChange={(e) => setForm({ ...form, responsibleManager: e.target.value })}
+                    value={form.company.responsibleManager || ''}
+                    onChange={(e) => updateCompany({ responsibleManager: e.target.value })}
                   />
                 </FormField>
                 <FormField label="رقم السجل التجاري (CR)">
                   <Input
                     className="font-mono-num"
                     disabled={!canManageCompany}
-                    value={form.crNumber || ''}
-                    onChange={(e) => setForm({ ...form, crNumber: e.target.value })}
+                    value={form.company.crNumber || ''}
+                    onChange={(e) => updateCompany({ crNumber: e.target.value })}
                   />
                 </FormField>
                 <FormField label="الرقم الضريبي (VAT)">
                   <Input
                     className="font-mono-num"
                     disabled={!canManageCompany}
-                    value={form.vatNumber || ''}
-                    onChange={(e) => setForm({ ...form, vatNumber: e.target.value })}
+                    value={form.company.vatNumber || ''}
+                    onChange={(e) => updateCompany({ vatNumber: e.target.value })}
                   />
                 </FormField>
                 <FormField label="رقم الهاتف الرسمي">
@@ -225,8 +260,8 @@ export function CompanyBrandingModule({
                     dir="ltr"
                     className="font-mono-num"
                     disabled={!canManageCompany}
-                    value={form.phone || ''}
-                    onChange={(e) => setForm({ ...form, phone: e.target.value })}
+                    value={form.company.phone || ''}
+                    onChange={(e) => updateCompany({ phone: e.target.value })}
                   />
                 </FormField>
                 <FormField label="البريد الإلكتروني الرسمي">
@@ -234,46 +269,46 @@ export function CompanyBrandingModule({
                     type="email"
                     dir="ltr"
                     disabled={!canManageCompany}
-                    value={form.email || ''}
-                    onChange={(e) => setForm({ ...form, email: e.target.value })}
+                    value={form.company.email || ''}
+                    onChange={(e) => updateCompany({ email: e.target.value })}
                   />
                 </FormField>
                 <FormField label="المدينة">
                   <Input
                     disabled={!canManageCompany}
-                    value={form.city || ''}
-                    onChange={(e) => setForm({ ...form, city: e.target.value })}
+                    value={form.company.city || ''}
+                    onChange={(e) => updateCompany({ city: e.target.value })}
                   />
                 </FormField>
                 <FormField label="الدولة">
                   <Input
                     disabled={!canManageCompany}
-                    value={form.country || ''}
-                    onChange={(e) => setForm({ ...form, country: e.target.value })}
+                    value={form.company.country || ''}
+                    onChange={(e) => updateCompany({ country: e.target.value })}
                   />
                 </FormField>
                 <FormField label="الموقع الإلكتروني">
                   <Input
                     dir="ltr"
                     disabled={!canManageCompany}
-                    value={form.website || ''}
-                    onChange={(e) => setForm({ ...form, website: e.target.value })}
+                    value={form.company.website || ''}
+                    onChange={(e) => updateCompany({ website: e.target.value })}
                     placeholder="https://..."
                   />
                 </FormField>
                 <FormField label="العنوان التفصيلي">
                   <Input
                     disabled={!canManageCompany}
-                    value={form.address || ''}
-                    onChange={(e) => setForm({ ...form, address: e.target.value })}
+                    value={form.company.address || ''}
+                    onChange={(e) => updateCompany({ address: e.target.value })}
                   />
                 </FormField>
                 <FormField label="تذييل التقارير والمستندات الرسمية" className="sm:col-span-2">
                   <Textarea
                     rows={2}
                     disabled={!canManageCompany}
-                    value={form.officialFooterText || ''}
-                    onChange={(e) => setForm({ ...form, officialFooterText: e.target.value })}
+                    value={form.company.officialFooterText || ''}
+                    onChange={(e) => updateCompany({ officialFooterText: e.target.value })}
                   />
                 </FormField>
               </div>
@@ -286,16 +321,16 @@ export function CompanyBrandingModule({
                   <FormField label="اسم النظام (عربي)">
                     <Input
                       disabled={!canChangeBranding}
-                      value={form.systemNameAr}
-                      onChange={(e) => setForm({ ...form, systemNameAr: e.target.value })}
+                      value={form.branding.systemNameAr}
+                      onChange={(e) => updateVisual({ systemNameAr: e.target.value })}
                     />
                   </FormField>
                   <FormField label="اسم النظام (إنجليزي)">
                     <Input
                       dir="ltr"
                       disabled={!canChangeBranding}
-                      value={form.systemNameEn}
-                      onChange={(e) => setForm({ ...form, systemNameEn: e.target.value })}
+                      value={form.branding.systemNameEn}
+                      onChange={(e) => updateVisual({ systemNameEn: e.target.value })}
                     />
                   </FormField>
                 </div>
@@ -303,9 +338,9 @@ export function CompanyBrandingModule({
                 <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
                   {(
                     [
-                      ['primary', 'الشعار الرئيسي', form.primaryLogoKey],
-                      ['secondary', 'الشعار البديل (للوضع الداكن/التقارير)', form.secondaryLogoKey],
-                      ['icon', 'أيقونة النظام المصغرة', form.appIconKey],
+                      ['primary', 'الشعار الرئيسي', form.branding.primaryLogoKey],
+                      ['alternate', 'الشعار البديل (للوضع الداكن/التقارير)', form.branding.alternateLogoKey],
+                      ['icon', 'أيقونة النظام المصغرة', form.branding.iconLogoKey],
                     ] as const
                   ).map(([slot, label, keyVal]) => (
                     <div key={slot} className="rounded-xl border border-slate-200 dark:border-slate-800 p-3 space-y-2 bg-slate-50/50 dark:bg-slate-950/40">
@@ -341,14 +376,13 @@ export function CompanyBrandingModule({
                           <button
                             type="button"
                             onClick={() =>
-                              setForm((prev) => ({
-                                ...prev,
-                                ...(slot === 'primary'
+                              updateVisual(
+                                slot === 'primary'
                                   ? { primaryLogoKey: '' }
-                                  : slot === 'secondary'
-                                    ? { secondaryLogoKey: '' }
-                                    : { appIconKey: '' }),
-                              }))
+                                  : slot === 'alternate'
+                                    ? { alternateLogoKey: '' }
+                                    : { iconLogoKey: '' }
+                              )
                             }
                             className="text-[11px] text-red-600 hover:underline"
                           >
@@ -366,10 +400,10 @@ export function CompanyBrandingModule({
                 <div className="grid grid-cols-2 gap-4 sm:grid-cols-4">
                   {(
                     [
-                      ['primaryColor', 'اللون الرئيسي', form.primaryColor],
-                      ['secondaryColor', 'اللون الثانوي', form.secondaryColor],
-                      ['buttonColor', 'لون الأزرار', form.buttonColor],
-                      ['sidebarColor', 'خلفية القائمة', form.sidebarColor],
+                      ['primaryColor', 'اللون الرئيسي', form.branding.primaryColor],
+                      ['secondaryColor', 'اللون الثانوي', form.branding.secondaryColor],
+                      ['buttonColor', 'لون الأزرار', form.branding.buttonColor],
+                      ['sidebarColor', 'خلفية القائمة', form.branding.sidebarColor],
                     ] as const
                   ).map(([fieldKey, label, val]) => (
                     <FormField key={fieldKey} label={label}>
@@ -378,7 +412,7 @@ export function CompanyBrandingModule({
                           type="color"
                           disabled={!canChangeBranding}
                           value={val}
-                          onChange={(e) => setForm({ ...form, [fieldKey]: e.target.value })}
+                          onChange={(e) => updateVisual({ [fieldKey]: e.target.value })}
                           className="h-9 w-11 cursor-pointer rounded border border-slate-200 dark:border-slate-700 bg-transparent"
                         />
                         <Input
@@ -386,7 +420,7 @@ export function CompanyBrandingModule({
                           className="font-mono-num text-xs"
                           disabled={!canChangeBranding}
                           value={val}
-                          onChange={(e) => setForm({ ...form, [fieldKey]: e.target.value })}
+                          onChange={(e) => updateVisual({ [fieldKey]: e.target.value })}
                         />
                       </div>
                     </FormField>
@@ -397,21 +431,24 @@ export function CompanyBrandingModule({
                   <FormField label="نمط الواجهة">
                     <Select
                       disabled={!canChangeBranding}
-                      value={form.uiStyleMode}
-                      onChange={(e) => setForm({ ...form, uiStyleMode: e.target.value as CompanyBrandingDoc['uiStyleMode'] })}
+                      value={form.branding.uiStyleMode}
+                      onChange={(e) =>
+                        updateVisual({ uiStyleMode: e.target.value as CompanyBrandingDoc['branding']['uiStyleMode'] })
+                      }
                     >
-                      <option value="corporate_navy">كحلي مؤسسي (Corporate Navy)</option>
-                      <option value="slate_minimal">رمادي متزن (Slate Minimal)</option>
-                      <option value="emerald_ops">تشغيلي أخضر (Emerald Ops)</option>
+                      <option value="corporate">كحلي مؤسسي متوازن (Corporate)</option>
+                      <option value="modern">عصري مرن (Modern)</option>
+                      <option value="compact">مكثف للعمل السريع (Compact)</option>
                     </Select>
                   </FormField>
                   <FormField label="الوضع الافتراضي للألوان">
                     <Select
                       disabled={!canChangeBranding}
-                      value={form.defaultThemeMode}
-                      onChange={(e) => setForm({ ...form, defaultThemeMode: e.target.value as CompanyBrandingDoc['defaultThemeMode'] })}
+                      value={form.branding.defaultThemeMode}
+                      onChange={(e) =>
+                        updateVisual({ defaultThemeMode: e.target.value as CompanyBrandingDoc['branding']['defaultThemeMode'] })
+                      }
                     >
-                      <option value="system">تلقائي حسب النظام</option>
                       <option value="light">الوضع النهاري</option>
                       <option value="dark">الوضع الليلي</option>
                     </Select>
@@ -419,8 +456,10 @@ export function CompanyBrandingModule({
                   <FormField label="تصميم شاشة تسجيل الدخول">
                     <Select
                       disabled={!canChangeBranding}
-                      value={form.loginScreenStyle}
-                      onChange={(e) => setForm({ ...form, loginScreenStyle: e.target.value as CompanyBrandingDoc['loginScreenStyle'] })}
+                      value={form.branding.loginScreenStyle}
+                      onChange={(e) =>
+                        updateVisual({ loginScreenStyle: e.target.value as CompanyBrandingDoc['branding']['loginScreenStyle'] })
+                      }
                     >
                       <option value="split">مقسوم مؤسسي (Split)</option>
                       <option value="centered">بطاقة وسطية (Centered)</option>
@@ -433,15 +472,15 @@ export function CompanyBrandingModule({
                   <FormField label="عنوان الترحيب في شاشة الدخول">
                     <Input
                       disabled={!canChangeBranding}
-                      value={form.loginHeadlineAr || ''}
-                      onChange={(e) => setForm({ ...form, loginHeadlineAr: e.target.value })}
+                      value={form.branding.loginHeadlineAr || ''}
+                      onChange={(e) => updateVisual({ loginHeadlineAr: e.target.value })}
                     />
                   </FormField>
                   <FormField label="الوصف التعريفي أسفل الترحيب">
                     <Input
                       disabled={!canChangeBranding}
-                      value={form.loginSubheadlineAr || ''}
-                      onChange={(e) => setForm({ ...form, loginSubheadlineAr: e.target.value })}
+                      value={form.branding.loginSubheadlineAr || ''}
+                      onChange={(e) => updateVisual({ loginSubheadlineAr: e.target.value })}
                     />
                   </FormField>
                 </div>
@@ -458,47 +497,47 @@ export function CompanyBrandingModule({
             <div className="rounded-xl border border-slate-200 dark:border-slate-800 overflow-hidden shadow-sm">
               <div
                 className="px-4 py-3 text-white flex items-center justify-between"
-                style={{ backgroundColor: form.sidebarColor || '#0f1e36' }}
+                style={{ backgroundColor: form.branding.sidebarColor || '#0c1628' }}
               >
                 <div className="flex items-center gap-2.5">
-                  {form.primaryLogoKey ? (
+                  {form.branding.primaryLogoKey ? (
                     <img
-                      src={`/api/branding/logo/${encodeURIComponent(form.primaryLogoKey)}`}
+                      src={`/api/branding/logo/${encodeURIComponent(form.branding.primaryLogoKey)}`}
                       alt="Logo"
                       className="h-7 w-7 rounded object-contain bg-white/10 p-0.5"
                     />
                   ) : (
                     <div
                       className="h-7 w-7 rounded flex items-center justify-center text-xs font-bold"
-                      style={{ backgroundColor: form.secondaryColor || '#1d4ed8' }}
+                      style={{ backgroundColor: form.branding.secondaryColor || '#2563eb' }}
                     >
-                      FOC
+                      {form.company.shortName || 'FOC'}
                     </div>
                   )}
                   <div>
-                    <div className="text-xs font-bold">{form.systemNameAr || 'مركز عمليات الأسطول'}</div>
-                    <div className="text-[10px] opacity-75">{form.companyNameAr}</div>
+                    <div className="text-xs font-bold">{form.branding.systemNameAr || 'مركز عمليات الأسطول'}</div>
+                    <div className="text-[10px] opacity-75">{form.company.companyNameAr}</div>
                   </div>
                 </div>
               </div>
 
               <div className="bg-slate-50 dark:bg-slate-950 p-4 space-y-3">
                 <div className="text-xs font-bold text-slate-800 dark:text-slate-100">
-                  {form.loginHeadlineAr || 'بوابة العمليات والتشغيل الموحدة'}
+                  {form.branding.loginHeadlineAr || 'بوابة العمليات والتشغيل الموحدة'}
                 </div>
                 <div className="text-[11px] text-slate-500">
-                  {form.loginSubheadlineAr || form.systemNameEn}
+                  {form.branding.loginSubheadlineAr || form.branding.systemNameEn}
                 </div>
                 <div className="flex items-center gap-2">
                   <span
                     className="inline-flex items-center rounded-lg px-3 py-1.5 text-[11px] font-bold text-white"
-                    style={{ backgroundColor: form.buttonColor || '#0f1e36' }}
+                    style={{ backgroundColor: form.branding.buttonColor || '#1d4ed8' }}
                   >
                     زر أساسي
                   </span>
                   <span
                     className="inline-flex items-center rounded-lg px-3 py-1.5 text-[11px] font-bold text-white"
-                    style={{ backgroundColor: form.secondaryColor || '#1d4ed8' }}
+                    style={{ backgroundColor: form.branding.secondaryColor || '#2563eb' }}
                   >
                     إجراء ثانوي
                   </span>
@@ -506,7 +545,7 @@ export function CompanyBrandingModule({
               </div>
 
               <div className="border-t border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 px-4 py-2 text-[10px] text-slate-500">
-                {form.officialFooterText || form.companyNameAr}
+                {form.company.officialFooterText || form.company.companyNameAr}
               </div>
             </div>
           </Card>

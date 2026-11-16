@@ -16,7 +16,7 @@ import type {
   DynamicFormDefinition,
   UserProfile,
 } from '../types/fleet';
-import { auth } from '../lib/firebase';
+import { getActiveAuthToken } from '../lib/firebase';
 import {
   buildEffectiveFormSchema,
   canEditDynamicField,
@@ -120,7 +120,7 @@ export function DynamicFieldsRenderer({
     }
     try {
       setUploadingKey(field.key);
-      const token = await auth.currentUser?.getIdToken();
+      const token = await getActiveAuthToken();
       if (!token) throw new Error('يرجى تسجيل الدخول لرفع المرفق.');
 
       const fd = new FormData();
@@ -163,7 +163,7 @@ export function DynamicFieldsRenderer({
 
   const openVaultFile = async (docId: string, download: boolean) => {
     try {
-      const token = await auth.currentUser?.getIdToken();
+      const token = await getActiveAuthToken();
       if (!token) return;
       const res = await fetch(`/api/documents/${encodeURIComponent(docId)}/file?download=${download ? '1' : '0'}`, {
         headers: { Authorization: `Bearer ${token}` },

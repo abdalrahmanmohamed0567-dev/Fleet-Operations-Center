@@ -1,4 +1,4 @@
-import { deleteDoc, doc, serverTimestamp, setDoc, updateDoc } from 'firebase/firestore';
+import { deleteDoc, doc, serverTimestamp, setDoc, updateDoc } from '../lib/erpDb';
 import {
   Activity,
   AlertTriangle,
@@ -8,22 +8,26 @@ import {
   BellRing,
   BookOpen,
   Boxes,
+  CheckCircle2,
+  Clock,
   DatabaseBackup,
   Download,
   Eye,
   FileCode2,
   GripVertical,
   History,
+  KeyRound,
   LayoutGrid,
   Plus,
   RefreshCw,
   RotateCcw,
   Save,
+  ShieldAlert,
   Sliders,
   Trash2,
   Upload,
 } from 'lucide-react';
-import { useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   analyzeDynamicFieldImpact,
   BUILT_IN_FORMS_CATALOG,
@@ -34,11 +38,12 @@ import {
   sanitizeFieldKey,
 } from '../lib/dynamicSchemaEngine';
 import { writeErpAuditLog } from '../lib/erpHelpers';
-import { auth, db } from '../lib/firebase';
+import { db, getActiveAuthToken, setSessionToken, syncAuthHandle } from '../lib/firebase';
 import { safeParseJsonResponse } from '../lib/safeFetch';
 import { hasCapability } from '../shared/rbacCore';
 import type {
   AuditLog,
+  BackupSchedulerConfig,
   CompanyBrandingDoc,
   ConfigSnapshotRecord,
   CustomEntityRecord,
@@ -49,11 +54,13 @@ import type {
   DynamicFormFieldPlacement,
   DynamicFormSection,
   DynamicFormVersion,
+  DynamicModuleBinding,
   EntityNoteTask,
   NotificationRuleConfig,
   OperationalCase,
   RiderMaster,
   RoleTemplate,
+  SystemBackupSummary,
   SystemPageConfig,
   SystemSectionConfig,
   TrashItemRecord,
@@ -90,6 +97,7 @@ export type SystemBuilderTab =
   | 'dictionary'
   | 'rules'
   | 'backup_audit'
+  | 'system_reset'
   | 'trash'
   | 'health';
 
@@ -115,6 +123,7 @@ interface SystemBuilderModuleProps {
   entityNotesTasks: EntityNoteTask[];
   currentUser: UserProfile;
   allowedUids: string[];
+  initialSubTab?: SystemBuilderTab;
   onRefresh: () => Promise<void>;
 }
 
@@ -151,11 +160,18 @@ export function SystemBuilderModule({
   entityNotesTasks,
   currentUser,
   allowedUids,
+  initialSubTab,
   onRefresh,
 }: SystemBuilderModuleProps) {
-  const [subTab, setSubTab] = useState<SystemBuilderTab>('fields');
+  const [subTab, setSubTab] = useState<SystemBuilderTab>(initialSubTab || 'fields');
   const [busy, setBusy] = useState(false);
   const [toast, setToast] = useState<{ type: 'ok' | 'err'; msg: string } | null>(null);
+
+  useEffect(() => {
+    if (initialSubTab) {
+      setSubTab(initialSubTab);
+    }
+  }, [initialSubTab]);
 
   const canCreateFields = hasCapability(currentUser, roleTemplates, 'create_fields') || currentUser.role === 'owner' || currentUser.role === 'admin';
   const canEditFields = hasCapability(currentUser, roleTemplates, 'edit_fields') || currentUser.role === 'owner' || currentUser.role === 'admin';
@@ -164,15 +180,29 @@ export function SystemBuilderModule({
   const canManageSettings = hasCapability(currentUser, roleTemplates, 'manage_settings') || currentUser.role === 'owner' || currentUser.role === 'admin';
   const canRestoreTrash = hasCapability(currentUser, roleTemplates, 'restore') || currentUser.role === 'owner' || currentUser.role === 'admin';
 
+  const toValidModuleBinding = (raw?: string): DynamicModuleBinding => {
+    if (
+      raw === 'hr' ||
+      raw === 'fleet' ||
+      raw === 'operations' ||
+      raw === 'executive' ||
+      raw === 'applications' ||
+      raw === 'custom'
+    ) {
+      return raw;
+    }
+    return 'custom';
+  };
+
   // Combined Forms List (Built-in + Custom Pages)
   const allForms = useMemo(() => {
     const customForms = systemPages.map((p) => ({
       formId: p.formId || p.pageId,
       nameAr: `صفحة مخصصة: ${p.titleAr}`,
       nameEn: p.titleEn,
-      module: p.sectionId,
+      module: toValidModuleBinding(p.sectionId),
       targetEntity: 'customEntityRecords',
-      description: p.descriptionAr || 'نموذج صفحة إدارية مخصصة',
+      description: p.description || 'نموذج صفحة إدارية مخصصة',
       coreFields: [],
     }));
     return [...BUILT_IN_FORMS_CATALOG, ...customForms];
@@ -368,7 +398,7 @@ export function SystemBuilderModule({
       const payload: Record<string, unknown> = {
         fieldId,
         key: sanitizedKey,
-        module: formMeta?.module || 'custom',
+        module: toValidModuleBinding(formMeta?.module),
         formId: fForm.formId,
         labelAr: fForm.labelAr.trim().slice(0, 120),
         labelEn: (fForm.labelEn.trim() || sanitizedKey).slice(0, 120),
@@ -462,19 +492,17 @@ export function SystemBuilderModule({
       const trashId = `trash_fld_${field.fieldId}_${Date.now().toString(36)}`;
       await setDoc(doc(db, 'trashItems', trashId), {
         trashId,
+        itemType: 'dynamic_field',
         sourceCollection: 'dynamicFields',
         sourceDocId: field.fieldId,
-        entityType: 'dynamic_field',
         titleAr: `حقل: ${field.labelAr} (${field.formId})`,
-        snapshot: JSON.parse(JSON.stringify(field)),
+        snapshotJson: JSON.stringify(field),
         deletedByUid: currentUser.uid,
         deletedByEmail: currentUser.email,
-        deletedAt: new Date().toISOString(),
         status: 'deleted',
         createdByUid: currentUser.uid,
         allowedUids: teamAllowed.length > 0 ? teamAllowed : [currentUser.uid],
         createdAt: serverTimestamp(),
-        updatedAt: serverTimestamp(),
       });
       await deleteDoc(doc(db, 'dynamicFields', field.fieldId));
       await writeErpAuditLog({
@@ -568,7 +596,7 @@ export function SystemBuilderModule({
         nameAr: catalogMeta?.nameAr || designerFormId,
         nameEn: catalogMeta?.nameEn || designerFormId,
         description: catalogMeta?.description || '',
-        module: catalogMeta?.module || 'custom',
+        module: toValidModuleBinding(catalogMeta?.module),
         targetEntity: catalogMeta?.targetEntity || 'customEntityRecords',
         layoutMode: draftLayoutMode,
         sections: draftSections,
@@ -595,11 +623,10 @@ export function SystemBuilderModule({
           placements: draftPlacements.map((p, idx) => ({ ...p, order: idx + 1 })),
           publishedByUid: currentUser.uid,
           publishedByEmail: currentUser.email,
-          notes: `نشر الإصدار رقم ${versionNumber}`,
+          changeNote: `نشر الإصدار رقم ${versionNumber}`,
           createdByUid: currentUser.uid,
           allowedUids: teamAllowed.length > 0 ? teamAllowed : [currentUser.uid],
           createdAt: serverTimestamp(),
-          updatedAt: serverTimestamp(),
         });
       }
 
@@ -674,6 +701,33 @@ export function SystemBuilderModule({
     sectionId: effectiveSections[0]?.sectionId || 'sec_operations',
   });
 
+  const persistSectionPatch = async (sec: SystemSectionConfig, patch: Partial<SystemSectionConfig>) => {
+    const teamAllowed = Array.from(new Set([currentUser.uid, ...allowedUids].filter(Boolean))).slice(0, 20);
+    const stored = systemSections.find((s) => s.sectionId === sec.sectionId);
+    if (stored) {
+      await updateDoc(doc(db, 'systemSections', sec.sectionId), {
+        ...patch,
+        allowedUids: teamAllowed.length > 0 ? teamAllowed : [currentUser.uid],
+        updatedAt: serverTimestamp(),
+      });
+    } else {
+      await setDoc(doc(db, 'systemSections', sec.sectionId), {
+        sectionId: sec.sectionId,
+        titleAr: patch.titleAr ?? sec.titleAr,
+        titleEn: patch.titleEn ?? sec.titleEn,
+        iconName: sec.iconName || 'Layers',
+        order: patch.order ?? sec.order,
+        visible: patch.visible ?? sec.visible,
+        isBuiltIn: Boolean(sec.isBuiltIn),
+        createdByUid: currentUser.uid,
+        allowedUids: teamAllowed.length > 0 ? teamAllowed : [currentUser.uid],
+        createdAt: serverTimestamp(),
+        updatedAt: serverTimestamp(),
+      });
+    }
+    await onRefresh();
+  };
+
   const handleSaveSection = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!canManageSections || !secForm.titleAr.trim()) return;
@@ -681,24 +735,31 @@ export function SystemBuilderModule({
     try {
       const sectionId = secForm.sectionId || `sec_${sanitizeFieldKey(secForm.titleEn || secForm.titleAr)}`;
       const teamAllowed = Array.from(new Set([currentUser.uid, ...allowedUids].filter(Boolean))).slice(0, 20);
-      const existing = effectiveSections.find((s) => s.sectionId === sectionId);
-      await setDoc(
-        doc(db, 'systemSections', sectionId),
-        {
-          sectionId,
-          titleAr: secForm.titleAr.trim(),
-          titleEn: secForm.titleEn.trim() || secForm.titleAr.trim(),
-          iconName: existing?.iconName || 'Layers',
-          order: existing?.order || effectiveSections.length + 1,
+      const existingStored = systemSections.find((s) => s.sectionId === sectionId);
+      const existingEffective = effectiveSections.find((s) => s.sectionId === sectionId);
+      if (existingStored) {
+        await updateDoc(doc(db, 'systemSections', sectionId), {
+          titleAr: secForm.titleAr.trim().slice(0, 120),
+          titleEn: (secForm.titleEn.trim() || secForm.titleAr.trim()).slice(0, 120),
           visible: secForm.visible,
-          builtIn: Boolean(existing?.builtIn),
-          createdByUid: existing?.createdByUid || currentUser.uid,
+          allowedUids: teamAllowed.length > 0 ? teamAllowed : [currentUser.uid],
+          updatedAt: serverTimestamp(),
+        });
+      } else {
+        await setDoc(doc(db, 'systemSections', sectionId), {
+          sectionId,
+          titleAr: secForm.titleAr.trim().slice(0, 120),
+          titleEn: (secForm.titleEn.trim() || secForm.titleAr.trim()).slice(0, 120),
+          iconName: existingEffective?.iconName || 'Layers',
+          order: existingEffective?.order || effectiveSections.length + 1,
+          visible: secForm.visible,
+          isBuiltIn: Boolean(existingEffective?.isBuiltIn),
+          createdByUid: currentUser.uid,
           allowedUids: teamAllowed.length > 0 ? teamAllowed : [currentUser.uid],
           createdAt: serverTimestamp(),
           updatedAt: serverTimestamp(),
-        },
-        { merge: true }
-      );
+        });
+      }
       setSecForm({ sectionId: '', titleAr: '', titleEn: '', visible: true });
       setToast({ type: 'ok', msg: 'تم حفظ القسم وتحديث القائمة الجانبية.' });
       await onRefresh();
@@ -717,28 +778,33 @@ export function SystemBuilderModule({
       const slug = sanitizeFieldKey(pageForm.titleEn || pageForm.titleAr);
       const pageId = pageForm.pageId || `page_${slug}_${Date.now().toString(36).slice(-4)}`;
       const teamAllowed = Array.from(new Set([currentUser.uid, ...allowedUids].filter(Boolean))).slice(0, 20);
-      await setDoc(
-        doc(db, 'systemPages', pageId),
-        {
-          pageId,
-          slug,
-          sectionId: pageForm.sectionId || 'sec_operations',
-          titleAr: pageForm.titleAr.trim(),
-          titleEn: pageForm.titleEn.trim() || pageForm.titleAr.trim(),
-          descriptionAr: pageForm.descriptionAr.trim(),
-          formId: pageId,
-          order: systemPages.length + 1,
-          visible: true,
-          builtIn: false,
-          allowedRoles: ['owner', 'admin', 'ops_manager'],
-          visibleTableColumns: [],
+      const existingPage = systemPages.find((p) => p.pageId === pageId);
+      const pagePayload = {
+        pageId,
+        slug: existingPage?.slug || slug,
+        sectionId: pageForm.sectionId || 'operations',
+        titleAr: pageForm.titleAr.trim().slice(0, 120),
+        titleEn: (pageForm.titleEn.trim() || pageForm.titleAr.trim()).slice(0, 120),
+        description: pageForm.descriptionAr.trim().slice(0, 400),
+        formId: existingPage?.formId || pageId,
+        iconName: existingPage?.iconName || 'Layers',
+        order: existingPage?.order ?? systemPages.length + 1,
+        visible: existingPage?.visible ?? true,
+        isBuiltIn: Boolean(existingPage?.isBuiltIn),
+        allowedRoles: existingPage?.allowedRoles || ['owner', 'admin', 'operations_manager'],
+        tableColumns: existingPage?.tableColumns || [],
+        allowedUids: teamAllowed.length > 0 ? teamAllowed : [currentUser.uid],
+        updatedAt: serverTimestamp(),
+      };
+      if (existingPage) {
+        await updateDoc(doc(db, 'systemPages', pageId), pagePayload);
+      } else {
+        await setDoc(doc(db, 'systemPages', pageId), {
+          ...pagePayload,
           createdByUid: currentUser.uid,
-          allowedUids: teamAllowed.length > 0 ? teamAllowed : [currentUser.uid],
           createdAt: serverTimestamp(),
-          updatedAt: serverTimestamp(),
-        },
-        { merge: true }
-      );
+        });
+      }
       await writeErpAuditLog({
         action: 'CUSTOM_PAGE_SAVED',
         targetCollection: 'systemPages',
@@ -778,13 +844,13 @@ export function SystemBuilderModule({
       const teamAllowed = Array.from(new Set([currentUser.uid, ...allowedUids].filter(Boolean))).slice(0, 20);
       await setDoc(doc(db, 'notificationRules', ruleId), {
         ruleId,
-        nameAr: ruleForm.nameAr.trim(),
+        nameAr: ruleForm.nameAr.trim().slice(0, 140),
         module: ruleForm.module,
         eventType: ruleForm.eventType,
-        thresholdDays: Number(ruleForm.thresholdDays) || 30,
+        thresholdDaysOrValue: Number(ruleForm.thresholdDays) || 30,
         severity: ruleForm.severity,
         targetRoles: ['owner', 'admin', 'hr_manager', 'fleet_manager'],
-        active: true,
+        enabled: true,
         createdByUid: currentUser.uid,
         allowedUids: teamAllowed.length > 0 ? teamAllowed : [currentUser.uid],
         createdAt: serverTimestamp(),
@@ -799,10 +865,57 @@ export function SystemBuilderModule({
   };
 
   // -------------------------------------------------------
-  // TAB 6: BACKUP SNAPSHOTS & DIFF PREVIEW
+  // TAB 6 & 7: FULL SYSTEM BACKUP, 1:00 AM DAILY SCHEDULER & SYSTEM RESET
   // -------------------------------------------------------
   const [snapshotTitle, setSnapshotTitle] = useState('');
   const [importJsonText, setImportJsonText] = useState('');
+  const [importMode, setImportMode] = useState<'replace' | 'merge'>('replace');
+
+  const [serverBackups, setServerBackups] = useState<SystemBackupSummary[]>([]);
+  const [backupsLoading, setBackupsLoading] = useState(false);
+  const [backupNote, setBackupNote] = useState('');
+  const [schedulerConfig, setSchedulerConfig] = useState<BackupSchedulerConfig>({
+    enabled: true,
+    hour: 1,
+    minute: 0,
+    timezone: 'Asia/Riyadh',
+    retentionDays: 30,
+    lastRunDate: '',
+    lastRunAt: '',
+    lastBackupId: '',
+    lastStatus: '',
+  });
+  const [restoreConfirmTarget, setRestoreConfirmTarget] = useState<SystemBackupSummary | null>(null);
+  const [deleteBackupConfirmTarget, setDeleteBackupConfirmTarget] = useState<SystemBackupSummary | null>(null);
+
+  const [resetAcknowledge, setResetAcknowledge] = useState(false);
+  const [resetPassword, setResetPassword] = useState('');
+
+  const canFullReset = currentUser.role === 'owner' || currentUser.role === 'admin';
+
+  const fetchBackupsState = useCallback(async () => {
+    setBackupsLoading(true);
+    try {
+      const token = await getActiveAuthToken();
+      if (!token) return;
+      const res = await fetch('/api/system/backups', {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      const json = await safeParseJsonResponse<{
+        ok?: boolean;
+        backups?: SystemBackupSummary[];
+        scheduler?: BackupSchedulerConfig;
+      }>(res);
+      if (res.ok) {
+        if (Array.isArray(json.backups)) setServerBackups(json.backups);
+        if (json.scheduler) setSchedulerConfig(json.scheduler);
+      }
+    } catch {
+      // handled gracefully in UI
+    } finally {
+      setBackupsLoading(false);
+    }
+  }, []);
 
   const buildConfigBundle = () => ({
     exportedAt: new Date().toISOString(),
@@ -821,8 +934,48 @@ export function SystemBuilderModule({
     if (!importJsonText.trim()) return null;
     try {
       const parsed = JSON.parse(importJsonText) as Record<string, unknown>;
+      if (parsed.format === 'fleet_ops_full_backup_v1') {
+        const collectionsObj = (parsed.collections || {}) as Record<string, unknown>;
+        const totalDocs = Object.values(collectionsObj).reduce<number>((sum, entry) => {
+          if (Array.isArray(entry)) return sum + entry.length;
+          if (entry && typeof entry === 'object') return sum + Object.keys(entry as Record<string, unknown>).length;
+          return sum;
+        }, 0);
+        const vaultObj = (parsed.vault || {}) as Record<string, unknown>;
+        const vaultFilesCount =
+          vaultObj.vaultFiles && typeof vaultObj.vaultFiles === 'object'
+            ? Object.keys(vaultObj.vaultFiles as Record<string, unknown>).length
+            : 0;
+        const brandingFilesCount =
+          vaultObj.brandingFiles && typeof vaultObj.brandingFiles === 'object'
+            ? Object.keys(vaultObj.brandingFiles as Record<string, unknown>).length
+            : 0;
+        const vaultCount = vaultFilesCount + brandingFilesCount;
+        const usersCount = Array.isArray(parsed.authUsers) ? parsed.authUsers.length : 0;
+        return {
+          valid: true as const,
+          isFullBackup: true as const,
+          data: parsed,
+          fullMeta: {
+            createdAt: String(parsed.exportedAt || parsed.createdAt || ''),
+            createdBy: String(parsed.createdBy || ''),
+            totalDocs,
+            vaultCount,
+            usersCount,
+            collectionsCount: Object.keys(collectionsObj).length,
+            note: String(parsed.note || ''),
+          },
+          summary: [
+            { label: 'إجمالي السجلات (Collections)', incoming: totalDocs, current: 0 },
+            { label: 'مستندات الخزينة والشعارات', incoming: vaultCount, current: 0 },
+            { label: 'حسابات المستخدمين', incoming: usersCount, current: 0 },
+            { label: 'عدد الجداول المشمولة', incoming: Object.keys(collectionsObj).length, current: 0 },
+          ],
+        };
+      }
       return {
         valid: true as const,
+        isFullBackup: false as const,
         data: parsed,
         summary: [
           { label: 'الأقسام', incoming: Array.isArray(parsed.systemSections) ? parsed.systemSections.length : 0, current: systemSections.length },
@@ -836,6 +989,184 @@ export function SystemBuilderModule({
       return { valid: false as const };
     }
   }, [importJsonText, systemSections.length, systemPages.length, dynamicFields.length, dynamicForms.length, notificationRules.length]);
+
+  const handleDownloadFullSystemBackup = async () => {
+    setBusy(true);
+    setToast(null);
+    try {
+      const token = await getActiveAuthToken();
+      if (!token) throw new Error('انتهت جلسة تسجيل الدخول.');
+      const res = await fetch('/api/system/backups/export', {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (!res.ok) {
+        const errJson = await safeParseJsonResponse<{ error?: string }>(res);
+        throw new Error(errJson.error || 'فشل تصدير النسخة الاحتياطية الكاملة.');
+      }
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `fleet_ops_full_backup_${new Date().toISOString().slice(0, 10)}.json`;
+      a.click();
+      URL.revokeObjectURL(url);
+      setToast({ type: 'ok', msg: 'تم تصدير وتنزيل النسخة الاحتياطية الكاملة للنظام بنجاح.' });
+    } catch (err) {
+      setToast({ type: 'err', msg: err instanceof Error ? err.message : 'تعذر تصدير النسخة الاحتياطية.' });
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const handleCreateServerBackup = async () => {
+    setBusy(true);
+    setToast(null);
+    try {
+      const token = await getActiveAuthToken();
+      if (!token) throw new Error('انتهت جلسة تسجيل الدخول.');
+      const res = await fetch('/api/system/backups/create', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({ note: backupNote.trim() || 'نسخة احتياطية كاملة يدوية' }),
+      });
+      const json = await safeParseJsonResponse<{ ok?: boolean; backup?: SystemBackupSummary; error?: string }>(res);
+      if (!res.ok || !json.ok) {
+        throw new Error(json.error || 'فشل حفظ النسخة الاحتياطية على الخادم.');
+      }
+      setBackupNote('');
+      setToast({
+        type: 'ok',
+        msg: `تم إنشاء وحفظ النسخة الاحتياطية الكاملة (${json.backup?.totalDocuments || 0} سجل و${json.backup?.vaultFileCount || 0} ملف).`,
+      });
+      await fetchBackupsState();
+    } catch (err) {
+      setToast({ type: 'err', msg: err instanceof Error ? err.message : 'فشل إنشاء النسخة الاحتياطية.' });
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const handleDownloadSavedBackup = async (b: SystemBackupSummary) => {
+    try {
+      const token = await getActiveAuthToken();
+      if (!token) throw new Error('انتهت جلسة تسجيل الدخول.');
+      const res = await fetch(`/api/system/backups/${encodeURIComponent(b.backupId)}/download`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (!res.ok) throw new Error('تعذر تنزيل ملف النسخة الاحتياطية.');
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = b.fileName || `${b.backupId}.json`;
+      a.click();
+      URL.revokeObjectURL(url);
+    } catch (err) {
+      setToast({ type: 'err', msg: err instanceof Error ? err.message : 'فشل التنزيل.' });
+    }
+  };
+
+  const handleSaveSchedulerConfig = async (nextConfig: BackupSchedulerConfig) => {
+    setBusy(true);
+    setToast(null);
+    try {
+      const token = await getActiveAuthToken();
+      if (!token) throw new Error('انتهت جلسة تسجيل الدخول.');
+      const res = await fetch('/api/system/backups/scheduler', {
+        method: 'PATCH',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify(nextConfig),
+      });
+      const json = await safeParseJsonResponse<{ ok?: boolean; scheduler?: BackupSchedulerConfig; error?: string }>(res);
+      if (!res.ok || !json.scheduler) {
+        throw new Error(json.error || 'تعذر حفظ إعدادات الجدول اليومي.');
+      }
+      setSchedulerConfig(json.scheduler);
+      setToast({
+        type: 'ok',
+        msg: json.scheduler.enabled
+          ? `تم تفعيل النسخ الاحتياطي التلقائي اليومي الساعة ${String(json.scheduler.hour).padStart(2, '0')}:${String(json.scheduler.minute).padStart(2, '0')} صباحًا (${json.scheduler.timezone}).`
+          : 'تم إيقاف النسخ الاحتياطي التلقائي اليومي مؤقتًا.',
+      });
+    } catch (err) {
+      setToast({ type: 'err', msg: err instanceof Error ? err.message : 'فشل تحديث الجدولة.' });
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const handleConfirmRestoreSavedBackup = async () => {
+    if (!restoreConfirmTarget) return;
+    setBusy(true);
+    setToast(null);
+    try {
+      const token = await getActiveAuthToken();
+      if (!token) throw new Error('انتهت جلسة تسجيل الدخول.');
+      const res = await fetch(`/api/system/backups/${encodeURIComponent(restoreConfirmTarget.backupId)}/restore`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({ mode: 'replace' }),
+      });
+      const json = await safeParseJsonResponse<{
+        ok?: boolean;
+        restoredCounts?: Record<string, number>;
+        vaultFileCount?: number;
+        brandingFileCount?: number;
+        restoredUsersCount?: number;
+        error?: string;
+      }>(res);
+      if (!res.ok || !json.ok) {
+        throw new Error(json.error || 'فشلت استعادة النسخة الاحتياطية.');
+      }
+      const totalDocs = Object.values(json.restoredCounts || {}).reduce((s, n) => s + Number(n || 0), 0);
+      const totalFiles = Number(json.vaultFileCount || 0) + Number(json.brandingFileCount || 0);
+      setRestoreConfirmTarget(null);
+      setToast({
+        type: 'ok',
+        msg: `تمت استعادة النظام بالكامل (${totalDocs} سجل و${totalFiles} ملف و${json.restoredUsersCount || 0} مستخدم).`,
+      });
+      await fetchBackupsState();
+      await onRefresh();
+    } catch (err) {
+      setToast({ type: 'err', msg: err instanceof Error ? err.message : 'فشلت الاستعادة.' });
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const handleConfirmDeleteSavedBackup = async () => {
+    if (!deleteBackupConfirmTarget) return;
+    setBusy(true);
+    setToast(null);
+    try {
+      const token = await getActiveAuthToken();
+      if (!token) throw new Error('انتهت جلسة تسجيل الدخول.');
+      const res = await fetch(`/api/system/backups/${encodeURIComponent(deleteBackupConfirmTarget.backupId)}`, {
+        method: 'DELETE',
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      const json = await safeParseJsonResponse<{ ok?: boolean; error?: string }>(res);
+      if (!res.ok || !json.ok) {
+        throw new Error(json.error || 'فشل حذف النسخة الاحتياطية.');
+      }
+      setDeleteBackupConfirmTarget(null);
+      setToast({ type: 'ok', msg: 'تم حذف ملف النسخة الاحتياطية من الخادم.' });
+      await fetchBackupsState();
+    } catch (err) {
+      setToast({ type: 'err', msg: err instanceof Error ? err.message : 'تعذر حذف النسخة.' });
+    } finally {
+      setBusy(false);
+    }
+  };
 
   const handleDownloadJsonBackup = () => {
     const blob = new Blob([JSON.stringify(buildConfigBundle(), null, 2)], { type: 'application/json' });
@@ -855,13 +1186,12 @@ export function SystemBuilderModule({
       const teamAllowed = Array.from(new Set([currentUser.uid, ...allowedUids].filter(Boolean))).slice(0, 20);
       await setDoc(doc(db, 'configSnapshots', snapshotId), {
         snapshotId,
-        titleAr: snapshotTitle.trim(),
+        nameAr: snapshotTitle.trim().slice(0, 140),
         createdByEmail: currentUser.email,
         payloadJson: JSON.stringify(buildConfigBundle()),
         createdByUid: currentUser.uid,
         allowedUids: teamAllowed.length > 0 ? teamAllowed : [currentUser.uid],
         createdAt: serverTimestamp(),
-        updatedAt: serverTimestamp(),
       });
       setSnapshotTitle('');
       setToast({ type: 'ok', msg: 'تم حفظ لقطة النسخ الاحتياطي لإعدادات النظام.' });
@@ -874,7 +1204,42 @@ export function SystemBuilderModule({
   const handleApplyConfigBundle = async (bundle: Record<string, unknown>) => {
     if (!canManageSettings) return;
     setBusy(true);
+    setToast(null);
     try {
+      if (bundle.format === 'fleet_ops_full_backup_v1') {
+        const token = await getActiveAuthToken();
+        if (!token) throw new Error('انتهت جلسة تسجيل الدخول.');
+        const res = await fetch('/api/system/backups/import', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${token}`,
+          },
+          body: JSON.stringify({ mode: importMode, backup: bundle }),
+        });
+        const json = await safeParseJsonResponse<{
+          ok?: boolean;
+          restoredCounts?: Record<string, number>;
+          vaultFileCount?: number;
+          brandingFileCount?: number;
+          restoredUsersCount?: number;
+          error?: string;
+        }>(res);
+        if (!res.ok || !json.ok) {
+          throw new Error(json.error || 'فشل استيراد النسخة الاحتياطية الكاملة.');
+        }
+        const totalDocs = Object.values(json.restoredCounts || {}).reduce((s, n) => s + Number(n || 0), 0);
+        const totalFiles = Number(json.vaultFileCount || 0) + Number(json.brandingFileCount || 0);
+        setImportJsonText('');
+        setToast({
+          type: 'ok',
+          msg: `تم استيراد واستعادة النسخة الكاملة بنجاح (${totalDocs} سجل، ${totalFiles} ملف، ${json.restoredUsersCount || 0} مستخدم).`,
+        });
+        await fetchBackupsState();
+        await onRefresh();
+        return;
+      }
+
       const teamAllowed = Array.from(new Set([currentUser.uid, ...allowedUids].filter(Boolean))).slice(0, 20);
       const applyCollection = async (col: string, idKey: string, items: unknown) => {
         if (!Array.isArray(items)) return;
@@ -922,6 +1287,51 @@ export function SystemBuilderModule({
     }
   };
 
+  const handleExecuteFactoryReset = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!canFullReset || !resetAcknowledge || !resetPassword.trim()) return;
+    setBusy(true);
+    setToast(null);
+    try {
+      const token = await getActiveAuthToken();
+      if (!token) throw new Error('انتهت جلسة تسجيل الدخول.');
+      const res = await fetch('/api/system/reset', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({ password: resetPassword }),
+      });
+      const json = await safeParseJsonResponse<{
+        ok?: boolean;
+        token?: string;
+        profile?: UserProfile;
+        clearedCollections?: number;
+        error?: string;
+      }>(res);
+      if (!res.ok || !json.ok) {
+        throw new Error(json.error || 'فشلت عملية إعادة ضبط النظام.');
+      }
+      if (json.token && json.profile) {
+        setSessionToken(json.token);
+        syncAuthHandle(json.profile);
+      }
+      setResetPassword('');
+      setResetAcknowledge(false);
+      setToast({
+        type: 'ok',
+        msg: `تم تنفيذ إعادة الضبط الكامل للنظام ومسح ${json.clearedCollections || 42} مجموعة وجميع الملفات بنجاح، مع الإبقاء على حساب المدير الافتراضي فقط.`,
+      });
+      await fetchBackupsState();
+      await onRefresh();
+    } catch (err) {
+      setToast({ type: 'err', msg: err instanceof Error ? err.message : 'تعذر تنفيذ إعادة الضبط.' });
+    } finally {
+      setBusy(false);
+    }
+  };
+
   // -------------------------------------------------------
   // TAB 7: TRASH & RECOVERY
   // -------------------------------------------------------
@@ -932,12 +1342,14 @@ export function SystemBuilderModule({
     setBusy(true);
     try {
       const teamAllowed = Array.from(new Set([currentUser.uid, ...allowedUids].filter(Boolean))).slice(0, 20);
+      const parsedSnapshot = JSON.parse(item.snapshotJson) as Record<string, unknown>;
       await setDoc(
         doc(db, item.sourceCollection, item.sourceDocId),
         {
-          ...item.snapshot,
+          ...parsedSnapshot,
           createdByUid: currentUser.uid,
           allowedUids: teamAllowed.length > 0 ? teamAllowed : [currentUser.uid],
+          createdAt: serverTimestamp(),
           updatedAt: serverTimestamp(),
         },
         { merge: true }
@@ -946,13 +1358,12 @@ export function SystemBuilderModule({
         status: 'restored',
         restoredByEmail: currentUser.email,
         restoredAt: new Date().toISOString(),
-        updatedAt: serverTimestamp(),
       });
       await writeErpAuditLog({
         action: 'TRASH_ITEM_RESTORED',
         targetCollection: item.sourceCollection,
         targetId: item.sourceDocId,
-        entityType: item.entityType,
+        entityType: item.itemType,
         details: `استعادة العنصر "${item.titleAr}" من سلة المحذوفات`,
         user: currentUser,
         allowedUids,
@@ -972,10 +1383,10 @@ export function SystemBuilderModule({
   const [healthData, setHealthData] = useState<HealthResponse | null>(null);
   const [healthLoading, setHealthLoading] = useState(false);
 
-  const fetchSystemHealth = async () => {
+  const fetchSystemHealth = useCallback(async () => {
     setHealthLoading(true);
     try {
-      const token = await auth.currentUser?.getIdToken();
+      const token = await getActiveAuthToken();
       if (!token) return;
       const res = await fetch('/api/system/health', {
         headers: { Authorization: `Bearer ${token}` },
@@ -987,7 +1398,16 @@ export function SystemBuilderModule({
     } finally {
       setHealthLoading(false);
     }
-  };
+  }, []);
+
+  useEffect(() => {
+    if (subTab === 'backup_audit' || subTab === 'system_reset') {
+      void fetchBackupsState();
+    }
+    if (subTab === 'health' && !healthData) {
+      void fetchSystemHealth();
+    }
+  }, [subTab, fetchBackupsState, fetchSystemHealth, healthData]);
 
   // Data Dictionary Combined Rows
   const dictionaryRows = useMemo(() => {
@@ -1025,7 +1445,7 @@ export function SystemBuilderModule({
         key: df.key,
         labelAr: df.labelAr,
         labelEn: df.labelEn,
-        type: DYNAMIC_FIELD_TYPE_META[df.type]?.labelAr || df.type,
+        type: DYNAMIC_FIELD_TYPE_META.find((m) => m.type === df.type)?.labelAr || df.type,
         formName: formLabel,
         source: 'مخصص',
         required: df.required,
@@ -1041,7 +1461,10 @@ export function SystemBuilderModule({
     { key: 'sections_pages', label: 'الأقسام والصفحات', count: systemPages.length, icon: <Boxes className="h-3.5 w-3.5" /> },
     { key: 'dictionary', label: 'قاموس البيانات', count: dictionaryRows.length, icon: <BookOpen className="h-3.5 w-3.5" /> },
     { key: 'rules', label: 'قواعد التنبيهات', count: notificationRules.length, icon: <BellRing className="h-3.5 w-3.5" /> },
-    { key: 'backup_audit', label: 'النسخ والتدقيق', count: configSnapshots.length, icon: <DatabaseBackup className="h-3.5 w-3.5" /> },
+    { key: 'backup_audit', label: 'النسخ الاحتياطي والتدقيق', count: serverBackups.length + configSnapshots.length, icon: <DatabaseBackup className="h-3.5 w-3.5" /> },
+    ...(canFullReset
+      ? [{ key: 'system_reset' as SystemBuilderTab, label: 'إعادة ضبط النظام', icon: <ShieldAlert className="h-3.5 w-3.5 text-red-600" /> }]
+      : []),
     { key: 'trash', label: 'سلة المحذوفات', count: activeTrash.length, icon: <Trash2 className="h-3.5 w-3.5" /> },
     { key: 'health', label: 'صحة النظام', icon: <Activity className="h-3.5 w-3.5" /> },
   ];
@@ -1152,7 +1575,7 @@ export function SystemBuilderModule({
                           <span className="font-mono-num text-[11px] rounded bg-slate-100 dark:bg-slate-800 px-1.5 py-0.5 text-slate-600 dark:text-slate-300">
                             {f.key}
                           </span>
-                          <StatusBadge label={DYNAMIC_FIELD_TYPE_META[f.type]?.labelAr || f.type} tone="info" />
+                          <StatusBadge label={DYNAMIC_FIELD_TYPE_META.find((m) => m.type === f.type)?.labelAr || f.type} tone="info" />
                           {f.required && <StatusBadge label="إلزامي" tone="warning" />}
                           {f.showInTable && <StatusBadge label="ظاهر بالجدول" tone="success" />}
                           {!f.visible && <StatusBadge label="مخفي" tone="neutral" />}
@@ -1242,7 +1665,7 @@ export function SystemBuilderModule({
                   >
                     <div>
                       <div className="font-bold text-slate-800 dark:text-slate-100">{f.labelAr}</div>
-                      <div className="text-[10px] text-slate-500">{DYNAMIC_FIELD_TYPE_META[f.type]?.labelAr}</div>
+                      <div className="text-[10px] text-slate-500">{DYNAMIC_FIELD_TYPE_META.find((m) => m.type === f.type)?.labelAr}</div>
                     </div>
                     <Button
                       size="sm"
@@ -1425,7 +1848,7 @@ export function SystemBuilderModule({
 
             {/* Right Pane: Live Interactive Preview */}
             <Card className="lg:col-span-4 space-y-3">
-              <SectionHeader title="المعاينة التفاعلية المباشرة" icon={<Eye className="h-4 w-4 text-blue-600" />} />
+              <SectionHeader title="المعاينة التفاعلية المباشرة" actions={<Eye className="h-4 w-4 text-blue-600" />} />
               <DynamicFieldsRenderer
                 formId={designerFormId}
                 entityId="preview"
@@ -1436,7 +1859,7 @@ export function SystemBuilderModule({
                     formId: designerFormId,
                     nameAr: designerFormId,
                     nameEn: designerFormId,
-                    module: 'preview',
+                    module: 'custom',
                     targetEntity: 'preview',
                     layoutMode: draftLayoutMode,
                     sections: draftSections,
@@ -1468,38 +1891,21 @@ export function SystemBuilderModule({
                   <div>
                     <div className="font-bold text-slate-900 dark:text-white">{sec.titleAr}</div>
                     <div className="text-[11px] text-slate-500 font-mono-num">
-                      {sec.sectionId} · {sec.builtIn ? 'أساسي' : 'مخصص'}
+                      {sec.sectionId} · {sec.isBuiltIn ? 'أساسي' : 'مخصص'}
                     </div>
                   </div>
                   <div className="flex items-center gap-1.5">
                     <Button
                       size="sm"
                       variant="ghost"
-                      onClick={() =>
-                        void setDoc(
-                          doc(db, 'systemSections', sec.sectionId),
-                          {
-                            ...sec,
-                            visible: !sec.visible,
-                            allowedUids: Array.from(new Set([currentUser.uid, ...allowedUids].filter(Boolean))).slice(0, 20),
-                            updatedAt: serverTimestamp(),
-                          },
-                          { merge: true }
-                        ).then(onRefresh)
-                      }
+                      onClick={() => void persistSectionPatch(sec, { visible: !sec.visible })}
                     >
                       {sec.visible ? 'إخفاء' : 'إظهار'}
                     </Button>
                     {idx > 0 && (
                       <button
                         type="button"
-                        onClick={() =>
-                          void setDoc(
-                            doc(db, 'systemSections', sec.sectionId),
-                            { ...sec, order: Math.max(1, sec.order - 1), updatedAt: serverTimestamp() },
-                            { merge: true }
-                          ).then(onRefresh)
-                        }
+                        onClick={() => void persistSectionPatch(sec, { order: Math.max(1, sec.order - 1) })}
                         className="p-1 text-slate-500 hover:text-slate-900"
                       >
                         <ArrowUp className="h-3.5 w-3.5" />
@@ -1507,13 +1913,7 @@ export function SystemBuilderModule({
                     )}
                     <button
                       type="button"
-                      onClick={() =>
-                        void setDoc(
-                          doc(db, 'systemSections', sec.sectionId),
-                          { ...sec, order: sec.order + 1, updatedAt: serverTimestamp() },
-                          { merge: true }
-                        ).then(onRefresh)
-                      }
+                      onClick={() => void persistSectionPatch(sec, { order: sec.order + 1 })}
                       className="p-1 text-slate-500 hover:text-slate-900"
                     >
                       <ArrowDown className="h-3.5 w-3.5" />
@@ -1711,22 +2111,22 @@ export function SystemBuilderModule({
                     <div>
                       <div className="font-bold text-slate-900 dark:text-white">{r.nameAr}</div>
                       <div className="text-[11px] text-slate-500 font-mono-num">
-                        {r.module} · {r.eventType} · عتبة: {r.thresholdDays ?? 0} يوم
+                        {r.module} · {r.eventType} · عتبة: {r.thresholdDaysOrValue ?? 0} يوم
                       </div>
                     </div>
                     <div className="flex items-center gap-2">
-                      <StatusBadge label={r.active ? 'مفعّلة' : 'معطّلة'} tone={r.active ? 'success' : 'neutral'} />
+                      <StatusBadge label={r.enabled ? 'مفعّلة' : 'معطّلة'} tone={r.enabled ? 'success' : 'neutral'} />
                       <Button
                         size="sm"
                         variant="secondary"
                         onClick={() =>
                           void updateDoc(doc(db, 'notificationRules', r.ruleId), {
-                            active: !r.active,
+                            enabled: !r.enabled,
                             updatedAt: serverTimestamp(),
                           }).then(onRefresh)
                         }
                       >
-                        {r.active ? 'تعطيل' : 'تفعيل'}
+                        {r.enabled ? 'تعطيل' : 'تفعيل'}
                       </Button>
                       <button
                         type="button"
@@ -1744,52 +2144,124 @@ export function SystemBuilderModule({
         </div>
       )}
 
-      {/* 6. BACKUP SNAPSHOTS, DIFF & AUDIT LOGS */}
+      {/* 6. FULL SYSTEM BACKUP, 1:00 AM DAILY SCHEDULER & AUDIT LOGS */}
       {subTab === 'backup_audit' && (
         <div className="space-y-5">
+          {/* Full System Backup & 1:00 AM Auto Scheduler */}
           <div className="grid grid-cols-1 gap-5 lg:grid-cols-2">
             <Card className="space-y-4">
-              <SectionHeader title="تصدير وحفظ لقطة إعدادات النظام" />
+              <SectionHeader
+                title="النسخ الاحتياطي الشامل للنظام بالكامل (Exact Full Backup)"
+                subtitle="يشمل كافة السجلات (42 مجموعة)، المندوبين، السيارات، العمليات، المستندات، الشعارات، الحقول، والصلاحيات"
+              />
               <div className="flex flex-wrap gap-2">
-                <Button variant="primary" icon={<Download className="h-3.5 w-3.5" />} onClick={handleDownloadJsonBackup}>
-                  تنزيل نسخة احتياطية JSON
+                <Button
+                  variant="primary"
+                  loading={busy}
+                  icon={<Download className="h-3.5 w-3.5" />}
+                  onClick={() => void handleDownloadFullSystemBackup()}
+                >
+                  تصدير وتنزيل نسخة شاملة للنظام (.json)
+                </Button>
+                <Button
+                  variant="secondary"
+                  icon={<Download className="h-3.5 w-3.5" />}
+                  onClick={handleDownloadJsonBackup}
+                >
+                  تصدير الإعدادات فقط
                 </Button>
               </div>
-              <div className="flex gap-2 pt-2 border-t border-slate-100 dark:border-slate-800">
+
+              <div className="flex flex-wrap gap-2 pt-3 border-t border-slate-100 dark:border-slate-800">
                 <Input
-                  placeholder="اسم اللقطة الاحتياطية (مثال: قبل تعديل حقول HR)"
-                  value={snapshotTitle}
-                  onChange={(e) => setSnapshotTitle(e.target.value)}
+                  placeholder="وصف النسخة (مثال: نسخة ما قبل التحديث الشهري)"
+                  value={backupNote}
+                  onChange={(e) => setBackupNote(e.target.value)}
+                  className="flex-1 min-w-[200px]"
                 />
-                <Button variant="secondary" loading={busy} onClick={() => void handleSaveSnapshot()}>
-                  حفظ لقطة
+                <Button
+                  variant="accent"
+                  loading={busy}
+                  icon={<Save className="h-3.5 w-3.5" />}
+                  onClick={() => void handleCreateServerBackup()}
+                >
+                  حفظ نسخة شاملة على الخادم
                 </Button>
               </div>
-              <div className="divide-y divide-slate-100 dark:divide-slate-800 max-h-48 overflow-y-auto erp-scroll">
-                {configSnapshots.map((snap) => (
-                  <div key={snap.snapshotId} className="flex items-center justify-between py-2 text-xs">
-                    <div>
-                      <div className="font-bold">{snap.titleAr}</div>
-                      <div className="text-[11px] text-slate-500">{snap.createdByEmail}</div>
-                    </div>
-                    <Button
-                      size="sm"
-                      variant="secondary"
-                      onClick={() => setImportJsonText(snap.payloadJson)}
-                    >
-                      معاينة الفروقات
-                    </Button>
+
+              <div className="rounded-xl border border-slate-200 dark:border-slate-800 bg-slate-50/70 dark:bg-slate-900/50 p-3.5 space-y-3">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <div className="flex items-center gap-2 text-xs font-bold text-slate-900 dark:text-white">
+                    <Clock className="h-4 w-4 text-blue-600" />
+                    <span>النسخ الاحتياطي التلقائي اليومي (01:00 صباحًا)</span>
                   </div>
-                ))}
+                  <StatusBadge
+                    label={schedulerConfig.enabled ? 'مفعّل تلقائيًا' : 'متوقف مؤقتًا'}
+                    tone={schedulerConfig.enabled ? 'success' : 'neutral'}
+                  />
+                </div>
+                <p className="text-[11px] text-slate-500 dark:text-slate-400">
+                  يقوم الخادم تلقائيًا بإنشاء وحفظ نسخة احتياطية كاملة يوميًا عند الساعة{' '}
+                  <span className="font-mono-num font-bold">
+                    {String(schedulerConfig.hour).padStart(2, '0')}:{String(schedulerConfig.minute).padStart(2, '0')} AM
+                  </span>{' '}
+                  بتوقيت <span className="font-mono-num">{schedulerConfig.timezone}</span> مع الاحتفاظ بالنسخ التلقائية لمدة{' '}
+                  <span className="font-mono-num font-bold">{schedulerConfig.retentionDays}</span> يوم.
+                </p>
+                {schedulerConfig.lastRunAt && (
+                  <div className="text-[11px] font-mono-num text-slate-600 dark:text-slate-300 flex flex-wrap gap-3">
+                    <span>آخر تشغيل: {new Date(schedulerConfig.lastRunAt).toLocaleString('ar-SA')}</span>
+                    <span>الحالة: {schedulerConfig.lastStatus === 'success' ? 'نجاح' : schedulerConfig.lastStatus || '-'}</span>
+                  </div>
+                )}
+                <div className="flex flex-wrap items-center gap-2">
+                  <Button
+                    size="sm"
+                    variant={schedulerConfig.enabled ? 'secondary' : 'primary'}
+                    loading={busy}
+                    onClick={() =>
+                      void handleSaveSchedulerConfig({ ...schedulerConfig, enabled: !schedulerConfig.enabled })
+                    }
+                  >
+                    {schedulerConfig.enabled ? 'إيقاف النسخ التلقائي' : 'تفعيل النسخ التلقائي 1:00 ص'}
+                  </Button>
+                  <FormField label="فترة الاحتفاظ (يوم)" className="w-36">
+                    <Input
+                      type="number"
+                      min={1}
+                      max={365}
+                      className="h-8 text-xs font-mono-num"
+                      value={schedulerConfig.retentionDays}
+                      onChange={(e) =>
+                        setSchedulerConfig((prev) => ({
+                          ...prev,
+                          retentionDays: Math.max(1, Math.min(365, Number(e.target.value) || 30)),
+                        }))
+                      }
+                    />
+                  </FormField>
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    loading={busy}
+                    onClick={() => void handleSaveSchedulerConfig(schedulerConfig)}
+                  >
+                    حفظ الإعدادات
+                  </Button>
+                </div>
               </div>
             </Card>
 
+            {/* Full Backup Import & Preview */}
             <Card className="space-y-4">
-              <SectionHeader title="استيراد ومقارنة التغييرات قبل التطبيق (Diff Preview)" />
-              <div className="flex items-center gap-2">
-                <label className="inline-flex cursor-pointer items-center gap-1.5 rounded-lg border border-slate-200 dark:border-slate-700 px-3 py-1.5 text-xs font-semibold hover:bg-slate-50">
+              <SectionHeader
+                title="استيراد واسترجاع نسخة احتياطية"
+                subtitle="يدعم الاسترجاع المطابق 100% لملفات fleet_ops_full_backup_v1 أو استيراد حزم الإعدادات"
+              />
+              <div className="flex flex-wrap items-center gap-3">
+                <label className="inline-flex cursor-pointer items-center gap-1.5 rounded-lg border border-slate-200 dark:border-slate-700 px-3 py-1.5 text-xs font-semibold hover:bg-slate-50 dark:hover:bg-slate-800">
                   <Upload className="h-3.5 w-3.5" />
-                  <span>رفع ملف JSON</span>
+                  <span>رفع ملف النسخة الاحتياطية JSON</span>
                   <input
                     type="file"
                     accept=".json,application/json"
@@ -1802,35 +2274,169 @@ export function SystemBuilderModule({
                     }}
                   />
                 </label>
+                <Select
+                  value={importMode}
+                  onChange={(e) => setImportMode(e.target.value as 'replace' | 'merge')}
+                  className="!w-56 text-xs"
+                >
+                  <option value="replace">استبدال كامل مطابق 100% (Replace)</option>
+                  <option value="merge">دمج السجلات مع الحالي (Merge)</option>
+                </Select>
               </div>
               <Textarea
                 rows={4}
                 dir="ltr"
                 className="font-mono-num text-xs"
-                placeholder='{"systemSections": [...], "dynamicFields": [...]}'
+                placeholder='الصق محتوى ملف النسخة الاحتياطية JSON هنا أو ارفع الملف من الزر أعلاه...'
                 value={importJsonText}
                 onChange={(e) => setImportJsonText(e.target.value)}
               />
+              {parsedImportDiff && !parsedImportDiff.valid && (
+                <ToastBanner type="err" message="صيغة JSON غير صالحة. يرجى التأكد من سلامة ملف النسخة الاحتياطية." />
+              )}
               {parsedImportDiff && parsedImportDiff.valid && (
-                <div className="rounded-xl border border-blue-200 bg-blue-50/50 dark:border-blue-900 dark:bg-blue-950/30 p-3 space-y-2 text-xs">
-                  <div className="font-bold text-blue-900 dark:text-blue-200">ملخص الفروقات قبل التطبيق:</div>
+                <div className="rounded-xl border border-blue-200 bg-blue-50/50 dark:border-blue-900 dark:bg-blue-950/30 p-3 space-y-2.5 text-xs">
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="font-bold text-blue-900 dark:text-blue-200">
+                      {parsedImportDiff.isFullBackup
+                        ? 'تم التعرف على نسخة احتياطية شاملة متوافقة 100% (fleet_ops_full_backup_v1)'
+                        : 'ملخص فروقات حزمة الإعدادات قبل التطبيق:'}
+                    </span>
+                    {parsedImportDiff.isFullBackup && parsedImportDiff.fullMeta?.createdAt && (
+                      <span className="font-mono-num text-[11px] text-blue-700 dark:text-blue-300">
+                        {new Date(parsedImportDiff.fullMeta.createdAt).toLocaleString('ar-SA')}
+                      </span>
+                    )}
+                  </div>
                   <div className="grid grid-cols-2 gap-2">
                     {parsedImportDiff.summary.map((s) => (
-                      <div key={s.label} className="flex justify-between rounded bg-white/80 dark:bg-slate-900 px-2 py-1">
+                      <div key={s.label} className="flex justify-between rounded bg-white/80 dark:bg-slate-900 px-2.5 py-1.5">
                         <span>{s.label}</span>
                         <span className="font-mono-num font-bold">
-                          الحالي {s.current} ← المستورد {s.incoming}
+                          {parsedImportDiff.isFullBackup ? s.incoming : `الحالي ${s.current} ← المستورد ${s.incoming}`}
                         </span>
                       </div>
                     ))}
                   </div>
-                  <Button variant="primary" size="sm" loading={busy} onClick={() => void handleApplyConfigBundle(parsedImportDiff.data)}>
-                    اعتماد وتطبيق الحزمة الآن
+                  <Button
+                    variant="primary"
+                    size="sm"
+                    loading={busy}
+                    icon={<CheckCircle2 className="h-3.5 w-3.5" />}
+                    onClick={() => void handleApplyConfigBundle(parsedImportDiff.data)}
+                  >
+                    {parsedImportDiff.isFullBackup
+                      ? importMode === 'replace'
+                        ? 'تأكيد استرجاع كامل النظام مطابقًا الآن'
+                        : 'تأكيد استيراد ودمج النسخة الآن'
+                      : 'اعتماد وتطبيق الحزمة الآن'}
                   </Button>
                 </div>
               )}
+
+              {/* Legacy Config Snapshots */}
+              <div className="border-t border-slate-100 dark:border-slate-800 pt-3 space-y-2">
+                <div className="flex gap-2">
+                  <Input
+                    placeholder="حفظ لقطة سريعة للإعدادات فقط..."
+                    value={snapshotTitle}
+                    onChange={(e) => setSnapshotTitle(e.target.value)}
+                  />
+                  <Button size="sm" variant="secondary" loading={busy} onClick={() => void handleSaveSnapshot()}>
+                    حفظ لقطة
+                  </Button>
+                </div>
+                {configSnapshots.length > 0 && (
+                  <div className="divide-y divide-slate-100 dark:divide-slate-800 max-h-32 overflow-y-auto erp-scroll">
+                    {configSnapshots.map((snap) => (
+                      <div key={snap.snapshotId} className="flex items-center justify-between py-1.5 text-xs">
+                        <div>
+                          <span className="font-bold">{snap.nameAr}</span>{' '}
+                          <span className="text-[11px] text-slate-500">({snap.createdByEmail})</span>
+                        </div>
+                        <Button size="sm" variant="ghost" onClick={() => setImportJsonText(snap.payloadJson)}>
+                          معاينة
+                        </Button>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
             </Card>
           </div>
+
+          {/* Saved Full Backups Archive on Server */}
+          <Card className="space-y-3">
+            <SectionHeader
+              title={`أرشيف النسخ الاحتياطية الكاملة المحفوظة (${serverBackups.length})`}
+              subtitle="يشمل النسخ التلقائية اليومية (1:00 صباحًا) والنسخ اليدوية المحفوظة على الخادم"
+              actions={
+                <Button
+                  size="sm"
+                  variant="secondary"
+                  icon={<RefreshCw className={`h-3.5 w-3.5 ${backupsLoading ? 'animate-spin' : ''}`} />}
+                  onClick={() => void fetchBackupsState()}
+                >
+                  تحديث القائمة
+                </Button>
+              }
+            />
+            {serverBackups.length === 0 ? (
+              <EmptyState
+                title="لا توجد نسخ احتياطية كاملة محفوظة على الخادم بعد"
+                subtitle="اضغط «حفظ نسخة شاملة على الخادم» أو انتظر النسخة التلقائية القادمة الساعة 1:00 صباحًا."
+              />
+            ) : (
+              <div className="divide-y divide-slate-100 dark:divide-slate-800">
+                {serverBackups.map((b) => (
+                  <div key={b.backupId} className="flex flex-wrap items-center justify-between gap-3 py-3 text-xs">
+                    <div className="space-y-0.5">
+                      <div className="flex flex-wrap items-center gap-2">
+                        <span className="font-bold text-slate-900 dark:text-white">{b.fileName}</span>
+                        <StatusBadge
+                          label={b.type === 'auto_daily' ? 'تلقائي يومي 1:00 ص' : 'يدوي'}
+                          tone={b.type === 'auto_daily' ? 'info' : 'neutral'}
+                        />
+                        <span className="font-mono-num text-[11px] text-slate-500">
+                          {Math.max(1, Math.round(b.sizeBytes / 1024))} KB
+                        </span>
+                      </div>
+                      <div className="text-[11px] text-slate-500 font-mono-num">
+                        {new Date(b.createdAt).toLocaleString('ar-SA')} · {b.totalDocuments} سجل · {b.vaultFileCount} ملف
+                        {b.note ? ` · ${b.note}` : ''}
+                      </div>
+                    </div>
+                    <div className="flex items-center gap-1.5">
+                      <Button
+                        size="sm"
+                        variant="secondary"
+                        icon={<Download className="h-3.5 w-3.5" />}
+                        onClick={() => void handleDownloadSavedBackup(b)}
+                      >
+                        تنزيل
+                      </Button>
+                      <Button
+                        size="sm"
+                        variant="accent"
+                        icon={<ArchiveRestore className="h-3.5 w-3.5" />}
+                        onClick={() => setRestoreConfirmTarget(b)}
+                      >
+                        استرجاع
+                      </Button>
+                      <button
+                        type="button"
+                        onClick={() => setDeleteBackupConfirmTarget(b)}
+                        className="rounded-lg p-1.5 text-red-600 hover:bg-red-50 dark:hover:bg-red-950/40"
+                        title="حذف النسخة"
+                      >
+                        <Trash2 className="h-4 w-4" />
+                      </button>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </Card>
 
           <Card className="space-y-3">
             <SectionHeader title="سجل تغييرات منشئ النظام والإعدادات (Audit Diff Timeline)" />
@@ -1864,6 +2470,93 @@ export function SystemBuilderModule({
         </div>
       )}
 
+      {/* 7. FULL SYSTEM FACTORY RESET (PROTECTED BY MASTER PASSWORD) */}
+      {subTab === 'system_reset' && canFullReset && (
+        <div className="max-w-3xl space-y-5">
+          <div className="rounded-xl border-2 border-red-300 dark:border-red-900 bg-red-50/80 dark:bg-red-950/30 p-5 space-y-3">
+            <div className="flex items-start gap-3">
+              <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-red-600 text-white">
+                <AlertTriangle className="h-5 w-5" />
+              </div>
+              <div className="space-y-1">
+                <h3 className="text-base font-bold text-red-900 dark:text-red-200">
+                  تحذير حرج: إعادة ضبط كامل النظام (Factory Reset)
+                </h3>
+                <p className="text-xs leading-relaxed text-red-800 dark:text-red-300">
+                  سيقوم هذا الإجراء بمسح كافة بيانات النظام بشكل نهائي وغير قابل للتراجع بعد التحقق من كلمة مرور الأمان الخاصة بإعادة الضبط، ويشمل ذلك:
+                </p>
+              </div>
+            </div>
+            <ul className="grid grid-cols-1 sm:grid-cols-2 gap-1.5 text-xs text-red-800 dark:text-red-300 list-disc pr-6">
+              <li>ملفات جميع المناديب وربط المنصات</li>
+              <li>المركبات وعهد التسليم وسجل الصيانة</li>
+              <li>جميع سجلات التشغيل اليومي وتقارير الاستيراد</li>
+              <li>مستندات الخزينة الخاصة والملفات المرفوعة والشعارات</li>
+              <li>الحقول والنماذج والصفحات والأقسام المخصصة</li>
+              <li>حسابات المستخدمين المضافة (يُبقى على حساب المدير فقط)</li>
+            </ul>
+            <div className="pt-2 flex flex-wrap items-center gap-2">
+              <Button
+                type="button"
+                variant="secondary"
+                size="sm"
+                icon={<Download className="h-3.5 w-3.5" />}
+                onClick={() => void handleDownloadFullSystemBackup()}
+              >
+                تنزيل نسخة احتياطية كاملة قبل المسح
+              </Button>
+            </div>
+          </div>
+
+          <Card className="space-y-4">
+            <SectionHeader
+              title="التحقق الأمني وتنفيذ إعادة الضبط"
+              subtitle="يتطلب إدخال كلمة مرور إعادة الضبط المعتمدة لتأكيد مسح جميع بيانات النظام"
+            />
+            <form onSubmit={(e) => void handleExecuteFactoryReset(e)} className="space-y-4">
+              <label className="flex items-start gap-2.5 rounded-lg border border-slate-200 dark:border-slate-800 p-3 text-xs font-semibold cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={resetAcknowledge}
+                  onChange={(e) => setResetAcknowledge(e.target.checked)}
+                  className="mt-0.5"
+                />
+                <span>
+                  أقر بفهمي الكامل أن إعادة ضبط النظام ستمسح جميع البيانات والملفات والمستخدمين بشكل نهائي، وأنه سيتم الإبقاء على حساب المدير الافتراضي فقط.
+                </span>
+              </label>
+
+              <FormField label="كلمة مرور إعادة ضبط النظام الكامل" required>
+                <div className="relative max-w-sm">
+                  <KeyRound className="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 h-4 w-4 text-slate-400" />
+                  <Input
+                    required
+                    type="password"
+                    dir="ltr"
+                    className="pr-10 font-mono-num"
+                    placeholder="أدخل كلمة مرور إعادة الضبط..."
+                    value={resetPassword}
+                    onChange={(e) => setResetPassword(e.target.value)}
+                  />
+                </div>
+              </FormField>
+
+              <div className="flex items-center gap-3 pt-1">
+                <Button
+                  type="submit"
+                  variant="danger"
+                  loading={busy}
+                  disabled={!resetAcknowledge || !resetPassword.trim()}
+                  icon={<ShieldAlert className="h-4 w-4" />}
+                >
+                  تنفيذ إعادة ضبط كامل النظام الآن
+                </Button>
+              </div>
+            </form>
+          </Card>
+        </div>
+      )}
+
       {/* 7. TRASH & RECOVERY */}
       {subTab === 'trash' && (
         <Card className="space-y-4">
@@ -1880,7 +2573,7 @@ export function SystemBuilderModule({
                   <div>
                     <div className="font-bold text-slate-900 dark:text-white">{item.titleAr}</div>
                     <div className="font-mono-num text-[11px] text-slate-500">
-                      {item.sourceCollection}/{item.sourceDocId} · حُذف بواسطة {item.deletedByEmail} · {item.deletedAt.slice(0, 10)}
+                      {item.sourceCollection}/{item.sourceDocId} · حُذف بواسطة {item.deletedByEmail}
                     </div>
                   </div>
                   <div className="flex items-center gap-2">
@@ -2001,9 +2694,9 @@ export function SystemBuilderModule({
                 value={fForm.type}
                 onChange={(e) => setFForm({ ...fForm, type: e.target.value as DynamicFieldType })}
               >
-                {(Object.keys(DYNAMIC_FIELD_TYPE_META) as DynamicFieldType[]).map((t) => (
-                  <option key={t} value={t}>
-                    {DYNAMIC_FIELD_TYPE_META[t].labelAr} ({t})
+                {DYNAMIC_FIELD_TYPE_META.map((m) => (
+                  <option key={m.type} value={m.type}>
+                    {m.labelAr} ({m.type})
                   </option>
                 ))}
               </Select>
@@ -2163,6 +2856,34 @@ export function SystemBuilderModule({
         busy={busy}
         onCancel={() => setDeleteFieldTarget(null)}
         onConfirm={() => void handleConfirmDeleteField()}
+      />
+
+      <ConfirmModal
+        open={Boolean(restoreConfirmTarget)}
+        title="تأكيد استرجاع النسخة الاحتياطية الكاملة"
+        description={
+          restoreConfirmTarget
+            ? `سيتم استرجاع النظام بالكامل من النسخة "${restoreConfirmTarget.fileName}" (${restoreConfirmTarget.totalDocuments} سجل و${restoreConfirmTarget.vaultFileCount} ملف) واستبدال الوضع الحالي بصورة مطابقة تماماً. هل تريد المتابعة؟`
+            : ''
+        }
+        danger
+        busy={busy}
+        onCancel={() => setRestoreConfirmTarget(null)}
+        onConfirm={() => void handleConfirmRestoreSavedBackup()}
+      />
+
+      <ConfirmModal
+        open={Boolean(deleteBackupConfirmTarget)}
+        title="تأكيد حذف ملف النسخة الاحتياطية"
+        description={
+          deleteBackupConfirmTarget
+            ? `هل تريد حذف ملف النسخة الاحتياطية "${deleteBackupConfirmTarget.fileName}" نهائياً من الخادم؟`
+            : ''
+        }
+        danger
+        busy={busy}
+        onCancel={() => setDeleteBackupConfirmTarget(null)}
+        onConfirm={() => void handleConfirmDeleteSavedBackup()}
       />
     </div>
   );

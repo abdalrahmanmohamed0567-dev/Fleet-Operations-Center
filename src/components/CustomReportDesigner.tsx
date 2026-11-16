@@ -1,10 +1,10 @@
-import { doc, serverTimestamp, setDoc } from 'firebase/firestore';
-import { ArrowDown, ArrowUp, Download, Eye, FileText, Printer, Save } from 'lucide-react';
+import { doc, serverTimestamp, setDoc } from '../lib/erpDb';
+import { ArrowDown, ArrowUp, Download, Eye, FileText, Image as ImageIcon, Printer, Save } from 'lucide-react';
 import { useMemo, useState } from 'react';
 import { exportExcelInBrowser } from '../lib/clientExcelFallback';
 import { formatDynamicFieldDisplayValue } from '../lib/dynamicSchemaEngine';
 import { computeAllDocumentExpiries, EMPLOYEE_HR_STATUS_LABELS, VEHICLE_STATUS_LABELS, writeErpAuditLog } from '../lib/erpHelpers';
-import { auth, db } from '../lib/firebase';
+import { db, getActiveAuthToken } from '../lib/firebase';
 import type { FleetDataset, UnifiedDailyRow } from '../lib/fleetAnalytics';
 import { exportArabicTableToPdf } from '../lib/pdfExport';
 import { safeParseJsonResponse } from '../lib/safeFetch';
@@ -21,6 +21,7 @@ import type {
   VehicleMaintenanceRecord,
   VehicleMaster,
 } from '../types/fleet';
+import { ReportImageShareModal } from './ReportImageShareModal';
 import {
   Button,
   Card,
@@ -79,6 +80,7 @@ export function CustomReportDesigner({
   const [includeCompanyDetails, setIncludeCompanyDetails] = useState(true);
   const [selectedKeys, setSelectedKeys] = useState<string[]>(['internalRiderId', 'fullName', 'iqamaNumber', 'branch', 'status']);
   const [previewOpen, setPreviewOpen] = useState(true);
+  const [imageModalOpen, setImageModalOpen] = useState(false);
   const [busy, setBusy] = useState(false);
   const [toast, setToast] = useState<{ type: 'ok' | 'err'; msg: string } | null>(null);
 
@@ -150,7 +152,7 @@ export function CustomReportDesigner({
     const pageFields = dynamicFields.filter((f) => f.formId === formId && !f.archived);
     return [
       { key: 'recordId', header: 'المعرف' },
-      { key: 'titleAr', header: 'العنوان' },
+      { key: 'title', header: 'العنوان' },
       { key: 'status', header: 'الحالة' },
       ...pageFields.map((f) => ({ key: `cf_${f.key}`, header: f.labelAr })),
     ];
@@ -239,7 +241,7 @@ export function CustomReportDesigner({
       .map((r) => {
         const row: Record<string, unknown> = {
           recordId: r.recordId,
-          titleAr: r.titleAr || '—',
+          title: r.title || '—',
           status: r.status || 'active',
         };
         for (const f of pageFields) {
@@ -264,7 +266,7 @@ export function CustomReportDesigner({
     else if (next === 'operations_daily') setSelectedKeys(['date', 'riderId', 'riderName', 'completedOrders', 'workingHours']);
     else if (next === 'expiries') setSelectedKeys(['domain', 'entityName', 'docCategory', 'expiryDate', 'daysRemaining']);
     else if (next === 'maintenance') setSelectedKeys(['plateNumber', 'maintenanceType', 'maintenanceDate', 'cost', 'workshop']);
-    else setSelectedKeys(['recordId', 'titleAr', 'status']);
+    else setSelectedKeys(['recordId', 'title', 'status']);
   };
 
   const toggleColumn = (key: string) => {
@@ -291,16 +293,18 @@ export function CustomReportDesigner({
       await setDoc(doc(db, 'customReportTemplates', templateId), {
         templateId,
         nameAr: reportTitle.trim().slice(0, 140),
-        sourceType,
-        customPageId: sourceType === 'custom_page' ? customPageId : '',
-        titleAr: reportTitle.trim().slice(0, 160),
-        subtitleAr: reportSubtitle.trim().slice(0, 250),
-        selectedColumnKeys: selectedKeys,
-        includeLogo,
+        dataSource: sourceType,
+        ...(sourceType === 'custom_page' && customPageId ? { customPageId } : {}),
+        columns: activeColumns.map((c) => ({ key: c.key, labelAr: c.header })),
+        headerTitle: reportTitle.trim().slice(0, 180),
+        headerSubtitle: reportSubtitle.trim().slice(0, 250),
+        footerNote: (branding.company?.officialFooterText || '').slice(0, 300),
+        preparerName: (preparer || currentUser.email).slice(0, 120),
+        includeCompanyLogo: includeLogo,
         includeCompanyDetails,
         orientation,
-        footerNoteAr: branding.officialFooterText || '',
         createdByUid: currentUser.uid,
+        createdByEmail: currentUser.email,
         allowedUids: teamAllowed.length > 0 ? teamAllowed : [currentUser.uid],
         createdAt: serverTimestamp(),
         updatedAt: serverTimestamp(),
@@ -352,7 +356,7 @@ export function CustomReportDesigner({
     setBusy(true);
     try {
       const fileName = `custom_report_${new Date().toISOString().slice(0, 10)}.xlsx`;
-      const token = await auth.currentUser?.getIdToken();
+      const token = await getActiveAuthToken();
       if (token) {
         try {
           const res = await fetch('/api/export/excel', {
@@ -379,7 +383,7 @@ export function CustomReportDesigner({
           // fallback to browser excel
         }
       }
-      await exportExcelInBrowser({ fileName, sheetName: reportTitle.slice(0, 30), columns: activeColumns, rows: rawRows });
+      await exportExcelInBrowser({ title: reportTitle, fileName, sheetName: reportTitle.slice(0, 30), columns: activeColumns, rows: rawRows });
       setToast({ type: 'ok', msg: `تم تصدير التقرير (${fileName}) بنجاح.` });
     } catch (err) {
       setToast({ type: 'err', msg: err instanceof Error ? err.message : 'فشل تصدير Excel.' });
@@ -403,12 +407,13 @@ export function CustomReportDesigner({
                 onChange={(e) => {
                   const tpl = reportTemplates.find((t) => t.templateId === e.target.value);
                   if (!tpl) return;
-                  setSourceType(tpl.sourceType);
+                  setSourceType(tpl.dataSource);
                   if (tpl.customPageId) setCustomPageId(tpl.customPageId);
-                  setReportTitle(tpl.titleAr);
-                  setReportSubtitle(tpl.subtitleAr || '');
-                  setSelectedKeys(tpl.selectedColumnKeys || []);
-                  setIncludeLogo(tpl.includeLogo);
+                  setReportTitle(tpl.headerTitle || tpl.nameAr);
+                  setReportSubtitle(tpl.headerSubtitle || '');
+                  if (tpl.preparerName) setPreparer(tpl.preparerName);
+                  setSelectedKeys((tpl.columns || []).map((c) => c.key));
+                  setIncludeLogo(tpl.includeCompanyLogo);
                   setIncludeCompanyDetails(tpl.includeCompanyDetails);
                   setOrientation(tpl.orientation);
                 }}
@@ -496,6 +501,15 @@ export function CustomReportDesigner({
                 <Button size="sm" variant="secondary" icon={<FileText className="h-3.5 w-3.5" />} loading={busy} onClick={() => void handleExportPdf()}>
                   PDF
                 </Button>
+                <Button
+                  size="sm"
+                  variant="accent"
+                  icon={<ImageIcon className="h-3.5 w-3.5" />}
+                  disabled={rawRows.length === 0 || activeColumns.length === 0}
+                  onClick={() => setImageModalOpen(true)}
+                >
+                  صورة ومشاركة
+                </Button>
                 <Button size="sm" variant="primary" icon={<Download className="h-3.5 w-3.5" />} loading={busy} onClick={() => void handleExportExcel()}>
                   Excel
                 </Button>
@@ -553,27 +567,30 @@ export function CustomReportDesigner({
       {/* Live Print Preview Sheet */}
       {previewOpen && (
         <Card padding="lg" className="space-y-4 print:border-0 print:shadow-none">
-          <div className="flex flex-wrap items-center justify-between gap-4 border-b-2 pb-4" style={{ borderColor: branding.primaryColor || '#0f1e36' }}>
+          <div
+            className="flex flex-wrap items-center justify-between gap-4 border-b-2 pb-4"
+            style={{ borderColor: branding.branding?.primaryColor || '#0f1e36' }}
+          >
             <div className="flex items-center gap-3">
-              {includeLogo && branding.primaryLogoKey && (
+              {includeLogo && branding.branding?.primaryLogoKey && (
                 <img
-                  src={`/api/branding/logo/${encodeURIComponent(branding.primaryLogoKey)}`}
+                  src={`/api/branding/logo/${encodeURIComponent(branding.branding.primaryLogoKey)}`}
                   alt="Company Logo"
                   className="h-12 max-w-[120px] object-contain"
                 />
               )}
               <div>
-                <div className="text-xs font-bold" style={{ color: branding.primaryColor || '#0f1e36' }}>
-                  {branding.companyNameAr}
+                <div className="text-xs font-bold" style={{ color: branding.branding?.primaryColor || '#0f1e36' }}>
+                  {branding.company?.companyNameAr}
                 </div>
                 <h3 className="text-lg font-bold text-slate-900 dark:text-white">{reportTitle}</h3>
                 <p className="text-xs text-slate-500">{reportSubtitle}</p>
                 {includeCompanyDetails && (
                   <p className="text-[11px] text-slate-400 font-mono-num mt-0.5">
                     {[
-                      branding.crNumber ? `س.ت: ${branding.crNumber}` : '',
-                      branding.vatNumber ? `ضريبي: ${branding.vatNumber}` : '',
-                      branding.phone || '',
+                      branding.company?.crNumber ? `س.ت: ${branding.company.crNumber}` : '',
+                      branding.company?.vatNumber ? `ضريبي: ${branding.company.vatNumber}` : '',
+                      branding.company?.phone || '',
                     ]
                       .filter(Boolean)
                       .join(' · ')}
@@ -590,7 +607,7 @@ export function CustomReportDesigner({
           <div className="overflow-x-auto">
             <table className="w-full border-collapse text-xs">
               <thead>
-                <tr style={{ backgroundColor: branding.primaryColor || '#0f1e36' }} className="text-white">
+                <tr style={{ backgroundColor: branding.branding?.primaryColor || '#0f1e36' }} className="text-white">
                   {activeColumns.map((c) => (
                     <th key={c.key} className="border border-slate-700/30 px-3 py-2 text-right font-semibold">
                       {c.header}
@@ -613,11 +630,30 @@ export function CustomReportDesigner({
           </div>
 
           <div className="flex items-center justify-between border-t border-slate-200 dark:border-slate-800 pt-3 text-[11px] text-slate-500">
-            <span>{includeCompanyDetails ? branding.officialFooterText || branding.companyNameAr : branding.systemNameAr}</span>
+            <span>
+              {includeCompanyDetails
+                ? branding.company?.officialFooterText || branding.company?.companyNameAr
+                : branding.branding?.systemNameAr}
+            </span>
             <span className="font-mono-num">عرض معاينة {Math.min(30, rawRows.length)} من أصل {rawRows.length} سجل</span>
           </div>
         </Card>
       )}
+
+      <ReportImageShareModal
+        open={imageModalOpen}
+        onClose={() => setImageModalOpen(false)}
+        title={reportTitle}
+        subtitle={reportSubtitle}
+        columns={activeColumns}
+        rows={rawRows}
+        fileName={`custom_report_${sourceType}_${new Date().toISOString().slice(0, 10)}.png`}
+        branding={branding}
+        preparer={preparer}
+        defaultOrientation={orientation}
+        defaultIncludeLogo={includeLogo}
+        defaultIncludeCompanyDetails={includeCompanyDetails}
+      />
     </div>
   );
 }

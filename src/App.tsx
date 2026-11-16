@@ -1,4 +1,4 @@
-import { collection, getDocs, query, where } from 'firebase/firestore';
+import { collection, doc, getDoc, getDocs } from './lib/erpDb';
 import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { AuthGate } from './components/AuthGate';
 import { EnterpriseShell, getNavItemsForWorkspace, type NavKey } from './components/EnterpriseShell';
@@ -8,19 +8,17 @@ import type { HrSubTab } from './components/HrManagementModule';
 import type { AppsSubTab } from './components/ApplicationsModule';
 import type { FleetSubTab } from './components/FleetManagementModule';
 import type { RbacSubTab } from './components/RbacManagementModule';
+import { DEFAULT_COMPANY_BRANDING } from './lib/dynamicSchemaEngine';
 import {
-  BOOTSTRAPPED_OWNER_EMAIL,
   canAccessGlobalHub,
   db,
   DEFAULT_OPERATIONAL_SETTINGS,
   ensureOperationalSettings,
-  ensureUserProfile,
+  fetchCurrentSessionProfile,
   getUserAllowedPlatforms,
-  handleFirestoreError,
+  loginWithPhonePassword,
   logoutUser,
-  OperationType,
-  signInWithGoogle,
-  subscribeAuth,
+  syncAuthHandle,
 } from './lib/firebase';
 import {
   buildUnifiedDailyRows,
@@ -38,7 +36,14 @@ import {
 } from './shared/rbacCore';
 import type {
   AuditLog,
+  CompanyBrandingDoc,
+  ConfigSnapshotRecord,
+  CustomEntityRecord,
+  CustomReportTemplate,
   DocumentTypeConfig,
+  DynamicFieldDefinition,
+  DynamicFormDefinition,
+  DynamicFormVersion,
   EntityNoteTask,
   ErrorCodeDictionaryEntry,
   FilterState,
@@ -51,6 +56,7 @@ import type {
   KeetaFacialRecognitionDaily,
   KeetaRankSnapshot,
   KeetaVdaDaily,
+  NotificationRuleConfig,
   OperationalCase,
   OperationalSettings,
   Platform,
@@ -62,6 +68,10 @@ import type {
   RiderMaster,
   RiderNote,
   RoleTemplate,
+  SavedViewConfig,
+  SystemPageConfig,
+  SystemSectionConfig,
+  TrashItemRecord,
   UserProfile,
   VehicleAssignment,
   VehicleMaintenanceRecord,
@@ -133,6 +143,18 @@ const ImportCenter = lazy(() =>
 const SystemSettingsView = lazy(() =>
   import('./components/SettingsAndUsers').then((m) => ({ default: m.SystemSettingsView }))
 );
+const SystemBuilderModule = lazy(() =>
+  import('./components/SystemBuilderModule').then((m) => ({ default: m.SystemBuilderModule }))
+);
+const CompanyBrandingModule = lazy(() =>
+  import('./components/CompanyBrandingModule').then((m) => ({ default: m.CompanyBrandingModule }))
+);
+const AboutCreditsModule = lazy(() =>
+  import('./components/AboutCreditsModule').then((m) => ({ default: m.AboutCreditsModule }))
+);
+const CustomPageModule = lazy(() =>
+  import('./components/CustomPageModule').then((m) => ({ default: m.CustomPageModule }))
+);
 
 const EMPTY_DATASET: FleetDataset = {
   hungerDaily: [],
@@ -147,15 +169,14 @@ const EMPTY_DATASET: FleetDataset = {
   riderMappings: [],
 };
 
-async function safeGetCollection<T>(colName: string, profile: UserProfile): Promise<T[]> {
+async function safeGetCollection<T>(colName: string, _profile: UserProfile): Promise<T[]> {
   try {
-    const isBootOwner = profile.email.trim().toLowerCase() === BOOTSTRAPPED_OWNER_EMAIL;
-    const ref = collection(db, colName);
-    const q = isBootOwner ? ref : query(ref, where('allowedUids', 'array-contains', profile.uid));
-    const snap = await getDocs(q);
+    const snap = await getDocs(collection(db, colName));
     return snap.docs.map((d) => d.data() as T);
   } catch (err) {
-    handleFirestoreError(err, OperationType.LIST, colName);
+    const msg = err instanceof Error ? err.message : String(err);
+    console.error(`Failed loading collection ${colName}:`, msg);
+    return [];
   }
 }
 
@@ -183,7 +204,10 @@ function computeCanAccessGlobal(profile: UserProfile | null, roles: RoleTemplate
     hasPermission(profile, roles, 'users', 'view') ||
     hasPermission(profile, roles, 'roles', 'view') ||
     hasPermission(profile, roles, 'settings', 'view') ||
-    hasPermission(profile, roles, 'audit', 'view')
+    hasPermission(profile, roles, 'audit', 'view') ||
+    hasPermission(profile, roles, 'builder', 'view') ||
+    hasPermission(profile, roles, 'branding', 'view') ||
+    hasPermission(profile, roles, 'company', 'view')
   );
 }
 
@@ -206,10 +230,14 @@ export default function App() {
   const [authError, setAuthError] = useState<string | null>(null);
   const [userProfile, setUserProfile] = useState<UserProfile | null>(null);
 
+  const hadExplicitThemeRef = useRef<boolean>(false);
   const [theme, setTheme] = useState<'light' | 'dark'>(() => {
     try {
       const saved = localStorage.getItem('foc_theme');
-      if (saved === 'dark' || saved === 'light') return saved;
+      if (saved === 'dark' || saved === 'light') {
+        hadExplicitThemeRef.current = true;
+        return saved;
+      }
     } catch {
       // ignore
     }
@@ -253,6 +281,30 @@ export default function App() {
   const [vehicleAssignments, setVehicleAssignments] = useState<VehicleAssignment[]>([]);
   const [vehicleMaintenance, setVehicleMaintenance] = useState<VehicleMaintenanceRecord[]>([]);
   const [entityNotesTasks, setEntityNotesTasks] = useState<EntityNoteTask[]>([]);
+
+  // Enterprise Customization & System Builder State
+  const [companyBranding, setCompanyBranding] = useState<CompanyBrandingDoc>(() => ({
+    ...DEFAULT_COMPANY_BRANDING,
+    createdByUid: '',
+    allowedUids: [],
+  }));
+  const [dynamicFields, setDynamicFields] = useState<DynamicFieldDefinition[]>([]);
+  const [dynamicForms, setDynamicForms] = useState<DynamicFormDefinition[]>([]);
+  const [dynamicFormVersions, setDynamicFormVersions] = useState<DynamicFormVersion[]>([]);
+  const [systemSections, setSystemSections] = useState<SystemSectionConfig[]>([]);
+  const [systemPages, setSystemPages] = useState<SystemPageConfig[]>([]);
+  const [customEntityRecords, setCustomEntityRecords] = useState<CustomEntityRecord[]>([]);
+  const [notificationRules, setNotificationRules] = useState<NotificationRuleConfig[]>([]);
+  const [trashItems, setTrashItems] = useState<TrashItemRecord[]>([]);
+  const [configSnapshots, setConfigSnapshots] = useState<ConfigSnapshotRecord[]>([]);
+  const [customReportTemplates, setCustomReportTemplates] = useState<CustomReportTemplate[]>([]);
+  const [savedViews, setSavedViews] = useState<SavedViewConfig[]>([]);
+
+  useEffect(() => {
+    if (companyBranding?.branding?.systemNameAr) {
+      document.title = companyBranding.branding.systemNameAr;
+    }
+  }, [companyBranding?.branding?.systemNameAr]);
 
   const [settings, setSettings] = useState<OperationalSettings>({
     ...DEFAULT_OPERATIONAL_SETTINGS,
@@ -307,6 +359,17 @@ export default function App() {
         vehAssignments,
         vehMaint,
         notesTasks,
+        dynFields,
+        dynForms,
+        dynFormVersions,
+        sysSections,
+        sysPages,
+        custRecords,
+        notifRules,
+        trashList,
+        snapshotsList,
+        reportTpls,
+        viewsList,
       ] = await Promise.all([
         allowHs ? safeGetCollection<HungerDailyRecord>('hungerDaily', profile) : Promise.resolve([]),
         allowHs ? safeGetCollection<HungerDistanceDailyRecord>('hungerDistanceDaily', profile) : Promise.resolve([]),
@@ -331,7 +394,54 @@ export default function App() {
         safeGetCollection<VehicleAssignment>('vehicleAssignments', profile),
         safeGetCollection<VehicleMaintenanceRecord>('vehicleMaintenance', profile),
         safeGetCollection<EntityNoteTask>('entityNotesTasks', profile),
+        safeGetCollection<DynamicFieldDefinition>('dynamicFields', profile),
+        safeGetCollection<DynamicFormDefinition>('dynamicForms', profile),
+        safeGetCollection<DynamicFormVersion>('dynamicFormVersions', profile),
+        safeGetCollection<SystemSectionConfig>('systemSections', profile),
+        safeGetCollection<SystemPageConfig>('systemPages', profile),
+        safeGetCollection<CustomEntityRecord>('customEntityRecords', profile),
+        safeGetCollection<NotificationRuleConfig>('notificationRules', profile),
+        safeGetCollection<TrashItemRecord>('trashItems', profile),
+        safeGetCollection<ConfigSnapshotRecord>('configSnapshots', profile),
+        safeGetCollection<CustomReportTemplate>('customReportTemplates', profile),
+        safeGetCollection<SavedViewConfig>('savedViews', profile),
       ]);
+
+      let loadedBranding: CompanyBrandingDoc = {
+        ...DEFAULT_COMPANY_BRANDING,
+        createdByUid: profile.uid,
+        allowedUids: [profile.uid],
+      };
+      try {
+        const brandSnap = await getDoc(doc(db, 'companyBranding', 'default'));
+        if (brandSnap.exists()) {
+          const raw = brandSnap.data() as Partial<CompanyBrandingDoc>;
+          loadedBranding = {
+            brandingId: raw.brandingId || 'default',
+            company: { ...DEFAULT_COMPANY_BRANDING.company, ...(raw.company || {}) },
+            branding: { ...DEFAULT_COMPANY_BRANDING.branding, ...(raw.branding || {}) },
+            credits: {
+              ...DEFAULT_COMPANY_BRANDING.credits,
+              ...(raw.credits || {}),
+              changelog: raw.credits?.changelog || DEFAULT_COMPANY_BRANDING.credits.changelog,
+            },
+            updatedByEmail: raw.updatedByEmail,
+            createdByUid: raw.createdByUid || profile.uid,
+            allowedUids: raw.allowedUids || [profile.uid],
+            createdAt: raw.createdAt,
+            updatedAt: raw.updatedAt,
+          };
+        }
+      } catch {
+        // fallback cleanly to default branding
+      }
+      setCompanyBranding(loadedBranding);
+      if (
+        !hadExplicitThemeRef.current &&
+        (loadedBranding.branding.defaultThemeMode === 'dark' || loadedBranding.branding.defaultThemeMode === 'light')
+      ) {
+        setTheme(loadedBranding.branding.defaultThemeMode);
+      }
 
       const allowedSet = new Set<Platform>(effectiveAllowedNow);
       setDataset({
@@ -361,6 +471,18 @@ export default function App() {
       setVehicleMaintenance(vehMaint);
       setEntityNotesTasks(notesTasks);
 
+      setDynamicFields(dynFields);
+      setDynamicForms(dynForms);
+      setDynamicFormVersions(dynFormVersions);
+      setSystemSections(sysSections);
+      setSystemPages(sysPages);
+      setCustomEntityRecords(custRecords);
+      setNotificationRules(notifRules);
+      setTrashItems(trashList);
+      setConfigSnapshots(snapshotsList);
+      setCustomReportTemplates(reportTpls);
+      setSavedViews(viewsList);
+
       const canLoadUsersList =
         profile.role === 'owner' ||
         profile.role === 'admin' ||
@@ -369,13 +491,8 @@ export default function App() {
 
       if (canLoadUsersList) {
         try {
-          const isBootOwner = profile.email.trim().toLowerCase() === BOOTSTRAPPED_OWNER_EMAIL;
-          const usersRef = collection(db, 'users');
-          const usersQuery = isBootOwner
-            ? usersRef
-            : query(usersRef, where('managedByAdminUids', 'array-contains', profile.uid));
-          const usersSnap = await getDocs(usersQuery);
-          const allUsers = usersSnap.docs.map((d) => d.data() as UserProfile);
+          const usersSnap = await getDocs(collection(db, 'users'));
+          const allUsers = usersSnap.docs.map((d) => d.data() as unknown as UserProfile);
           setUsersList(allUsers.length > 0 ? allUsers : [profile]);
         } catch {
           setUsersList([profile]);
@@ -406,42 +523,55 @@ export default function App() {
         }
       }
     } catch (err) {
-      setDataError(err instanceof Error ? err.message : 'تعذر تحميل بيانات التشغيل من Firestore.');
+      setDataError(err instanceof Error ? err.message : 'تعذر تحميل بيانات التشغيل من قاعدة البيانات.');
     } finally {
       setDataLoading(false);
     }
   }, []);
 
   useEffect(() => {
-    const unsub = subscribeAuth(async (firebaseUser) => {
-      if (!firebaseUser) {
-        didInitRouteRef.current = null;
-        setUserProfile(null);
-        setAuthReady(true);
-        return;
-      }
+    let cancelled = false;
+    void (async () => {
       try {
-        const profile = await ensureUserProfile(firebaseUser);
+        const profile = await fetchCurrentSessionProfile();
+        if (cancelled) return;
+        if (!profile) {
+          didInitRouteRef.current = null;
+          setUserProfile(null);
+          setAuthReady(true);
+          return;
+        }
+        syncAuthHandle(profile);
         setUserProfile(profile);
         setAuthReady(true);
         if (profile.active) {
           void loadAllOperationalData(profile);
         }
       } catch (err) {
-        setAuthError(err instanceof Error ? err.message : 'تعذر تحميل ملف المستخدم.');
-        setAuthReady(true);
+        if (!cancelled) {
+          setAuthError(err instanceof Error ? err.message : 'تعذر التحقق من جلسة المستخدم.');
+          setAuthReady(true);
+        }
       }
-    });
-    return () => unsub();
+    })();
+    return () => {
+      cancelled = true;
+    };
   }, [loadAllOperationalData]);
 
-  const handleSignIn = async () => {
+  const handleSignIn = async (phone: string, password: string) => {
     setAuthLoading(true);
     setAuthError(null);
     try {
-      await signInWithGoogle();
+      const { profile } = await loginWithPhonePassword(phone, password);
+      syncAuthHandle(profile);
+      setUserProfile(profile);
+      setAuthReady(true);
+      if (profile.active) {
+        void loadAllOperationalData(profile);
+      }
     } catch (err) {
-      setAuthError(err instanceof Error ? err.message : 'فشل تسجيل الدخول عبر Google.');
+      setAuthError(err instanceof Error ? err.message : 'رقم الجوال أو كلمة المرور غير صحيحة.');
     } finally {
       setAuthLoading(false);
     }
@@ -470,6 +600,18 @@ export default function App() {
     setVehicleAssignments([]);
     setVehicleMaintenance([]);
     setEntityNotesTasks([]);
+    setCompanyBranding({ ...DEFAULT_COMPANY_BRANDING, createdByUid: '', allowedUids: [] });
+    setDynamicFields([]);
+    setDynamicForms([]);
+    setDynamicFormVersions([]);
+    setSystemSections([]);
+    setSystemPages([]);
+    setCustomEntityRecords([]);
+    setNotificationRules([]);
+    setTrashItems([]);
+    setConfigSnapshots([]);
+    setCustomReportTemplates([]);
+    setSavedViews([]);
   };
 
   const keetaActive = useMemo(() => isKeetaActive(settings, platformCatalog), [settings, platformCatalog]);
@@ -707,8 +849,10 @@ export default function App() {
         settings,
         platformCatalog,
         allowedPlatforms,
+        systemSections,
+        systemPages,
       }),
-    [effectiveScope, userProfile, roleTemplates, settings, platformCatalog, allowedPlatforms]
+    [effectiveScope, userProfile, roleTemplates, settings, platformCatalog, allowedPlatforms, systemSections, systemPages]
   );
 
   const safeActiveNav: NavKey = useMemo(() => {
@@ -843,6 +987,10 @@ export default function App() {
       vehicles={scopedVehicles}
       platformAccounts={scopedPlatformAccounts}
       privateDocs={scopedPrivateDocs}
+      companyBranding={companyBranding}
+      systemSections={systemSections}
+      systemPages={systemPages}
+      notificationRules={notificationRules}
       onSignOut={handleSignOut}
       onRefreshData={() => loadAllOperationalData(userProfile)}
       dataLoading={dataLoading}
@@ -891,6 +1039,8 @@ export default function App() {
               roleTemplates={roleTemplates}
               usersList={usersList}
               allowedUids={allowedUids}
+              dynamicFields={dynamicFields}
+              dynamicForms={dynamicForms}
               onNavigate={(nav) => handleSelectNav(nav as NavKey)}
               onOpenRider360={openRider360ByCompanyId}
               onRefresh={() => loadAllOperationalData(userProfile)}
@@ -914,6 +1064,9 @@ export default function App() {
               currentUser={userProfile}
               roleTemplates={roleTemplates}
               allowedUids={allowedUids}
+              dynamicFields={dynamicFields}
+              dynamicForms={dynamicForms}
+              savedViews={savedViews}
               initialSubTab={safeActiveNav as HrSubTab}
               onOpenRider360={openRider360ByCompanyId}
               onRefresh={() => loadAllOperationalData(userProfile)}
@@ -957,6 +1110,9 @@ export default function App() {
               currentUser={userProfile}
               roleTemplates={roleTemplates}
               allowedUids={allowedUids}
+              dynamicFields={dynamicFields}
+              dynamicForms={dynamicForms}
+              savedViews={savedViews}
               initialSubTab={safeActiveNav as FleetSubTab}
               onOpenRider360={openRider360ByCompanyId}
               onRefresh={() => loadAllOperationalData(userProfile)}
@@ -1051,6 +1207,8 @@ export default function App() {
               usersList={usersList}
               currentUser={userProfile}
               allowedUids={allowedUids}
+              dynamicFields={dynamicFields}
+              dynamicForms={dynamicForms}
               lockedPlatform={lockedPlatform}
               onSelectRider={openRider360}
               onRefresh={() => loadAllOperationalData(userProfile)}
@@ -1075,6 +1233,8 @@ export default function App() {
               vehicles={scopedVehicles}
               vehicleAssignments={scopedVehicleAssignments}
               entityNotesTasks={entityNotesTasks}
+              dynamicFields={dynamicFields}
+              dynamicForms={dynamicForms}
               onSelectRider={setSelectedRider}
               onRefresh={() => loadAllOperationalData(userProfile)}
             />
@@ -1173,6 +1333,14 @@ export default function App() {
               platformCatalog={platformCatalog}
               settings={settings}
               lockedPlatform={lockedPlatform}
+              companyBranding={companyBranding}
+              dynamicFields={dynamicFields}
+              systemPages={systemPages}
+              customEntityRecords={customEntityRecords}
+              reportTemplates={customReportTemplates}
+              currentUser={userProfile}
+              allowedUids={allowedUids}
+              onRefresh={() => loadAllOperationalData(userProfile)}
             />
           )}
 
@@ -1206,6 +1374,73 @@ export default function App() {
               onRefresh={() => loadAllOperationalData(userProfile)}
             />
           )}
+
+          {safeActiveNav === 'company_branding' && canAccessGlobal && (
+            <CompanyBrandingModule
+              branding={companyBranding}
+              currentUser={userProfile}
+              roleTemplates={roleTemplates}
+              allowedUids={allowedUids}
+              onRefresh={() => loadAllOperationalData(userProfile)}
+            />
+          )}
+
+          {safeActiveNav === 'about_credits' && canAccessGlobal && (
+            <AboutCreditsModule
+              branding={companyBranding}
+              currentUser={userProfile}
+              allowedUids={allowedUids}
+              onRefresh={() => loadAllOperationalData(userProfile)}
+            />
+          )}
+
+          {(safeActiveNav === 'system_builder' || safeActiveNav === 'system_backup_reset') && canAccessGlobal && (
+            <SystemBuilderModule
+              dynamicFields={dynamicFields}
+              dynamicForms={dynamicForms}
+              dynamicFormVersions={dynamicFormVersions}
+              systemSections={systemSections}
+              systemPages={systemPages}
+              customEntityRecords={customEntityRecords}
+              notificationRules={notificationRules}
+              trashItems={trashItems}
+              configSnapshots={configSnapshots}
+              customReportTemplates={customReportTemplates}
+              companyBranding={companyBranding}
+              roleTemplates={roleTemplates}
+              auditLogs={auditLogs}
+              riders={scopedDataset.riderMaster}
+              vehicles={scopedVehicles}
+              assignments={scopedVehicleAssignments}
+              maintenance={scopedVehicleMaintenance}
+              operationalCases={scopedCases}
+              entityNotesTasks={entityNotesTasks}
+              currentUser={userProfile}
+              allowedUids={allowedUids}
+              initialSubTab={safeActiveNav === 'system_backup_reset' ? 'system_reset' : 'fields'}
+              onRefresh={() => loadAllOperationalData(userProfile)}
+            />
+          )}
+
+          {safeActiveNav.startsWith('custom_page_') &&
+            (() => {
+              const targetPageId = safeActiveNav.replace('custom_page_', '');
+              const matchedPage = systemPages.find((p) => p.pageId === targetPageId);
+              if (!matchedPage) return null;
+              return (
+                <CustomPageModule
+                  key={matchedPage.pageId}
+                  page={matchedPage}
+                  records={customEntityRecords.filter((r) => r.pageId === matchedPage.pageId)}
+                  dynamicFields={dynamicFields}
+                  dynamicForms={dynamicForms}
+                  savedViews={savedViews}
+                  currentUser={userProfile}
+                  allowedUids={allowedUids}
+                  onRefresh={() => loadAllOperationalData(userProfile)}
+                />
+              );
+            })()}
         </Suspense>
       )}
     </EnterpriseShell>

@@ -1,6 +1,6 @@
 import { Bookmark, Check, Plus, Trash2, Users } from 'lucide-react';
 import { useState } from 'react';
-import { deleteDoc, doc, serverTimestamp, setDoc } from 'firebase/firestore';
+import { deleteDoc, doc, serverTimestamp, setDoc } from '../lib/erpDb';
 import type { SavedViewConfig, UserProfile } from '../types/fleet';
 import { db } from '../lib/firebase';
 import { Button, Input } from './ui/EnterpriseUI';

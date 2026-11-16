@@ -1,4 +1,4 @@
-import { deleteDoc, doc, serverTimestamp, setDoc, updateDoc } from 'firebase/firestore';
+import { deleteDoc, doc, serverTimestamp, setDoc, updateDoc } from '../lib/erpDb';
 import {
   ArrowLeftRight,
   ArrowRight,
@@ -23,7 +23,7 @@ import {
   writeErpAuditLog,
   type ExpiryUrgency,
 } from '../lib/erpHelpers';
-import { auth, db, DEFAULT_DOCUMENT_TYPES, handleFirestoreError, OperationType } from '../lib/firebase';
+import { db, DEFAULT_DOCUMENT_TYPES, getActiveAuthToken, handleFirestoreError, OperationType } from '../lib/firebase';
 import { safeParseJsonResponse } from '../lib/safeFetch';
 import { hasPermission } from '../shared/rbacCore';
 import {
@@ -673,7 +673,7 @@ export function FleetManagementModule({
 
     setBusy(true);
     try {
-      const idToken = await auth.currentUser?.getIdToken();
+      const idToken = await getActiveAuthToken();
       if (!idToken) throw new Error('الجلسة منتهية.');
       const form = new FormData();
       form.append('file', docFile);
@@ -708,7 +708,7 @@ export function FleetManagementModule({
     if (!canViewDocs) return;
     setBusy(true);
     try {
-      const idToken = await auth.currentUser?.getIdToken();
+      const idToken = await getActiveAuthToken();
       if (!idToken) throw new Error('يلزم تسجيل الدخول.');
       const res = await fetch(`/api/documents/${encodeURIComponent(docRec.docId)}/file?download=${download ? '1' : '0'}`, {
         headers: { Authorization: `Bearer ${idToken}` },
@@ -1385,6 +1385,7 @@ export function FleetManagementModule({
           />
 
           <DataTable
+            tableId="fleet_vehicles"
             rows={filteredVehicles}
             columns={vehicleCols}
             rowKey={(v) => v.vehicleInternalId}
@@ -1396,6 +1397,7 @@ export function FleetManagementModule({
 
       {subTab === 'fleet_handover' && (
         <DataTable
+          tableId="fleet_handover"
           rows={assignments}
           rowKey={(a) => a.assignmentId}
           searchPlaceholder="ابحث برقم اللوحة أو اسم المندوب..."
@@ -1492,6 +1494,7 @@ export function FleetManagementModule({
           <Card>
             <SectionHeader title={`مستندات الأسطول المرفوعة في الخزينة الخاصة (${vehicleDocs.length})`} className="mb-3" />
             <DataTable
+              tableId="fleet_docs"
               rows={vehicleDocs}
               rowKey={(d) => d.docId}
               searchPlaceholder="ابحث برقم اللوحة أو نوع المستند..."
@@ -1518,6 +1521,7 @@ export function FleetManagementModule({
           </Card>
 
           <DataTable
+            tableId="fleet_expiries"
             rows={fleetExpiries}
             rowKey={(e) => e.id}
             searchPlaceholder="ابحث في تواريخ انتهاء الاستمارة والتأمين والفحص..."
@@ -1544,6 +1548,7 @@ export function FleetManagementModule({
 
       {subTab === 'fleet_maintenance' && (
         <DataTable
+          tableId="fleet_maintenance"
           rows={maintenance}
           rowKey={(m) => m.maintenanceId}
           searchPlaceholder="ابحث برقم اللوحة، نوع الصيانة، أو الورشة..."

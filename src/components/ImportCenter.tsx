@@ -15,7 +15,7 @@ import {
   previewExcelInBrowser,
 } from '../lib/clientExcelFallback';
 import { listDriveExcelFiles, type DriveFileItem } from '../lib/driveClient';
-import { auth, getDriveAccessToken, refreshDriveTokenWithPopup } from '../lib/firebase';
+import { getActiveAuthToken, getDriveAccessToken, refreshDriveTokenWithPopup } from '../lib/firebase';
 import { ApiHtmlFallbackError, safeParseJsonResponse } from '../lib/safeFetch';
 import { isKeetaActive } from '../shared/rbacCore';
 import type {
@@ -210,15 +210,14 @@ export function ImportCenter({
       return;
     }
 
-    const user = auth.currentUser;
-    if (!user) {
+    const idToken = await getActiveAuthToken();
+    if (!idToken) {
       setErrorMsg('يرجى تسجيل الدخول أولاً.');
       return;
     }
 
     setPreviewLoading(true);
     try {
-      const idToken = await user.getIdToken();
       let driveToken = getDriveAccessToken();
       if (selectedDrive.length > 0 && !driveToken) {
         driveToken = await refreshDriveTokenWithPopup();
@@ -281,7 +280,8 @@ export function ImportCenter({
   };
 
   const handleCommit = async () => {
-    if (!previewData || !auth.currentUser) return;
+    const idToken = await getActiveAuthToken();
+    if (!previewData || !idToken) return;
     setErrorMsg(null);
     setSuccessMsg(null);
     setCommitLoading(true);
@@ -300,7 +300,6 @@ export function ImportCenter({
         });
         batchesResult = cliRes.batches;
       } else {
-        const idToken = await auth.currentUser.getIdToken();
         const res = await fetch('/api/import/commit', {
           method: 'POST',
           headers: {

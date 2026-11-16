@@ -1,32 +1,44 @@
-import { doc, serverTimestamp, setDoc, updateDoc } from 'firebase/firestore';
+import { doc, serverTimestamp, setDoc } from '../lib/erpDb';
 import {
   CheckCircle2,
+  Eye,
+  EyeOff,
   FileSearch,
   KeyRound,
   Plus,
   RefreshCw,
   Sliders,
+  Trash2,
+  UserPlus,
   Users,
 } from 'lucide-react';
 import { useMemo, useState } from 'react';
 import { writeErpAuditLog } from '../lib/erpHelpers';
-import { db } from '../lib/firebase';
+import { db, getActiveAuthToken } from '../lib/firebase';
+import { safeParseJsonResponse } from '../lib/safeFetch';
+import { ConfirmModal } from './ConfirmModal';
 import {
   BOOTSTRAPPED_OWNER_EMAIL_LOWER,
+  createEmptyCapabilities,
   createEmptyPermissionMatrix,
   DEFAULT_ROLE_TEMPLATES,
   getMergedPlatformCatalog,
+  GRANULAR_CAPABILITIES,
   hasPermission,
   isKeetaActive,
   mapLegacyRoleToTemplateId,
+  mapTemplateToLegacyRole,
   PERMISSION_ACTIONS,
   PERMISSION_MODULES,
   resolveDataScope,
+  resolveEffectiveCapabilities,
   resolveEffectivePermissions,
 } from '../shared/rbacCore';
 import type {
   AuditLog,
+  CapabilityMap,
   DataScope,
+  GranularCapability,
   ModulePermissions,
   OperationalSettings,
   PermissionAction,
@@ -70,30 +82,6 @@ interface RbacManagementModuleProps {
   onRefresh: () => Promise<void>;
 }
 
-function mapTemplateToLegacyRole(templateId: string): UserRole {
-  switch (templateId) {
-    case 'super_admin':
-      return 'admin';
-    case 'operations_manager':
-      return 'operations_manager';
-    case 'hr_manager':
-      return 'hr_manager';
-    case 'hr_employee':
-      return 'hr_employee';
-    case 'fleet_manager':
-      return 'fleet_manager';
-    case 'fleet_employee':
-      return 'fleet_employee';
-    case 'platform_supervisor':
-      return 'supervisor';
-    case 'accountant':
-      return 'accountant';
-    case 'reports_viewer':
-    default:
-      return 'viewer';
-  }
-}
-
 export function RbacManagementModule({
   usersList,
   roleTemplates,
@@ -111,19 +99,51 @@ export function RbacManagementModule({
   const [busy, setBusy] = useState(false);
   const [toast, setToast] = useState<{ type: 'ok' | 'err'; msg: string } | null>(null);
 
+  // Add User Drawer
+  const [createUserOpen, setCreateUserOpen] = useState(false);
+  const [showNewPassword, setShowNewPassword] = useState(false);
+  const [newUserForm, setNewUserForm] = useState<{
+    displayName: string;
+    phone: string;
+    password: string;
+    email: string;
+    customRoleId: string;
+    active: boolean;
+    dataScope: DataScope;
+  }>({
+    displayName: '',
+    phone: '',
+    password: '',
+    email: '',
+    customRoleId: 'reports_viewer',
+    active: true,
+    dataScope: { allBranches: true, branches: [], cities: [], platforms: ['hungerstation'], riderIds: [] },
+  });
+
+  // Delete User Modal
+  const [deleteUserTarget, setDeleteUserTarget] = useState<UserProfile | null>(null);
+
   // User Edit Drawer
   const [editingUser, setEditingUser] = useState<UserProfile | null>(null);
   const [userForm, setUserForm] = useState<{
+    displayName: string;
+    phone: string;
+    newPassword: string;
     customRoleId: string;
     active: boolean;
     dataScope: DataScope;
     permissionOverrides: Partial<Record<PermissionModule, Partial<ModulePermissions>>>;
+    capabilityOverrides: Partial<CapabilityMap>;
     useOverrides: boolean;
   }>({
+    displayName: '',
+    phone: '',
+    newPassword: '',
     customRoleId: 'reports_viewer',
     active: true,
     dataScope: { allBranches: true, branches: [], cities: [], platforms: [], riderIds: [] },
     permissionOverrides: {},
+    capabilityOverrides: {},
     useOverrides: false,
   });
 
@@ -138,6 +158,7 @@ export function RbacManagementModule({
     copyFromId: 'platform_supervisor',
   });
   const [roleMatrixDraft, setRoleMatrixDraft] = useState<PermissionMatrix | null>(null);
+  const [roleCapsDraft, setRoleCapsDraft] = useState<CapabilityMap | null>(null);
 
   // Audit filters
   const [auditSourceFilter, setAuditSourceFilter] = useState<string>('all');
@@ -167,10 +188,12 @@ export function RbacManagementModule({
     return Array.from(s).sort();
   }, [riders]);
 
-  const canManageUsers = hasPermission(currentUser, mergedRoles, 'users', 'edit') || currentUser.role === 'owner';
-  const canEditRoles = hasPermission(currentUser, mergedRoles, 'roles', 'edit') || currentUser.role === 'owner';
-  const canAddRoles = hasPermission(currentUser, mergedRoles, 'roles', 'add') || currentUser.role === 'owner';
-  const canViewAudit = hasPermission(currentUser, mergedRoles, 'audit', 'view') || currentUser.role === 'owner';
+  const canManageUsers = hasPermission(currentUser, mergedRoles, 'users', 'edit') || currentUser.role === 'owner' || currentUser.role === 'admin';
+  const canAddUsers = hasPermission(currentUser, mergedRoles, 'users', 'add') || currentUser.role === 'owner' || currentUser.role === 'admin';
+  const canDeleteUsers = hasPermission(currentUser, mergedRoles, 'users', 'delete') || currentUser.role === 'owner' || currentUser.role === 'admin';
+  const canEditRoles = hasPermission(currentUser, mergedRoles, 'roles', 'edit') || currentUser.role === 'owner' || currentUser.role === 'admin';
+  const canAddRoles = hasPermission(currentUser, mergedRoles, 'roles', 'add') || currentUser.role === 'owner' || currentUser.role === 'admin';
+  const canViewAudit = hasPermission(currentUser, mergedRoles, 'audit', 'view') || currentUser.role === 'owner' || currentUser.role === 'admin';
 
   const selectedTemplate = useMemo(
     () => mergedRoles.find((r) => r.roleId === selectedRoleId) || mergedRoles[0],
@@ -178,12 +201,107 @@ export function RbacManagementModule({
   );
 
   const activeMatrix: PermissionMatrix = roleMatrixDraft || selectedTemplate?.permissions || createEmptyPermissionMatrix();
+  const activeCapabilities: CapabilityMap = {
+    ...createEmptyCapabilities(),
+    ...(roleCapsDraft || selectedTemplate?.capabilities || {}),
+  };
+
+  const openCreateUser = () => {
+    setShowNewPassword(false);
+    setNewUserForm({
+      displayName: '',
+      phone: '',
+      password: '',
+      email: '',
+      customRoleId: 'reports_viewer',
+      active: true,
+      dataScope: { allBranches: true, branches: [], cities: [], platforms: ['hungerstation'], riderIds: [] },
+    });
+    setCreateUserOpen(true);
+  };
+
+  const handleCreateUser = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!canAddUsers) return;
+    setBusy(true);
+    setToast(null);
+    try {
+      const token = await getActiveAuthToken();
+      if (!token) throw new Error('انتهت جلسة تسجيل الدخول.');
+
+      const validPlatforms: Platform[] = newUserForm.dataScope.platforms.filter(
+        (p): p is Platform => p === 'hungerstation' || p === 'keeta'
+      );
+
+      const res = await fetch('/api/users', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({
+          displayName: newUserForm.displayName.trim(),
+          phone: newUserForm.phone.trim(),
+          password: newUserForm.password,
+          email: newUserForm.email.trim() || undefined,
+          customRoleId: newUserForm.customRoleId,
+          active: newUserForm.active,
+          dataScope: newUserForm.dataScope,
+          allowedPlatforms: validPlatforms.length > 0 ? validPlatforms : ['hungerstation'],
+        }),
+      });
+      const json = await safeParseJsonResponse<{ ok?: boolean; user?: UserProfile; error?: string }>(res);
+      if (!res.ok || !json.user) {
+        throw new Error(json.error || 'تعذر إنشاء المستخدم.');
+      }
+
+      setCreateUserOpen(false);
+      const roleName = mergedRoles.find((r) => r.roleId === newUserForm.customRoleId)?.nameAr || newUserForm.customRoleId;
+      setToast({
+        type: 'ok',
+        msg: `تم إنشاء حساب "${json.user.displayName}" (${json.user.phone}) بدور "${roleName}" بنجاح.`,
+      });
+      await onRefresh();
+    } catch (err) {
+      setToast({ type: 'err', msg: err instanceof Error ? err.message : 'فشل إضافة المستخدم.' });
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const handleConfirmDeleteUser = async () => {
+    if (!deleteUserTarget || !canDeleteUsers) return;
+    setBusy(true);
+    setToast(null);
+    try {
+      const token = await getActiveAuthToken();
+      if (!token) throw new Error('انتهت جلسة تسجيل الدخول.');
+      const res = await fetch(`/api/users/${encodeURIComponent(deleteUserTarget.uid)}`, {
+        method: 'DELETE',
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      const json = await safeParseJsonResponse<{ ok?: boolean; error?: string }>(res);
+      if (!res.ok || !json.ok) {
+        throw new Error(json.error || 'تعذر حذف المستخدم.');
+      }
+      setDeleteUserTarget(null);
+      setToast({ type: 'ok', msg: `تم حذف حساب "${deleteUserTarget.displayName}" نهائيًا.` });
+      await onRefresh();
+    } catch (err) {
+      setToast({ type: 'err', msg: err instanceof Error ? err.message : 'تعذر حذف المستخدم.' });
+    } finally {
+      setBusy(false);
+    }
+  };
 
   const openEditUser = (u: UserProfile) => {
     const tplId = u.customRoleId || mapLegacyRoleToTemplateId(u.role);
     const scope = resolveDataScope(u);
     setEditingUser(u);
     setUserForm({
+      displayName: u.displayName || '',
+      phone: u.phone || '',
+      newPassword: '',
       customRoleId: tplId,
       active: Boolean(u.active),
       dataScope: {
@@ -194,24 +312,35 @@ export function RbacManagementModule({
         riderIds: [...scope.riderIds],
       },
       permissionOverrides: u.permissionOverrides ? JSON.parse(JSON.stringify(u.permissionOverrides)) : {},
-      useOverrides: Boolean(u.permissionOverrides && Object.keys(u.permissionOverrides).length > 0),
+      capabilityOverrides: u.capabilityOverrides ? { ...u.capabilityOverrides } : {},
+      useOverrides: Boolean(
+        (u.permissionOverrides && Object.keys(u.permissionOverrides).length > 0) ||
+          (u.capabilityOverrides && Object.keys(u.capabilityOverrides).length > 0)
+      ),
     });
   };
 
   const handleSaveUserRbac = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!editingUser || !canManageUsers) return;
-    const isTargetOwner = editingUser.email.trim().toLowerCase() === BOOTSTRAPPED_OWNER_EMAIL_LOWER;
+    const isTargetOwner =
+      editingUser.uid === 'owner_0559786939' ||
+      editingUser.email.trim().toLowerCase() === BOOTSTRAPPED_OWNER_EMAIL_LOWER;
 
     setBusy(true);
     setToast(null);
     try {
+      const token = await getActiveAuthToken();
+      if (!token) throw new Error('انتهت جلسة تسجيل الدخول.');
+
       const legacyRole: UserRole = isTargetOwner ? 'owner' : mapTemplateToLegacyRole(userForm.customRoleId);
       const validPlatforms: Platform[] = userForm.dataScope.platforms.filter(
         (p): p is Platform => p === 'hungerstation' || p === 'keeta'
       );
 
-      const patch: Record<string, unknown> = {
+      const patchPayload: Record<string, unknown> = {
+        displayName: userForm.displayName.trim() || editingUser.displayName,
+        phone: userForm.phone.trim() || undefined,
         role: legacyRole,
         customRoleId: isTargetOwner ? 'super_admin' : userForm.customRoleId,
         active: isTargetOwner ? true : userForm.active,
@@ -219,28 +348,28 @@ export function RbacManagementModule({
         dataScope: isTargetOwner
           ? { allBranches: true, branches: [], cities: [], platforms: [], riderIds: [] }
           : userForm.dataScope,
-        assignedBranch: userForm.dataScope.branches[0] || '',
-        assignedCity: userForm.dataScope.cities[0] || '',
         permissionOverrides: !isTargetOwner && userForm.useOverrides ? userForm.permissionOverrides : {},
-        updatedAt: serverTimestamp(),
+        capabilityOverrides: !isTargetOwner && userForm.useOverrides ? userForm.capabilityOverrides : {},
       };
+      if (userForm.newPassword.trim()) {
+        patchPayload.password = userForm.newPassword.trim();
+      }
 
-      await updateDoc(doc(db, 'users', editingUser.uid), patch);
-
-      await writeErpAuditLog({
-        action: 'RBAC_USER_UPDATED',
-        targetCollection: 'users',
-        targetId: editingUser.uid,
-        entityType: 'user',
-        details: `تحديث صلاحيات ونطاق المستخدم ${editingUser.email} -> الدور: ${userForm.customRoleId}`,
-        oldValue: { role: editingUser.role, customRoleId: editingUser.customRoleId, active: editingUser.active },
-        newValue: { role: legacyRole, customRoleId: userForm.customRoleId, active: patch.active, dataScope: userForm.dataScope },
-        user: currentUser,
-        allowedUids,
+      const res = await fetch(`/api/users/${encodeURIComponent(editingUser.uid)}`, {
+        method: 'PATCH',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify(patchPayload),
       });
+      const json = await safeParseJsonResponse<{ ok?: boolean; error?: string }>(res);
+      if (!res.ok || !json.ok) {
+        throw new Error(json.error || 'فشل تحديث بيانات وصلاحيات المستخدم.');
+      }
 
       setEditingUser(null);
-      setToast({ type: 'ok', msg: `تم حفظ صلاحيات ونطاق المستخدم ${editingUser.email}.` });
+      setToast({ type: 'ok', msg: `تم حفظ بيانات وصلاحيات المستخدم ${userForm.displayName || editingUser.displayName}.` });
       await onRefresh();
     } catch (err) {
       setToast({ type: 'err', msg: err instanceof Error ? err.message : 'فشل تحديث صلاحيات المستخدم.' });
@@ -271,6 +400,14 @@ export function RbacManagementModule({
     setRoleMatrixDraft(next);
   };
 
+  const toggleCapabilityCell = (capKey: GranularCapability) => {
+    if (!canEditRoles || selectedTemplate?.roleId === 'super_admin') return;
+    setRoleCapsDraft({
+      ...activeCapabilities,
+      [capKey]: !activeCapabilities[capKey],
+    });
+  };
+
   const handleSaveRoleTemplate = async () => {
     if (!selectedTemplate || !canEditRoles) return;
     setBusy(true);
@@ -284,6 +421,7 @@ export function RbacManagementModule({
         description: selectedTemplate.description || '',
         isSystemPreset: selectedTemplate.isSystemPreset,
         permissions: activeMatrix,
+        capabilities: activeCapabilities,
         createdByUid: selectedTemplate.createdByUid || currentUser.uid,
         allowedUids: teamAllowed.length > 0 ? teamAllowed : [currentUser.uid],
         createdAt: serverTimestamp(),
@@ -295,15 +433,16 @@ export function RbacManagementModule({
         targetCollection: 'roleTemplates',
         targetId: selectedTemplate.roleId,
         entityType: 'role_template',
-        details: `تعديل مصفوفة الصلاحيات للقالب: ${selectedTemplate.nameAr}`,
+        details: `تعديل مصفوفة الصلاحيات والقدرات للقالب: ${selectedTemplate.nameAr}`,
         oldValue: selectedTemplate.permissions,
-        newValue: activeMatrix,
+        newValue: { permissions: activeMatrix, capabilities: activeCapabilities },
         user: currentUser,
         allowedUids,
       });
 
       setRoleMatrixDraft(null);
-      setToast({ type: 'ok', msg: `تم حفظ مصفوفة الصلاحيات للدور "${selectedTemplate.nameAr}".` });
+      setRoleCapsDraft(null);
+      setToast({ type: 'ok', msg: `تم حفظ مصفوفة الصلاحيات والقدرات للدور "${selectedTemplate.nameAr}".` });
       await onRefresh();
     } catch (err) {
       setToast({ type: 'err', msg: err instanceof Error ? err.message : 'فشل حفظ مصفوفة الدور.' });
@@ -319,6 +458,7 @@ export function RbacManagementModule({
       newRoleForm.roleId.trim().replace(/[^a-zA-Z0-9_-]/g, '_').toLowerCase() || `custom_${Date.now().toString(36)}`;
     const copySrc = mergedRoles.find((r) => r.roleId === newRoleForm.copyFromId);
     const permissions = copySrc ? JSON.parse(JSON.stringify(copySrc.permissions)) : createEmptyPermissionMatrix();
+    const capabilities = copySrc?.capabilities ? { ...copySrc.capabilities } : createEmptyCapabilities();
 
     setBusy(true);
     try {
@@ -330,6 +470,7 @@ export function RbacManagementModule({
         description: newRoleForm.description.trim().slice(0, 400),
         isSystemPreset: false,
         permissions,
+        capabilities,
         createdByUid: currentUser.uid,
         allowedUids: teamAllowed.length > 0 ? teamAllowed : [currentUser.uid],
         createdAt: serverTimestamp(),
@@ -349,6 +490,7 @@ export function RbacManagementModule({
       setCreateRoleOpen(false);
       setSelectedRoleId(roleId);
       setRoleMatrixDraft(null);
+      setRoleCapsDraft(null);
       setToast({ type: 'ok', msg: `تم إنشاء قالب الدور "${newRoleForm.nameAr}" بنجاح.` });
       await onRefresh();
     } catch (err) {
@@ -369,12 +511,16 @@ export function RbacManagementModule({
   const userColumns: TableColumn<UserProfile>[] = [
     {
       key: 'user',
-      header: 'المستخدم',
+      header: 'المستخدم ورقم الجوال',
       sortValue: (u) => u.displayName,
       render: (u) => (
         <div>
           <div className="font-semibold text-slate-900 dark:text-slate-100">{u.displayName}</div>
-          <div className="text-[11px] font-mono-num text-slate-500 dark:text-slate-400">{u.email}</div>
+          <div className="flex flex-wrap items-center gap-2 text-[11px] font-mono-num text-slate-500 dark:text-slate-400">
+            {u.phone && <span dir="ltr">{u.phone}</span>}
+            {u.phone && u.email && <span>·</span>}
+            {u.email && <span>{u.email}</span>}
+          </div>
         </div>
       ),
     },
@@ -421,15 +567,34 @@ export function RbacManagementModule({
     },
     {
       key: 'act',
-      header: 'تخصيص الصلاحيات',
-      render: (u) =>
-        canManageUsers ? (
-          <Button size="sm" variant="secondary" onClick={() => openEditUser(u)}>
-            إدارة الدور والنطاق
-          </Button>
-        ) : (
-          <span className="text-xs text-slate-400">قراءة فقط</span>
-        ),
+      header: 'الإجراءات',
+      render: (u) => {
+        const isProtectedOwner =
+          u.uid === 'owner_0559786939' ||
+          u.email.trim().toLowerCase() === BOOTSTRAPPED_OWNER_EMAIL_LOWER ||
+          u.uid === currentUser.uid;
+        return (
+          <div className="flex items-center gap-1.5">
+            {canManageUsers ? (
+              <Button size="sm" variant="secondary" onClick={() => openEditUser(u)}>
+                إدارة الدور والبيانات
+              </Button>
+            ) : (
+              <span className="text-xs text-slate-400">قراءة فقط</span>
+            )}
+            {canDeleteUsers && !isProtectedOwner && (
+              <button
+                type="button"
+                onClick={() => setDeleteUserTarget(u)}
+                title="حذف المستخدم"
+                className="rounded-lg p-1.5 text-red-600 hover:bg-red-50 dark:hover:bg-red-950/50 transition-colors"
+              >
+                <Trash2 className="h-3.5 w-3.5" />
+              </button>
+            )}
+          </div>
+        );
+      },
     },
   ];
 
@@ -437,17 +602,28 @@ export function RbacManagementModule({
     <div className="space-y-5">
       <PageHeader
         title="المستخدمون، الأدوار، مصفوفة الصلاحيات، وسجل التدقيق (RBAC)"
-        subtitle="صلاحيات تفصيلية (13 وحدة × 6 إجراءات) · عزل نطاق الفروع والمدن والمنصات · تتبع كامل في سجل النشاط"
+        subtitle="إدارة حسابات الدخول برقم الجوال وكلمة المرور · تحديد الأدوار الوظيفية ونطاق البيانات · تتبع سجل التدقيق"
         actions={
-          <Button
-            variant="secondary"
-            loading={busy}
-            disabled={busy}
-            onClick={() => void onRefresh()}
-            icon={<RefreshCw className="h-4 w-4" />}
-          >
-            تحديث
-          </Button>
+          <div className="flex flex-wrap items-center gap-2">
+            {canAddUsers && (
+              <Button
+                variant="primary"
+                icon={<UserPlus className="h-4 w-4" />}
+                onClick={openCreateUser}
+              >
+                إضافة مستخدم
+              </Button>
+            )}
+            <Button
+              variant="secondary"
+              loading={busy}
+              disabled={busy}
+              onClick={() => void onRefresh()}
+              icon={<RefreshCw className="h-4 w-4" />}
+            >
+              تحديث
+            </Button>
+          </div>
         }
       />
 
@@ -469,11 +645,19 @@ export function RbacManagementModule({
       {/* TAB 1: USERS & DATA SCOPE */}
       {subTab === 'rbac_users' && (
         <DataTable
+          tableId="rbac_users"
           rows={usersList}
           columns={userColumns}
           rowKey={(u) => u.uid}
-          searchPlaceholder="ابحث بالاسم أو البريد الإلكتروني أو الدور..."
-          searchText={(u) => `${u.displayName} ${u.email} ${u.customRoleId || u.role} ${u.assignedBranch || ''}`}
+          searchPlaceholder="ابحث بالاسم أو رقم الجوال أو البريد أو الدور..."
+          searchText={(u) => `${u.displayName} ${u.phone || ''} ${u.email} ${u.customRoleId || u.role} ${u.assignedBranch || ''}`}
+          toolbarExtra={
+            canAddUsers ? (
+              <Button size="sm" variant="primary" icon={<UserPlus className="h-3.5 w-3.5" />} onClick={openCreateUser}>
+                إضافة مستخدم
+              </Button>
+            ) : undefined
+          }
         />
       )}
 
@@ -506,6 +690,7 @@ export function RbacManagementModule({
                     onClick={() => {
                       setSelectedRoleId(r.roleId);
                       setRoleMatrixDraft(null);
+                      setRoleCapsDraft(null);
                     }}
                     className={`w-full rounded-lg border px-3 py-2 text-right transition-colors ${
                       active
@@ -523,7 +708,7 @@ export function RbacManagementModule({
             </div>
           </Card>
 
-          <Card className="lg:col-span-3 space-y-4">
+          <Card className="lg:col-span-3 space-y-5">
             <SectionHeader
               title={selectedTemplate?.nameAr || ''}
               subtitle={selectedTemplate?.description}
@@ -531,8 +716,15 @@ export function RbacManagementModule({
               actions={
                 canEditRoles ? (
                   <>
-                    {roleMatrixDraft && (
-                      <Button size="sm" variant="secondary" onClick={() => setRoleMatrixDraft(null)}>
+                    {(roleMatrixDraft || roleCapsDraft) && (
+                      <Button
+                        size="sm"
+                        variant="secondary"
+                        onClick={() => {
+                          setRoleMatrixDraft(null);
+                          setRoleCapsDraft(null);
+                        }}
+                      >
                         تراجع
                       </Button>
                     )}
@@ -540,7 +732,7 @@ export function RbacManagementModule({
                       size="sm"
                       variant="primary"
                       loading={busy}
-                      disabled={busy || !roleMatrixDraft}
+                      disabled={busy || (!roleMatrixDraft && !roleCapsDraft)}
                       onClick={() => void handleSaveRoleTemplate()}
                     >
                       حفظ مصفوفة الصلاحيات
@@ -600,6 +792,44 @@ export function RbacManagementModule({
                 </tbody>
               </table>
             </div>
+
+            <div className="border-t border-slate-200 dark:border-slate-800 pt-4 space-y-3">
+              <div>
+                <h4 className="text-xs font-bold text-slate-900 dark:text-slate-100">
+                  القدرات والصلاحيات التنفيذية الدقيقة (Granular Capabilities)
+                </h4>
+                <p className="text-[11px] text-slate-500 dark:text-slate-400">
+                  تحكم دقيق في الطباعة، الأرشفة، الاسترجاع، بناء الحقول والنماذج، وتغيير الهوية وبيانات الشركة
+                </p>
+              </div>
+              <div className="grid grid-cols-1 gap-2.5 sm:grid-cols-2">
+                {GRANULAR_CAPABILITIES.map((cap) => {
+                  const checked = Boolean(activeCapabilities[cap.key]);
+                  return (
+                    <label
+                      key={cap.key}
+                      className={`flex items-start gap-2.5 rounded-xl border p-3 text-xs transition-colors ${
+                        checked
+                          ? 'border-blue-200 dark:border-blue-800/80 bg-blue-50/40 dark:bg-blue-950/20'
+                          : 'border-slate-200 dark:border-slate-800 bg-slate-50/40 dark:bg-slate-950/30'
+                      } ${!canEditRoles || selectedTemplate?.roleId === 'super_admin' ? 'opacity-70 cursor-not-allowed' : 'cursor-pointer'}`}
+                    >
+                      <input
+                        type="checkbox"
+                        disabled={!canEditRoles || selectedTemplate?.roleId === 'super_admin'}
+                        checked={checked}
+                        onChange={() => toggleCapabilityCell(cap.key)}
+                        className="mt-0.5 h-4 w-4 rounded border-slate-300 dark:border-slate-700 accent-[#0f1e36] dark:accent-blue-600"
+                      />
+                      <div>
+                        <div className="font-bold text-slate-900 dark:text-slate-100">{cap.labelAr}</div>
+                        <div className="text-[11px] text-slate-500 dark:text-slate-400">{cap.descriptionAr}</div>
+                      </div>
+                    </label>
+                  );
+                })}
+              </div>
+            </div>
           </Card>
         </div>
       )}
@@ -636,6 +866,7 @@ export function RbacManagementModule({
               </Card>
 
               <DataTable
+                tableId="rbac_audit"
                 rows={filteredAudit}
                 rowKey={(l) => l.logId}
                 searchPlaceholder="ابحث بالإجراء، المنفذ، رقم السجل، أو التفاصيل..."
@@ -711,11 +942,45 @@ export function RbacManagementModule({
         {editingUser && (
           <form id="rbac-edit-user-form" onSubmit={(e) => void handleSaveUserRbac(e)} className="space-y-4 text-xs">
             <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+              <FormField label="الاسم الكامل" required>
+                <Input
+                  type="text"
+                  required
+                  value={userForm.displayName}
+                  onChange={(e) => setUserForm({ ...userForm, displayName: e.target.value })}
+                />
+              </FormField>
+
+              <FormField label="رقم الجوال (لتسجيل الدخول)" required>
+                <Input
+                  type="tel"
+                  dir="ltr"
+                  className="font-mono-num text-left"
+                  value={userForm.phone}
+                  onChange={(e) => setUserForm({ ...userForm, phone: e.target.value })}
+                  placeholder="05XXXXXXXX"
+                />
+              </FormField>
+
+              <FormField label="كلمة مرور جديدة" hint="اتركها فارغة للإبقاء على كلمة المرور الحالية">
+                <Input
+                  type="password"
+                  dir="ltr"
+                  className="font-mono-num text-left"
+                  value={userForm.newPassword}
+                  onChange={(e) => setUserForm({ ...userForm, newPassword: e.target.value })}
+                  placeholder="••••"
+                />
+              </FormField>
+
               <FormField label="قالب الدور الوظيفي">
                 <Select
                   value={userForm.customRoleId}
                   onChange={(e) => setUserForm({ ...userForm, customRoleId: e.target.value })}
-                  disabled={editingUser.email.trim().toLowerCase() === BOOTSTRAPPED_OWNER_EMAIL_LOWER}
+                  disabled={
+                    editingUser.uid === 'owner_0559786939' ||
+                    editingUser.email.trim().toLowerCase() === BOOTSTRAPPED_OWNER_EMAIL_LOWER
+                  }
                 >
                   {mergedRoles.map((r) => (
                     <option key={r.roleId} value={r.roleId}>{r.nameAr}</option>
@@ -723,12 +988,15 @@ export function RbacManagementModule({
                 </Select>
               </FormField>
 
-              <div className="flex items-end pb-2">
+              <div className="sm:col-span-2 flex items-center pt-1">
                 <label className="flex items-center gap-2 font-semibold text-slate-800 dark:text-slate-200 cursor-pointer">
                   <input
                     type="checkbox"
                     checked={userForm.active}
-                    disabled={editingUser.email.trim().toLowerCase() === BOOTSTRAPPED_OWNER_EMAIL_LOWER}
+                    disabled={
+                      editingUser.uid === 'owner_0559786939' ||
+                      editingUser.email.trim().toLowerCase() === BOOTSTRAPPED_OWNER_EMAIL_LOWER
+                    }
                     onChange={(e) => setUserForm({ ...userForm, active: e.target.checked })}
                     className="h-4 w-4 rounded border-slate-300 dark:border-slate-600"
                   />
@@ -850,44 +1118,84 @@ export function RbacManagementModule({
                 <span>تطبيق استثناءات صلاحيات مخصصة لهذا المستخدم (Overrides)</span>
               </label>
               {userForm.useOverrides && (
-                <div className="max-h-56 overflow-y-auto erp-scroll border-t border-slate-200 dark:border-slate-800 pt-2.5">
-                  {(() => {
-                    const previewEffective = resolveEffectivePermissions(
-                      {
-                        ...editingUser,
-                        customRoleId: userForm.customRoleId,
-                        active: userForm.active,
-                        permissionOverrides: userForm.permissionOverrides,
-                      },
-                      mergedRoles
-                    );
-                    return PERMISSION_MODULES.map((mod) => (
-                      <div key={mod.key} className="flex flex-wrap items-center justify-between gap-2 py-1.5 text-[11px] border-b border-slate-100 dark:border-slate-800/70 last:border-b-0">
-                        <span className="font-medium w-44 truncate text-slate-800 dark:text-slate-200">{mod.labelAr}</span>
-                        <div className="flex flex-wrap items-center gap-3">
-                          {PERMISSION_ACTIONS.map((act) => (
-                            <label key={act.key} className="flex items-center gap-1 cursor-pointer">
-                              <input
-                                type="checkbox"
-                                checked={Boolean(previewEffective[mod.key]?.[act.key])}
-                                onChange={(e) => {
-                                  const nextMod = {
-                                    ...(userForm.permissionOverrides[mod.key] || {}),
-                                    [act.key]: e.target.checked,
-                                  };
-                                  setUserForm({
-                                    ...userForm,
-                                    permissionOverrides: { ...userForm.permissionOverrides, [mod.key]: nextMod },
-                                  });
-                                }}
-                              />
-                              <span>{act.labelAr}</span>
-                            </label>
-                          ))}
+                <div className="space-y-4 border-t border-slate-200 dark:border-slate-800 pt-2.5">
+                  <div className="max-h-56 overflow-y-auto erp-scroll">
+                    {(() => {
+                      const previewEffective = resolveEffectivePermissions(
+                        {
+                          ...editingUser,
+                          customRoleId: userForm.customRoleId,
+                          active: userForm.active,
+                          permissionOverrides: userForm.permissionOverrides,
+                        },
+                        mergedRoles
+                      );
+                      return PERMISSION_MODULES.map((mod) => (
+                        <div key={mod.key} className="flex flex-wrap items-center justify-between gap-2 py-1.5 text-[11px] border-b border-slate-100 dark:border-slate-800/70 last:border-b-0">
+                          <span className="font-medium w-44 truncate text-slate-800 dark:text-slate-200">{mod.labelAr}</span>
+                          <div className="flex flex-wrap items-center gap-3">
+                            {PERMISSION_ACTIONS.map((act) => (
+                              <label key={act.key} className="flex items-center gap-1 cursor-pointer">
+                                <input
+                                  type="checkbox"
+                                  checked={Boolean(previewEffective[mod.key]?.[act.key])}
+                                  onChange={(e) => {
+                                    const nextMod = {
+                                      ...(userForm.permissionOverrides[mod.key] || {}),
+                                      [act.key]: e.target.checked,
+                                    };
+                                    setUserForm({
+                                      ...userForm,
+                                      permissionOverrides: { ...userForm.permissionOverrides, [mod.key]: nextMod },
+                                    });
+                                  }}
+                                />
+                                <span>{act.labelAr}</span>
+                              </label>
+                            ))}
+                          </div>
                         </div>
-                      </div>
-                    ));
-                  })()}
+                      ));
+                    })()}
+                  </div>
+
+                  <div className="border-t border-slate-200 dark:border-slate-800 pt-2.5 space-y-2">
+                    <div className="text-[11px] font-bold text-slate-700 dark:text-slate-200">
+                      استثناءات القدرات الخاصة (Granular Capabilities)
+                    </div>
+                    <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+                      {(() => {
+                        const previewCaps = resolveEffectiveCapabilities(
+                          {
+                            ...editingUser,
+                            customRoleId: userForm.customRoleId,
+                            active: userForm.active,
+                            capabilityOverrides: userForm.capabilityOverrides,
+                          },
+                          mergedRoles
+                        );
+                        return GRANULAR_CAPABILITIES.map((cap) => (
+                          <label key={cap.key} className="flex items-center gap-2 rounded-lg border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 px-2.5 py-1.5 text-[11px] cursor-pointer">
+                            <input
+                              type="checkbox"
+                              disabled={editingUser.email.trim().toLowerCase() === BOOTSTRAPPED_OWNER_EMAIL_LOWER}
+                              checked={Boolean(previewCaps[cap.key])}
+                              onChange={(e) =>
+                                setUserForm({
+                                  ...userForm,
+                                  capabilityOverrides: {
+                                    ...userForm.capabilityOverrides,
+                                    [cap.key]: e.target.checked,
+                                  },
+                                })
+                              }
+                            />
+                            <span className="font-medium text-slate-800 dark:text-slate-200">{cap.labelAr}</span>
+                          </label>
+                        ));
+                      })()}
+                    </div>
+                  </div>
                 </div>
               )}
             </div>
@@ -959,6 +1267,206 @@ export function RbacManagementModule({
           </FormField>
         </form>
       </SlideDrawer>
+
+      {/* CREATE NEW USER DRAWER */}
+      <SlideDrawer
+        open={createUserOpen}
+        onClose={() => setCreateUserOpen(false)}
+        size="lg"
+        title="إضافة مستخدم جديد للنظام"
+        subtitle="إنشاء حساب دخول برقم الجوال وكلمة المرور مع تحديد الدور الوظيفي ونطاق البيانات"
+        footer={
+          <>
+            <Button variant="secondary" onClick={() => setCreateUserOpen(false)}>
+              إلغاء
+            </Button>
+            <Button
+              type="submit"
+              form="rbac-create-user-form"
+              variant="primary"
+              loading={busy}
+              disabled={busy}
+              icon={<UserPlus className="h-4 w-4" />}
+            >
+              {busy ? 'جاري الإنشاء...' : 'إنشاء المستخدم'}
+            </Button>
+          </>
+        }
+      >
+        <form id="rbac-create-user-form" onSubmit={(e) => void handleCreateUser(e)} className="space-y-4 text-xs">
+          <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+            <FormField label="الاسم الكامل" required>
+              <Input
+                type="text"
+                required
+                value={newUserForm.displayName}
+                onChange={(e) => setNewUserForm({ ...newUserForm, displayName: e.target.value })}
+                placeholder="مثال: أحمد العتيبي"
+              />
+            </FormField>
+
+            <FormField label="رقم الجوال (لتسجيل الدخول)" required>
+              <Input
+                type="tel"
+                inputMode="tel"
+                dir="ltr"
+                required
+                className="font-mono-num text-left"
+                value={newUserForm.phone}
+                onChange={(e) => setNewUserForm({ ...newUserForm, phone: e.target.value })}
+                placeholder="05XXXXXXXX"
+              />
+            </FormField>
+
+            <FormField label="كلمة المرور" required hint="4 أحرف أو أرقام على الأقل">
+              <div className="relative">
+                <Input
+                  type={showNewPassword ? 'text' : 'password'}
+                  dir="ltr"
+                  required
+                  minLength={4}
+                  className="font-mono-num text-left pl-9"
+                  value={newUserForm.password}
+                  onChange={(e) => setNewUserForm({ ...newUserForm, password: e.target.value })}
+                  placeholder="••••"
+                />
+                <button
+                  type="button"
+                  tabIndex={-1}
+                  onClick={() => setShowNewPassword((p) => !p)}
+                  className="absolute left-2.5 top-1/2 -translate-y-1/2 rounded p-1 text-slate-400 hover:text-slate-700"
+                >
+                  {showNewPassword ? <EyeOff className="h-3.5 w-3.5" /> : <Eye className="h-3.5 w-3.5" />}
+                </button>
+              </div>
+            </FormField>
+
+            <FormField label="قالب الدور الوظيفي (الصلاحيات)" required>
+              <Select
+                value={newUserForm.customRoleId}
+                onChange={(e) => setNewUserForm({ ...newUserForm, customRoleId: e.target.value })}
+              >
+                {mergedRoles.map((r) => (
+                  <option key={r.roleId} value={r.roleId}>
+                    {r.nameAr}
+                  </option>
+                ))}
+              </Select>
+            </FormField>
+
+            <FormField label="البريد الإلكتروني (اختياري)">
+              <Input
+                type="email"
+                dir="ltr"
+                className="font-mono-num text-left"
+                value={newUserForm.email}
+                onChange={(e) => setNewUserForm({ ...newUserForm, email: e.target.value })}
+                placeholder="user@company.com"
+              />
+            </FormField>
+
+            <div className="flex items-end pb-2">
+              <label className="flex items-center gap-2 font-semibold text-slate-800 dark:text-slate-200 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={newUserForm.active}
+                  onChange={(e) => setNewUserForm({ ...newUserForm, active: e.target.checked })}
+                  className="h-4 w-4 rounded border-slate-300 dark:border-slate-600"
+                />
+                <span>تفعيل الحساب فورًا للسماح بالدخول</span>
+              </label>
+            </div>
+          </div>
+
+          <div className="rounded-xl border border-slate-200 dark:border-slate-800 bg-slate-50/50 dark:bg-slate-950/50 p-4 space-y-3">
+            <div className="flex items-center justify-between">
+              <span className="font-bold flex items-center gap-1.5 text-slate-900 dark:text-slate-100">
+                <Sliders className="h-3.5 w-3.5" />
+                <span>نطاق البيانات المسموح بها (Data Scope)</span>
+              </span>
+              <label className="flex items-center gap-1.5 font-semibold text-slate-700 dark:text-slate-300 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={newUserForm.dataScope.allBranches}
+                  onChange={(e) =>
+                    setNewUserForm({
+                      ...newUserForm,
+                      dataScope: { ...newUserForm.dataScope, allBranches: e.target.checked },
+                    })
+                  }
+                  className="h-4 w-4 rounded border-slate-300 dark:border-slate-600"
+                />
+                <span>الوصول لجميع الفروع</span>
+              </label>
+            </div>
+
+            {!newUserForm.dataScope.allBranches && (
+              <div>
+                <div className="font-semibold text-slate-600 dark:text-slate-400 mb-1.5">تحديد الفروع:</div>
+                <div className="flex flex-wrap gap-2">
+                  {branches.map((br) => {
+                    const checked = newUserForm.dataScope.branches.includes(br);
+                    return (
+                      <label key={br} className="flex items-center gap-1.5 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 px-2.5 py-1.5 cursor-pointer">
+                        <input
+                          type="checkbox"
+                          checked={checked}
+                          onChange={(e) => {
+                            const next = e.target.checked
+                              ? [...newUserForm.dataScope.branches, br]
+                              : newUserForm.dataScope.branches.filter((x) => x !== br);
+                            setNewUserForm({ ...newUserForm, dataScope: { ...newUserForm.dataScope, branches: next } });
+                          }}
+                        />
+                        <span>{br}</span>
+                      </label>
+                    );
+                  })}
+                  {branches.length === 0 && <span className="text-slate-400">لا توجد فروع مسجلة بعد.</span>}
+                </div>
+              </div>
+            )}
+
+            <div>
+              <div className="font-semibold text-slate-600 dark:text-slate-400 mb-1.5">المنصات المسموح بها:</div>
+              <div className="flex flex-wrap gap-2">
+                {availablePlatforms.map((plat) => {
+                  const checked = newUserForm.dataScope.platforms.includes(plat.platformId);
+                  return (
+                    <label key={plat.platformId} className="flex items-center gap-1.5 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 px-2.5 py-1.5 cursor-pointer">
+                      <input
+                        type="checkbox"
+                        checked={checked}
+                        onChange={(e) => {
+                          const next = e.target.checked
+                            ? [...newUserForm.dataScope.platforms, plat.platformId]
+                            : newUserForm.dataScope.platforms.filter((x) => x !== plat.platformId);
+                          setNewUserForm({ ...newUserForm, dataScope: { ...newUserForm.dataScope, platforms: next } });
+                        }}
+                      />
+                      <span>{plat.nameAr}</span>
+                    </label>
+                  );
+                })}
+              </div>
+            </div>
+          </div>
+        </form>
+      </SlideDrawer>
+
+      <ConfirmModal
+        open={Boolean(deleteUserTarget)}
+        title="تأكيد حذف حساب المستخدم"
+        description={
+          deleteUserTarget
+            ? `هل تريد حذف حساب المستخدم "${deleteUserTarget.displayName}" (${deleteUserTarget.phone || deleteUserTarget.email}) نهائيًا؟ لن يتمكن من تسجيل الدخول بعد الحذف.`
+            : ''
+        }
+        danger
+        busy={busy}
+        onCancel={() => setDeleteUserTarget(null)}
+        onConfirm={() => void handleConfirmDeleteUser()}
+      />
     </div>
   );
 }

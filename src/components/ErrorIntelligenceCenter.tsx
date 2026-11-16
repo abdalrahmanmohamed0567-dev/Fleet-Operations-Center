@@ -12,7 +12,7 @@ import {
   TrendingDown,
   TrendingUp,
 } from 'lucide-react';
-import { deleteDoc, doc, serverTimestamp, setDoc } from 'firebase/firestore';
+import { deleteDoc, doc, serverTimestamp, setDoc } from '../lib/erpDb';
 import { useMemo, useState } from 'react';
 import {
   Bar,

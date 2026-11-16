@@ -1,4 +1,4 @@
-import { doc, serverTimestamp, setDoc } from 'firebase/firestore';
+import { doc, serverTimestamp, setDoc } from './erpDb';
 import type {
   EmployeeHrStatus,
   OperationalSettings,

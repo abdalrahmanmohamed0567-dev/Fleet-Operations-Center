@@ -12,7 +12,7 @@ import {
   Trash2,
   UserCheck,
 } from 'lucide-react';
-import { deleteDoc, doc, serverTimestamp, setDoc } from 'firebase/firestore';
+import { deleteDoc, doc, serverTimestamp, setDoc } from '../lib/erpDb';
 import { useMemo, useState } from 'react';
 import {
   CartesianGrid,
@@ -26,7 +26,7 @@ import {
 } from 'recharts';
 import { EMPLOYEE_HR_STATUS_LABELS, generateNextCompanyRiderId, VEHICLE_STATUS_LABELS } from '../lib/erpHelpers';
 import { extractHungerErrorEvents, type HungerErrorEvent } from '../lib/errorIntelligence';
-import { auth, db, handleFirestoreError, OperationType } from '../lib/firebase';
+import { db, getActiveAuthToken, handleFirestoreError, OperationType } from '../lib/firebase';
 import {
   buildUnifiedDailyRows,
   fmtCurrency,
@@ -787,9 +787,8 @@ function Rider360Profile({
 
   const handleDownloadVaultDoc = async (docRec: PrivateDocumentRecord) => {
     try {
-      const user = auth.currentUser;
-      if (!user) return;
-      const token = await user.getIdToken();
+      const token = await getActiveAuthToken();
+      if (!token) return;
       const res = await fetch(`/api/documents/${encodeURIComponent(docRec.docId)}/file`, {
         headers: { Authorization: `Bearer ${token}` },
       });

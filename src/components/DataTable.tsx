@@ -1,5 +1,5 @@
-import { ArrowDown, ArrowUp, ArrowUpDown, ChevronLeft, ChevronRight, Inbox, Search } from 'lucide-react';
-import { useMemo, useState, type ReactNode } from 'react';
+import { ArrowDown, ArrowUp, ArrowUpDown, ChevronLeft, ChevronRight, Columns3, Inbox, RotateCcw, Search } from 'lucide-react';
+import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { TableSkeleton } from './ui/EnterpriseUI';
 
 export interface TableColumn<T> {
@@ -14,6 +14,7 @@ interface DataTableProps<T> {
   rows: T[];
   columns: TableColumn<T>[];
   rowKey: (row: T, index: number) => string;
+  tableId?: string;
   searchPlaceholder?: string;
   searchText?: (row: T) => string;
   emptyTitle?: string;
@@ -28,6 +29,7 @@ export function DataTable<T>({
   rows,
   columns,
   rowKey,
+  tableId,
   searchPlaceholder = 'ابحث في الجدول...',
   searchText,
   emptyTitle = 'لا توجد سجلات مطابقة',
@@ -42,6 +44,59 @@ export function DataTable<T>({
   const [sortDir, setSortDir] = useState<'asc' | 'desc'>('desc');
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(initialPageSize);
+  const [colsOpen, setColsOpen] = useState(false);
+  const colsPopoverRef = useRef<HTMLDivElement | null>(null);
+
+  const storageKey = tableId ? `foc_table_cols_${tableId}` : '';
+  const [hiddenColKeys, setHiddenColKeys] = useState<string[]>(() => {
+    if (!storageKey) return [];
+    try {
+      const raw = localStorage.getItem(storageKey);
+      const parsed = raw ? JSON.parse(raw) : [];
+      return Array.isArray(parsed) ? parsed.filter((x): x is string => typeof x === 'string') : [];
+    } catch {
+      return [];
+    }
+  });
+
+  useEffect(() => {
+    if (!storageKey) return;
+    try {
+      const raw = localStorage.getItem(storageKey);
+      const parsed = raw ? JSON.parse(raw) : [];
+      setHiddenColKeys(Array.isArray(parsed) ? parsed.filter((x): x is string => typeof x === 'string') : []);
+    } catch {
+      setHiddenColKeys([]);
+    }
+  }, [storageKey]);
+
+  useEffect(() => {
+    if (!colsOpen) return;
+    const handleClickOutside = (e: MouseEvent) => {
+      if (colsPopoverRef.current && !colsPopoverRef.current.contains(e.target as Node)) {
+        setColsOpen(false);
+      }
+    };
+    document.addEventListener('mousedown', handleClickOutside);
+    return () => document.removeEventListener('mousedown', handleClickOutside);
+  }, [colsOpen]);
+
+  const updateHiddenCols = (next: string[]) => {
+    setHiddenColKeys(next);
+    if (storageKey) {
+      try {
+        localStorage.setItem(storageKey, JSON.stringify(next));
+      } catch {
+        // ignore storage quota errors
+      }
+    }
+  };
+
+  const visibleColumns = useMemo(() => {
+    if (!tableId || hiddenColKeys.length === 0) return columns;
+    const active = columns.filter((c) => !hiddenColKeys.includes(c.key));
+    return active.length > 0 ? active : columns.slice(0, 1);
+  }, [columns, hiddenColKeys, tableId]);
 
   const filtered = useMemo(() => {
     if (!query.trim() || !searchText) return rows;
@@ -89,7 +144,7 @@ export function DataTable<T>({
 
   return (
     <div className="rounded-xl border border-slate-200/90 dark:border-slate-800 bg-white dark:bg-slate-900 overflow-hidden">
-      {(searchText || rows.length > 0 || toolbarExtra) && (
+      {(searchText || rows.length > 0 || toolbarExtra || tableId) && (
         <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-200 dark:border-slate-800 bg-slate-50/50 dark:bg-slate-950/40 px-4 py-3">
           <div className="flex flex-wrap items-center gap-2.5 flex-1 min-w-[200px]">
             {searchText && (
@@ -110,7 +165,69 @@ export function DataTable<T>({
             {toolbarExtra}
           </div>
 
-          <div className="flex items-center gap-3 shrink-0">
+          <div className="flex items-center gap-2.5 shrink-0">
+            {tableId && (
+              <div className="relative" ref={colsPopoverRef}>
+                <button
+                  type="button"
+                  onClick={() => setColsOpen((p) => !p)}
+                  className="inline-flex h-8 items-center gap-1.5 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-950 px-2.5 text-xs font-medium text-slate-700 dark:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-800 whitespace-nowrap shrink-0"
+                >
+                  <Columns3 className="h-3.5 w-3.5 text-slate-500" />
+                  <span>الأعمدة</span>
+                  {hiddenColKeys.length > 0 && (
+                    <span className="font-mono-num text-[10px] font-bold text-blue-600 dark:text-blue-400">
+                      ({visibleColumns.length}/{columns.length})
+                    </span>
+                  )}
+                </button>
+                {colsOpen && (
+                  <div className="absolute left-0 top-full z-30 mt-1.5 w-60 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 p-2.5 shadow-lg">
+                    <div className="flex items-center justify-between border-b border-slate-100 dark:border-slate-800 pb-2 mb-2">
+                      <span className="text-[11px] font-bold text-slate-800 dark:text-slate-200">إظهار / إخفاء الأعمدة</span>
+                      {hiddenColKeys.length > 0 && (
+                        <button
+                          type="button"
+                          onClick={() => updateHiddenCols([])}
+                          className="inline-flex items-center gap-1 text-[11px] font-medium text-blue-600 dark:text-blue-400 hover:underline"
+                        >
+                          <RotateCcw className="h-3 w-3" />
+                          <span>افتراضي</span>
+                        </button>
+                      )}
+                    </div>
+                    <div className="max-h-56 overflow-y-auto erp-scroll space-y-1">
+                      {columns.map((c) => {
+                        const isVisible = visibleColumns.some((vc) => vc.key === c.key);
+                        const isOnlyOneLeft = isVisible && visibleColumns.length <= 1;
+                        return (
+                          <label
+                            key={c.key}
+                            className="flex items-center justify-between rounded-lg px-2 py-1.5 text-xs hover:bg-slate-50 dark:hover:bg-slate-800/70 cursor-pointer"
+                          >
+                            <span className="text-slate-700 dark:text-slate-200 truncate">{c.header}</span>
+                            <input
+                              type="checkbox"
+                              checked={isVisible}
+                              disabled={isOnlyOneLeft}
+                              onChange={(e) => {
+                                if (e.target.checked) {
+                                  updateHiddenCols(hiddenColKeys.filter((k) => k !== c.key));
+                                } else {
+                                  updateHiddenCols([...hiddenColKeys, c.key]);
+                                }
+                              }}
+                              className="h-3.5 w-3.5 rounded border-slate-300 dark:border-slate-600"
+                            />
+                          </label>
+                        );
+                      })}
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
+
             <label className="flex items-center gap-1.5 text-xs text-slate-500 dark:text-slate-400">
               <span>عرض:</span>
               <select
@@ -148,7 +265,7 @@ export function DataTable<T>({
           <table className="w-full border-collapse text-[13px]">
             <thead className="sticky top-0 z-10">
               <tr className="border-b border-slate-200 dark:border-slate-800 bg-slate-50/95 dark:bg-slate-950/90 text-[11px] font-bold text-slate-600 dark:text-slate-400">
-                {columns.map((col) => (
+                {visibleColumns.map((col) => (
                   <th
                     key={col.key}
                     className={`h-10 px-4 whitespace-nowrap ${
@@ -190,7 +307,7 @@ export function DataTable<T>({
                       : 'hover:bg-slate-50/80 dark:hover:bg-slate-800/40'
                   }`}
                 >
-                  {columns.map((col) => (
+                  {visibleColumns.map((col) => (
                     <td
                       key={col.key}
                       className={`px-4 py-2.5 text-slate-700 dark:text-slate-300 whitespace-nowrap align-middle ${

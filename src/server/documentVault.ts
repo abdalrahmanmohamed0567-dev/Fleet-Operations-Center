@@ -213,3 +213,122 @@ export async function getPrivateVaultStats(): Promise<{ exists: boolean; fileCou
   }
 }
 
+export interface VaultBackupFilesPayload {
+  vaultFiles: Record<string, string>;
+  brandingFiles: Record<string, string>;
+  publicBranding: Record<string, unknown> | null;
+}
+
+export async function exportVaultFilesBase64(): Promise<VaultBackupFilesPayload> {
+  const vaultFiles: Record<string, string> = {};
+  const brandingFiles: Record<string, string> = {};
+
+  try {
+    await fs.mkdir(VAULT_ROOT, { recursive: true });
+    const entries = await fs.readdir(VAULT_ROOT, { withFileTypes: true });
+    for (const ent of entries) {
+      if (ent.isFile() && !ent.name.startsWith('.')) {
+        const buf = await fs.readFile(path.resolve(VAULT_ROOT, ent.name));
+        vaultFiles[ent.name] = buf.toString('base64');
+      }
+    }
+  } catch {
+    // ignore
+  }
+
+  try {
+    await fs.mkdir(BRANDING_ROOT, { recursive: true });
+    const bEntries = await fs.readdir(BRANDING_ROOT, { withFileTypes: true });
+    for (const ent of bEntries) {
+      if (ent.isFile() && ent.name !== 'public_branding.json') {
+        const buf = await fs.readFile(path.resolve(BRANDING_ROOT, ent.name));
+        brandingFiles[ent.name] = buf.toString('base64');
+      }
+    }
+  } catch {
+    // ignore
+  }
+
+  const publicBranding = await readBrandingPublicMetadata();
+  return { vaultFiles, brandingFiles, publicBranding };
+}
+
+export async function restoreVaultFilesBase64(
+  payload: Partial<VaultBackupFilesPayload>,
+  replaceExisting = true
+): Promise<{ vaultCount: number; brandingCount: number }> {
+  await fs.mkdir(VAULT_ROOT, { recursive: true });
+  await fs.mkdir(BRANDING_ROOT, { recursive: true });
+
+  if (replaceExisting) {
+    const existingVault = await fs.readdir(VAULT_ROOT, { withFileTypes: true });
+    for (const ent of existingVault) {
+      if (ent.isFile() && !ent.name.startsWith('.')) {
+        await fs.unlink(path.resolve(VAULT_ROOT, ent.name)).catch(() => {});
+      }
+    }
+    const existingBrand = await fs.readdir(BRANDING_ROOT, { withFileTypes: true });
+    for (const ent of existingBrand) {
+      if (ent.isFile()) {
+        await fs.unlink(path.resolve(BRANDING_ROOT, ent.name)).catch(() => {});
+      }
+    }
+  }
+
+  let vaultCount = 0;
+  if (payload.vaultFiles && typeof payload.vaultFiles === 'object') {
+    for (const [rawKey, b64] of Object.entries(payload.vaultFiles)) {
+      if (typeof b64 !== 'string') continue;
+      const safeKey = sanitizeStorageKey(rawKey);
+      const target = path.resolve(VAULT_ROOT, safeKey);
+      if (target.startsWith(VAULT_ROOT + path.sep)) {
+        await fs.writeFile(target, Buffer.from(b64, 'base64'), { mode: 0o600 });
+        vaultCount++;
+      }
+    }
+  }
+
+  let brandingCount = 0;
+  if (payload.brandingFiles && typeof payload.brandingFiles === 'object') {
+    for (const [rawKey, b64] of Object.entries(payload.brandingFiles)) {
+      if (typeof b64 !== 'string') continue;
+      const safeKey = sanitizeStorageKey(rawKey);
+      const target = path.resolve(BRANDING_ROOT, safeKey);
+      if (target.startsWith(BRANDING_ROOT + path.sep)) {
+        await fs.writeFile(target, Buffer.from(b64, 'base64'), { mode: 0o644 });
+        brandingCount++;
+      }
+    }
+  }
+
+  if (payload.publicBranding && typeof payload.publicBranding === 'object') {
+    await saveBrandingPublicMetadata(payload.publicBranding);
+  }
+
+  return { vaultCount, brandingCount };
+}
+
+export async function clearAllVaultAndBrandingFiles(): Promise<void> {
+  try {
+    await fs.mkdir(VAULT_ROOT, { recursive: true });
+    const entries = await fs.readdir(VAULT_ROOT, { withFileTypes: true });
+    for (const ent of entries) {
+      if (ent.isFile() && !ent.name.startsWith('.')) {
+        await fs.unlink(path.resolve(VAULT_ROOT, ent.name)).catch(() => {});
+      }
+    }
+  } catch {
+    // ignore
+  }
+  try {
+    await fs.mkdir(BRANDING_ROOT, { recursive: true });
+    const bEntries = await fs.readdir(BRANDING_ROOT, { withFileTypes: true });
+    for (const ent of bEntries) {
+      if (ent.isFile()) {
+        await fs.unlink(path.resolve(BRANDING_ROOT, ent.name)).catch(() => {});
+      }
+    }
+  } catch {
+    // ignore
+  }
+}

@@ -1,4 +1,4 @@
-import { deleteDoc, doc, serverTimestamp, setDoc, updateDoc } from 'firebase/firestore';
+import { deleteDoc, doc, serverTimestamp, setDoc, updateDoc } from '../lib/erpDb';
 import {
   AlertTriangle,
   ArrowRight,
@@ -25,7 +25,7 @@ import {
   writeErpAuditLog,
   type ExpiryUrgency,
 } from '../lib/erpHelpers';
-import { auth, db, DEFAULT_DOCUMENT_TYPES, handleFirestoreError, OperationType } from '../lib/firebase';
+import { db, DEFAULT_DOCUMENT_TYPES, getActiveAuthToken, handleFirestoreError, OperationType } from '../lib/firebase';
 import { safeParseJsonResponse } from '../lib/safeFetch';
 import { hasPermission } from '../shared/rbacCore';
 import {
@@ -648,7 +648,7 @@ export function HrManagementModule({
     setBusy(true);
     setToast(null);
     try {
-      const idToken = await auth.currentUser?.getIdToken();
+      const idToken = await getActiveAuthToken();
       if (!idToken) throw new Error('الجلسة منتهية. أعد تسجيل الدخول.');
 
       const form = new FormData();
@@ -692,7 +692,7 @@ export function HrManagementModule({
     if (!canViewDocs) return;
     setBusy(true);
     try {
-      const idToken = await auth.currentUser?.getIdToken();
+      const idToken = await getActiveAuthToken();
       if (!idToken) throw new Error('يلزم تسجيل الدخول للوصول للمستند.');
       const url = `/api/documents/${encodeURIComponent(docRec.docId)}/file?${version ? `version=${version}&` : ''}${download ? 'download=1' : 'download=0'}`;
       const res = await fetch(url, {
@@ -728,7 +728,7 @@ export function HrManagementModule({
     if (!deleteTargetDoc || !canDeleteDocs) return;
     setBusy(true);
     try {
-      const idToken = await auth.currentUser?.getIdToken();
+      const idToken = await getActiveAuthToken();
       if (!idToken) throw new Error('الجلسة منتهية.');
       const res = await fetch(`/api/documents/${encodeURIComponent(deleteTargetDoc.docId)}`, {
         method: 'DELETE',
@@ -1493,6 +1493,7 @@ export function HrManagementModule({
             onChanged={onRefresh}
           />
           <DataTable
+            tableId="hr_riders"
             rows={filteredRiders}
             columns={riderColumns}
             rowKey={(r) => r.internalRiderId}
@@ -1587,6 +1588,7 @@ export function HrManagementModule({
               )}
 
               <DataTable
+                tableId="hr_docs"
                 rows={riderDocs}
                 columns={docColumns}
                 rowKey={(d) => d.docId}
@@ -1630,6 +1632,7 @@ export function HrManagementModule({
           </Card>
 
           <DataTable
+            tableId="hr_expiries"
             rows={filteredExpiries}
             rowKey={(e) => e.id}
             searchPlaceholder="ابحث باسم المندوب أو نوع الوثيقة أو رقم الإقامة..."

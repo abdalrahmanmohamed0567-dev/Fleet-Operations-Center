@@ -77,6 +77,7 @@ export interface RoleTemplate {
 
 export interface UserProfile {
   uid: string;
+  phone?: string;
   email: string;
   displayName: string;
   role: UserRole;
@@ -1306,4 +1307,27 @@ export interface CustomReportTemplate {
   updatedAt?: string;
 }
 
+export interface SystemBackupSummary {
+  backupId: string;
+  fileName: string;
+  type: 'manual' | 'auto_daily' | 'pre_reset';
+  createdAt: string;
+  createdBy: string;
+  sizeBytes: number;
+  totalDocuments: number;
+  vaultFileCount: number;
+  checksum: string;
+  note?: string;
+}
 
+export interface BackupSchedulerConfig {
+  enabled: boolean;
+  hour: number;
+  minute: number;
+  timezone: string;
+  retentionDays: number;
+  lastRunDate: string;
+  lastRunAt: string;
+  lastBackupId: string;
+  lastStatus: string;
+}

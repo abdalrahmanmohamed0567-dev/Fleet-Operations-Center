@@ -36,9 +36,231 @@ import {
   type VerifiedAuthUser,
   type WriteOperation,
 } from './src/server/firestoreRest.js';
+import {
+  isServerSessionToken,
+  authenticateByPhonePassword,
+  changeOwnPassword,
+  createUserAccount,
+  deleteUserAccount,
+  ensureBootstrappedAdmin,
+  getUserProfileByUid,
+  signSessionToken,
+  toPublicUserProfile,
+  updateUserAccount,
+} from './src/server/authStore.js';
+import {
+  buildFullSystemBackup,
+  deleteSavedServerBackup,
+  listSavedServerBackups,
+  performFactorySystemReset,
+  readSavedServerBackup,
+  readSchedulerConfig,
+  restoreFullSystemBackup,
+  saveBackupToServer,
+  startDailyBackupScheduler,
+  writeSchedulerConfig,
+} from './src/server/backupService.js';
+import {
+  commitLocalBatch,
+  deleteLocalDoc,
+  getCollectionCounts,
+  getLocalDoc,
+  isValidCollectionName,
+  isValidDocId,
+  queryLocalCollection,
+  setLocalDoc,
+  updateLocalDoc,
+  type LocalBatchOp,
+  type QueryFilterClause,
+} from './src/server/localStore.js';
 import { matchesDataScope } from './src/shared/rbacCore.js';
 
 dotenv.config();
+
+const SYSTEM_RESET_MASTER_PASSWORD = process.env.SYSTEM_RESET_PASSWORD || '4627257';
+
+function verifySystemResetPassword(candidate: string): boolean {
+  const expectedBuf = Buffer.from(SYSTEM_RESET_MASTER_PASSWORD, 'utf8');
+  const providedBuf = Buffer.from(String(candidate || ''), 'utf8');
+  if (expectedBuf.length !== providedBuf.length) return false;
+  return crypto.timingSafeEqual(expectedBuf, providedBuf);
+}
+
+function checkDbCollectionPermission(
+  user: VerifiedAuthUser,
+  collection: string,
+  mode: 'read' | 'write'
+): boolean {
+  if (user.role === 'owner' || user.role === 'admin' || user.customRoleId === 'super_admin') {
+    return true;
+  }
+
+  if (mode === 'read') {
+    if (
+      [
+        'roleTemplates',
+        'operationalSettings',
+        'platformCatalog',
+        'companyBranding',
+        'systemSections',
+        'systemPages',
+        'dynamicFields',
+        'dynamicForms',
+        'dynamicFormVersions',
+        'notificationRules',
+        'documentTypes',
+        'savedViews',
+        'userPreferences',
+      ].includes(collection)
+    ) {
+      return true;
+    }
+    if (collection === 'users') {
+      return hasServerPermission(user, 'users', 'view') || hasServerPermission(user, 'operations', 'view');
+    }
+    if (collection === 'auditLogs') {
+      return hasServerPermission(user, 'audit', 'view') || hasServerPermission(user, 'executive', 'view');
+    }
+    if (collection === 'trashItems') {
+      return hasServerPermission(user, 'trash', 'view') || hasServerCapability(user, 'restore');
+    }
+    if (collection === 'configSnapshots') {
+      return hasServerPermission(user, 'builder', 'view') || hasServerCapability(user, 'manage_settings');
+    }
+    if (collection === 'customReportTemplates') {
+      return hasServerPermission(user, 'reports', 'view');
+    }
+    if (collection === 'privateDocuments') {
+      return (
+        hasServerPermission(user, 'documents', 'view') ||
+        hasServerPermission(user, 'hr', 'view') ||
+        hasServerPermission(user, 'fleet', 'view')
+      );
+    }
+    if (['vehicles', 'vehicleAssignments', 'vehicleMaintenance'].includes(collection)) {
+      return hasServerPermission(user, 'fleet', 'view') || hasServerPermission(user, 'operations', 'view');
+    }
+    if (['riderMaster', 'riderIdentityMapping'].includes(collection)) {
+      return (
+        hasServerPermission(user, 'hr', 'view') ||
+        hasServerPermission(user, 'operations', 'view') ||
+        hasServerPermission(user, 'applications', 'view') ||
+        hasServerPermission(user, 'fleet', 'view') ||
+        hasServerPermission(user, 'executive', 'view')
+      );
+    }
+    if (collection === 'platformAccounts') {
+      return (
+        hasServerPermission(user, 'applications', 'view') ||
+        hasServerPermission(user, 'hr', 'view') ||
+        hasServerPermission(user, 'operations', 'view')
+      );
+    }
+    if (collection === 'customEntityRecords') {
+      return hasServerPermission(user, 'operations', 'view') || hasServerPermission(user, 'builder', 'view');
+    }
+    return (
+      hasServerPermission(user, 'operations', 'view') ||
+      hasServerPermission(user, 'executive', 'view') ||
+      hasServerPermission(user, 'reports', 'view') ||
+      hasServerPermission(user, 'alerts', 'view') ||
+      hasServerPermission(user, 'applications', 'view')
+    );
+  }
+
+  // Write permissions
+  switch (collection) {
+    case 'users':
+      return hasServerPermission(user, 'users', 'edit') || hasServerPermission(user, 'users', 'add');
+    case 'roleTemplates':
+      return hasServerPermission(user, 'roles', 'edit') || hasServerPermission(user, 'roles', 'add');
+    case 'operationalSettings':
+      return hasServerPermission(user, 'settings', 'edit') || hasServerCapability(user, 'manage_settings');
+    case 'platformCatalog':
+      return hasServerPermission(user, 'platforms', 'edit') || hasServerPermission(user, 'applications', 'edit');
+    case 'companyBranding':
+      return (
+        hasServerPermission(user, 'branding', 'edit') ||
+        hasServerPermission(user, 'company', 'edit') ||
+        hasServerCapability(user, 'change_branding') ||
+        hasServerCapability(user, 'manage_company')
+      );
+    case 'systemSections':
+    case 'systemPages':
+      return hasServerPermission(user, 'builder', 'edit') || hasServerCapability(user, 'manage_sections');
+    case 'dynamicFields':
+      return (
+        hasServerPermission(user, 'builder', 'edit') ||
+        hasServerCapability(user, 'create_fields') ||
+        hasServerCapability(user, 'edit_fields')
+      );
+    case 'dynamicForms':
+    case 'dynamicFormVersions':
+      return hasServerPermission(user, 'builder', 'edit') || hasServerCapability(user, 'manage_forms');
+    case 'notificationRules':
+    case 'configSnapshots':
+      return hasServerPermission(user, 'builder', 'edit') || hasServerCapability(user, 'manage_settings');
+    case 'trashItems':
+      return (
+        hasServerPermission(user, 'trash', 'edit') ||
+        hasServerPermission(user, 'trash', 'delete') ||
+        hasServerCapability(user, 'restore') ||
+        hasServerCapability(user, 'archive')
+      );
+    case 'savedViews':
+    case 'userPreferences':
+      return true;
+    case 'auditLogs':
+      return true;
+    case 'customReportTemplates':
+      return hasServerPermission(user, 'reports', 'add') || hasServerPermission(user, 'reports', 'edit');
+    case 'documentTypes':
+    case 'privateDocuments':
+      return (
+        hasServerPermission(user, 'documents', 'add') ||
+        hasServerPermission(user, 'documents', 'edit') ||
+        hasServerPermission(user, 'documents', 'delete') ||
+        hasServerPermission(user, 'hr', 'edit')
+      );
+    case 'riderMaster':
+    case 'riderIdentityMapping':
+      return (
+        hasServerPermission(user, 'hr', 'add') ||
+        hasServerPermission(user, 'hr', 'edit') ||
+        hasServerPermission(user, 'hr', 'delete') ||
+        hasServerPermission(user, 'applications', 'edit') ||
+        hasServerPermission(user, 'operations', 'edit')
+      );
+    case 'platformAccounts':
+      return (
+        hasServerPermission(user, 'applications', 'add') ||
+        hasServerPermission(user, 'applications', 'edit') ||
+        hasServerPermission(user, 'applications', 'delete')
+      );
+    case 'vehicles':
+    case 'vehicleAssignments':
+    case 'vehicleMaintenance':
+      return (
+        hasServerPermission(user, 'fleet', 'add') ||
+        hasServerPermission(user, 'fleet', 'edit') ||
+        hasServerPermission(user, 'fleet', 'delete')
+      );
+    case 'entityNotesTasks':
+    case 'operationalCases':
+    case 'riderNotes':
+    case 'customEntityRecords':
+    case 'hungerErrorDictionary':
+    case 'hungerRiderErrorCases':
+      return (
+        hasServerPermission(user, 'operations', 'add') ||
+        hasServerPermission(user, 'operations', 'edit') ||
+        hasServerPermission(user, 'operations', 'delete') ||
+        hasServerPermission(user, 'executive', 'edit')
+      );
+    default:
+      return hasServerPermission(user, 'operations', 'add') || hasServerPermission(user, 'operations', 'edit');
+  }
+}
 
 interface CachedPreview {
   createdAtMs: number;
@@ -116,17 +338,358 @@ async function getTeamAllowedUids(callerUid: string, idToken: string): Promise<s
 }
 
 async function startServer() {
+  await ensureBootstrappedAdmin(false);
+  startDailyBackupScheduler();
+
   const app = express();
-  app.use(express.json({ limit: '15mb' }));
+  app.use(express.json({ limit: '50mb' }));
 
   app.get('/api/health', (_req, res) => {
     res.json({ ok: true, service: 'fleet-operations-center' });
   });
 
+  // ==========================================
+  // PHONE + PASSWORD AUTHENTICATION ROUTES
+  // ==========================================
+  app.post('/api/auth/login', async (req: Request, res: Response) => {
+    try {
+      const phone = String(req.body?.phone || '');
+      const password = String(req.body?.password || '');
+      const result = await authenticateByPhonePassword(phone, password);
+      res.json({ ok: true, token: result.token, profile: result.profile });
+    } catch (err) {
+      res.status(401).json({ error: err instanceof Error ? err.message : 'فشل تسجيل الدخول.' });
+    }
+  });
+
+  app.get('/api/auth/me', requireAuth, async (req: AuthedRequest, res: Response) => {
+    try {
+      const profile = await getUserProfileByUid(req.authUser!.uid);
+      if (!profile) {
+        res.status(404).json({ error: 'ملف المستخدم غير موجود.' });
+        return;
+      }
+      res.json({ ok: true, profile });
+    } catch (err) {
+      res.status(500).json({ error: err instanceof Error ? err.message : 'تعذر قراءة الجلسة.' });
+    }
+  });
+
+  app.post('/api/auth/logout', (_req, res) => {
+    res.json({ ok: true });
+  });
+
+  app.post('/api/auth/change-password', requireAuth, async (req: AuthedRequest, res: Response) => {
+    try {
+      const currentPassword = String(req.body?.currentPassword || '');
+      const newPassword = String(req.body?.newPassword || '');
+      await changeOwnPassword(req.authUser!.uid, currentPassword, newPassword);
+      res.json({ ok: true });
+    } catch (err) {
+      res.status(400).json({ error: err instanceof Error ? err.message : 'فشل تغيير كلمة المرور.' });
+    }
+  });
+
+  // ==========================================
+  // USER ACCOUNTS MANAGEMENT ROUTES
+  // ==========================================
+  app.post('/api/users', requireAuth, async (req: AuthedRequest, res: Response) => {
+    try {
+      const actor = req.authUser!;
+      if (!hasServerPermission(actor, 'users', 'add') && actor.role !== 'owner' && actor.role !== 'admin') {
+        res.status(403).json({ error: 'صلاحياتك لا تسمح بإضافة مستخدمين جدد.' });
+        return;
+      }
+      const created = await createUserAccount({
+        displayName: String(req.body?.displayName || ''),
+        phone: String(req.body?.phone || ''),
+        password: String(req.body?.password || ''),
+        email: req.body?.email ? String(req.body.email) : undefined,
+        customRoleId: String(req.body?.customRoleId || 'reports_viewer'),
+        active: req.body?.active !== false,
+        dataScope: req.body?.dataScope,
+        allowedPlatforms: req.body?.allowedPlatforms,
+        actorUid: actor.uid,
+      });
+
+      const logId = `log_${Date.now()}_${crypto.randomBytes(4).toString('hex')}`;
+      await setLocalDoc('auditLogs', logId, {
+        logId,
+        action: 'USER_CREATED',
+        targetCollection: 'users',
+        targetId: created.uid,
+        entityType: 'user',
+        actorUid: actor.uid,
+        actorEmail: actor.email,
+        details: `إضافة مستخدم جديد: ${created.displayName} (جوال: ${created.phone}) بالدور ${created.customRoleId || created.role}`,
+        newValue: created.customRoleId || created.role,
+        source: 'API',
+        allowedUids: [actor.uid],
+        createdAt: new Date().toISOString(),
+      }).catch(() => {});
+
+      res.status(201).json({ ok: true, user: created });
+    } catch (err) {
+      res.status(400).json({ error: err instanceof Error ? err.message : 'تعذر إنشاء المستخدم.' });
+    }
+  });
+
+  app.patch('/api/users/:uid', requireAuth, async (req: AuthedRequest, res: Response) => {
+    try {
+      const actor = req.authUser!;
+      if (!hasServerPermission(actor, 'users', 'edit') && actor.role !== 'owner' && actor.role !== 'admin') {
+        res.status(403).json({ error: 'صلاحياتك لا تسمح بتعديل حسابات المستخدمين.' });
+        return;
+      }
+      const uid = String(req.params.uid || '').trim();
+      const updated = await updateUserAccount(uid, {
+        displayName: req.body?.displayName,
+        phone: req.body?.phone,
+        email: req.body?.email,
+        password: req.body?.password,
+        customRoleId: req.body?.customRoleId,
+        role: req.body?.role,
+        active: req.body?.active,
+        allowedPlatforms: req.body?.allowedPlatforms,
+        dataScope: req.body?.dataScope,
+        permissionOverrides: req.body?.permissionOverrides,
+        capabilityOverrides: req.body?.capabilityOverrides,
+      });
+
+      const logId = `log_${Date.now()}_${crypto.randomBytes(4).toString('hex')}`;
+      await setLocalDoc('auditLogs', logId, {
+        logId,
+        action: 'USER_UPDATED',
+        targetCollection: 'users',
+        targetId: uid,
+        entityType: 'user',
+        actorUid: actor.uid,
+        actorEmail: actor.email,
+        details: `تحديث بيانات/صلاحيات المستخدم: ${updated.displayName} (${updated.phone || updated.email})`,
+        source: 'API',
+        allowedUids: [actor.uid],
+        createdAt: new Date().toISOString(),
+      }).catch(() => {});
+
+      res.json({ ok: true, user: updated });
+    } catch (err) {
+      res.status(400).json({ error: err instanceof Error ? err.message : 'تعذر تحديث المستخدم.' });
+    }
+  });
+
+  app.delete('/api/users/:uid', requireAuth, async (req: AuthedRequest, res: Response) => {
+    try {
+      const actor = req.authUser!;
+      if (!hasServerPermission(actor, 'users', 'delete') && actor.role !== 'owner' && actor.role !== 'admin') {
+        res.status(403).json({ error: 'صلاحياتك لا تسمح بحذف المستخدمين.' });
+        return;
+      }
+      const uid = String(req.params.uid || '').trim();
+      const targetProfile = await getUserProfileByUid(uid);
+      await deleteUserAccount(uid, actor.uid);
+      await deleteLocalDoc('users', uid);
+
+      const logId = `log_${Date.now()}_${crypto.randomBytes(4).toString('hex')}`;
+      await setLocalDoc('auditLogs', logId, {
+        logId,
+        action: 'USER_DELETED',
+        targetCollection: 'users',
+        targetId: uid,
+        entityType: 'user',
+        actorUid: actor.uid,
+        actorEmail: actor.email,
+        details: `حذف حساب المستخدم: ${targetProfile?.displayName || uid} (${targetProfile?.phone || targetProfile?.email || '-'})`,
+        source: 'API',
+        allowedUids: [actor.uid],
+        createdAt: new Date().toISOString(),
+      }).catch(() => {});
+
+      res.json({ ok: true });
+    } catch (err) {
+      res.status(400).json({ error: err instanceof Error ? err.message : 'تعذر حذف المستخدم.' });
+    }
+  });
+
+  // ==========================================
+  // RBAC-CHECKED LOCAL STORE DATABASE APIs (/api/db/*)
+  // ==========================================
+  app.get('/api/db/doc/:collection/:docId', requireAuth, async (req: AuthedRequest, res: Response) => {
+    try {
+      const actor = req.authUser!;
+      const col = String(req.params.collection || '');
+      const docId = String(req.params.docId || '');
+      if (!isValidCollectionName(col) || !isValidDocId(docId)) {
+        res.status(400).json({ error: 'معرّف المجموعة أو السجل غير صالح.' });
+        return;
+      }
+      const isSelfUserDoc = col === 'users' && docId === actor.uid;
+      if (!isSelfUserDoc && !checkDbCollectionPermission(actor, col, 'read')) {
+        res.status(403).json({ error: `صلاحياتك لا تسمح بقراءة سجلات ${col}.` });
+        return;
+      }
+      const docData = await getLocalDoc(col, docId);
+      res.json({ exists: Boolean(docData), id: docId, data: docData || null });
+    } catch (err) {
+      res.status(400).json({ error: err instanceof Error ? err.message : 'تعذر قراءة السجل.' });
+    }
+  });
+
+  app.post('/api/db/doc/:collection/:docId', requireAuth, async (req: AuthedRequest, res: Response) => {
+    try {
+      const actor = req.authUser!;
+      const col = String(req.params.collection || '');
+      const docId = String(req.params.docId || '');
+      if (!isValidCollectionName(col) || !isValidDocId(docId)) {
+        res.status(400).json({ error: 'معرّف المجموعة أو السجل غير صالح.' });
+        return;
+      }
+      if (!checkDbCollectionPermission(actor, col, 'write')) {
+        res.status(403).json({ error: `صلاحياتك لا تسمح بالكتابة في ${col}.` });
+        return;
+      }
+      const payload =
+        req.body && typeof req.body === 'object' && 'data' in req.body
+          ? (req.body.data as Record<string, unknown>)
+          : ((req.body || {}) as Record<string, unknown>);
+      const merge = Boolean(req.body?.merge);
+
+      if (col === 'users') {
+        const existingAuth = await getUserProfileByUid(docId);
+        if (existingAuth) {
+          const updated = await updateUserAccount(docId, {
+            displayName: typeof payload.displayName === 'string' ? payload.displayName : undefined,
+            phone: typeof payload.phone === 'string' ? payload.phone : undefined,
+            email: typeof payload.email === 'string' ? payload.email : undefined,
+            customRoleId: typeof payload.customRoleId === 'string' ? payload.customRoleId : undefined,
+            role: typeof payload.role === 'string' ? (payload.role as VerifiedAuthUser['role']) : undefined,
+            active: typeof payload.active === 'boolean' ? payload.active : undefined,
+            allowedPlatforms: Array.isArray(payload.allowedPlatforms) ? (payload.allowedPlatforms as VerifiedAuthUser['allowedPlatforms']) : undefined,
+            dataScope: payload.dataScope as VerifiedAuthUser['dataScope'] | undefined,
+            permissionOverrides: payload.permissionOverrides as Record<string, unknown> | undefined,
+            capabilityOverrides: payload.capabilityOverrides as Record<string, unknown> | undefined,
+          });
+          res.json({ ok: true, id: docId, data: updated });
+          return;
+        }
+      }
+
+      const saved = await setLocalDoc(col, docId, payload, { merge });
+      res.json({ ok: true, id: docId, data: saved });
+    } catch (err) {
+      res.status(400).json({ error: err instanceof Error ? err.message : 'تعذر حفظ السجل.' });
+    }
+  });
+
+  app.patch('/api/db/doc/:collection/:docId', requireAuth, async (req: AuthedRequest, res: Response) => {
+    try {
+      const actor = req.authUser!;
+      const col = String(req.params.collection || '');
+      const docId = String(req.params.docId || '');
+      if (!isValidCollectionName(col) || !isValidDocId(docId)) {
+        res.status(400).json({ error: 'معرّف المجموعة أو السجل غير صالح.' });
+        return;
+      }
+      if (!checkDbCollectionPermission(actor, col, 'write')) {
+        res.status(403).json({ error: `صلاحياتك لا تسمح بتحديث ${col}.` });
+        return;
+      }
+      const patch =
+        req.body && typeof req.body === 'object' && 'data' in req.body
+          ? (req.body.data as Record<string, unknown>)
+          : ((req.body || {}) as Record<string, unknown>);
+
+      if (col === 'users') {
+        const updated = await updateUserAccount(docId, {
+          displayName: typeof patch.displayName === 'string' ? patch.displayName : undefined,
+          phone: typeof patch.phone === 'string' ? patch.phone : undefined,
+          email: typeof patch.email === 'string' ? patch.email : undefined,
+          customRoleId: typeof patch.customRoleId === 'string' ? patch.customRoleId : undefined,
+          role: typeof patch.role === 'string' ? (patch.role as VerifiedAuthUser['role']) : undefined,
+          active: typeof patch.active === 'boolean' ? patch.active : undefined,
+          allowedPlatforms: Array.isArray(patch.allowedPlatforms) ? (patch.allowedPlatforms as VerifiedAuthUser['allowedPlatforms']) : undefined,
+          dataScope: patch.dataScope as VerifiedAuthUser['dataScope'] | undefined,
+          permissionOverrides: patch.permissionOverrides as Record<string, unknown> | undefined,
+          capabilityOverrides: patch.capabilityOverrides as Record<string, unknown> | undefined,
+        });
+        res.json({ ok: true, id: docId, data: updated });
+        return;
+      }
+
+      const updated = await updateLocalDoc(col, docId, patch);
+      res.json({ ok: true, id: docId, data: updated });
+    } catch (err) {
+      res.status(400).json({ error: err instanceof Error ? err.message : 'تعذر تحديث السجل.' });
+    }
+  });
+
+  app.delete('/api/db/doc/:collection/:docId', requireAuth, async (req: AuthedRequest, res: Response) => {
+    try {
+      const actor = req.authUser!;
+      const col = String(req.params.collection || '');
+      const docId = String(req.params.docId || '');
+      if (!isValidCollectionName(col) || !isValidDocId(docId)) {
+        res.status(400).json({ error: 'معرّف المجموعة أو السجل غير صالح.' });
+        return;
+      }
+      if (!checkDbCollectionPermission(actor, col, 'write')) {
+        res.status(403).json({ error: `صلاحياتك لا تسمح بحذف سجلات ${col}.` });
+        return;
+      }
+      if (col === 'users') {
+        await deleteUserAccount(docId, actor.uid);
+      }
+      await deleteLocalDoc(col, docId);
+      res.json({ ok: true });
+    } catch (err) {
+      res.status(400).json({ error: err instanceof Error ? err.message : 'تعذر حذف السجل.' });
+    }
+  });
+
+  app.post('/api/db/query', requireAuth, async (req: AuthedRequest, res: Response) => {
+    try {
+      const actor = req.authUser!;
+      const col = String(req.body?.collection || '');
+      if (!isValidCollectionName(col)) {
+        res.status(400).json({ error: 'مجموعة بيانات غير صالحة.' });
+        return;
+      }
+      if (!checkDbCollectionPermission(actor, col, 'read')) {
+        res.status(403).json({ error: `صلاحياتك لا تسمح بعرض سجلات ${col}.` });
+        return;
+      }
+      const rawFilters = Array.isArray(req.body?.filters) ? (req.body.filters as QueryFilterClause[]) : [];
+      const docs = await queryLocalCollection(col, rawFilters);
+      res.json({ docs });
+    } catch (err) {
+      res.status(400).json({ error: err instanceof Error ? err.message : 'فشل الاستعلام عن البيانات.' });
+    }
+  });
+
+  app.post('/api/db/batch', requireAuth, async (req: AuthedRequest, res: Response) => {
+    try {
+      const actor = req.authUser!;
+      const ops = Array.isArray(req.body?.ops) ? (req.body.ops as LocalBatchOp[]) : [];
+      for (const op of ops) {
+        if (!isValidCollectionName(op.collection) || !isValidDocId(op.docId)) {
+          res.status(400).json({ error: `عملية غير صالحة في الدفعة (${op.collection}/${op.docId}).` });
+          return;
+        }
+        if (!checkDbCollectionPermission(actor, op.collection, 'write')) {
+          res.status(403).json({ error: `صلاحياتك لا تسمح بالكتابة في ${op.collection}.` });
+          return;
+        }
+      }
+      await commitLocalBatch(ops);
+      res.json({ ok: true, count: ops.length });
+    } catch (err) {
+      res.status(400).json({ error: err instanceof Error ? err.message : 'فشل تنفيذ الدفعة.' });
+    }
+  });
+
   // Non-sensitive Corporate Branding for AuthGate Login & Pre-boot Shell
   app.get('/api/branding/public', async (_req, res) => {
     const cached = await readBrandingPublicMetadata();
-    res.json({ branding: cached || null });
+    res.json({ ...(cached || {}), branding: cached || null });
   });
 
   app.get('/api/branding/logo/:logoKey', async (req, res) => {
@@ -190,26 +753,29 @@ async function startServer() {
         return;
       }
       const body = (req.body || {}) as Record<string, unknown>;
+      const companyObj = (typeof body.company === 'object' && body.company !== null ? body.company : body) as Record<string, unknown>;
+      const brandingObj = (typeof body.branding === 'object' && body.branding !== null ? body.branding : body) as Record<string, unknown>;
+      const creditsObj = (typeof body.credits === 'object' && body.credits !== null ? body.credits : body) as Record<string, unknown>;
       const safePublic = {
-        companyNameAr: String(body.companyNameAr || ''),
-        companyNameEn: String(body.companyNameEn || ''),
-        systemNameAr: String(body.systemNameAr || 'FLEET OPERATIONS CENTER'),
-        systemNameEn: String(body.systemNameEn || 'Fleet Operations Center'),
-        primaryLogoKey: String(body.primaryLogoKey || ''),
-        alternateLogoKey: String(body.alternateLogoKey || ''),
-        iconLogoKey: String(body.iconLogoKey || ''),
-        primaryColor: String(body.primaryColor || '#0f1e36'),
-        secondaryColor: String(body.secondaryColor || '#2563eb'),
-        buttonColor: String(body.buttonColor || '#1d4ed8'),
-        sidebarColor: String(body.sidebarColor || '#0c1628'),
-        uiStyleMode: String(body.uiStyleMode || 'corporate'),
-        defaultThemeMode: String(body.defaultThemeMode || 'light'),
-        loginScreenStyle: String(body.loginScreenStyle || 'split'),
-        loginHeadlineAr: String(body.loginHeadlineAr || ''),
-        loginSubheadlineAr: String(body.loginSubheadlineAr || ''),
-        developerName: String(body.developerName || 'م- عبدالرحمن محمد'),
-        developerPhone: String(body.developerPhone || '0559786939'),
-        version: String(body.version || 'v4.0 Enterprise'),
+        companyNameAr: String(companyObj.companyNameAr || ''),
+        companyNameEn: String(companyObj.companyNameEn || ''),
+        systemNameAr: String(brandingObj.systemNameAr || 'FLEET OPERATIONS CENTER'),
+        systemNameEn: String(brandingObj.systemNameEn || 'Fleet Operations Center'),
+        primaryLogoKey: String(brandingObj.primaryLogoKey || ''),
+        alternateLogoKey: String(brandingObj.alternateLogoKey || ''),
+        iconLogoKey: String(brandingObj.iconLogoKey || ''),
+        primaryColor: String(brandingObj.primaryColor || '#0f1e36'),
+        secondaryColor: String(brandingObj.secondaryColor || '#2563eb'),
+        buttonColor: String(brandingObj.buttonColor || '#1d4ed8'),
+        sidebarColor: String(brandingObj.sidebarColor || '#0c1628'),
+        uiStyleMode: String(brandingObj.uiStyleMode || 'corporate'),
+        defaultThemeMode: String(brandingObj.defaultThemeMode || 'light'),
+        loginScreenStyle: String(brandingObj.loginScreenStyle || 'split'),
+        loginHeadlineAr: String(brandingObj.loginHeadlineAr || ''),
+        loginSubheadlineAr: String(brandingObj.loginSubheadlineAr || ''),
+        developerName: String(creditsObj.developerName || creditsObj.developerNameAr || 'م- عبدالرحمن محمد'),
+        developerPhone: String(creditsObj.developerPhone || '0559786939'),
+        version: String(creditsObj.version || creditsObj.systemVersion || 'v4.0 Enterprise'),
         updatedAt: new Date().toISOString(),
       };
       await saveBrandingPublicMetadata(safePublic);
@@ -232,36 +798,267 @@ async function startServer() {
       let firestoreLatencyMs = 0;
       let recentBatchesCount = 0;
       let latestBatchAt = '';
+      let collections: Record<string, number> = {};
       try {
-        await getFirestoreDoc('operationalSettings', 'default', idToken);
-        firestoreOk = true;
-        firestoreLatencyMs = Date.now() - startedAt;
-        const batches = await listFirestoreCollection<{ createdAt?: string }>('importBatches', idToken, 50);
-        recentBatchesCount = batches.length;
-        const sorted = batches
-          .map((b) => b.createdAt || '')
-          .filter(Boolean)
-          .sort()
-          .reverse();
-        latestBatchAt = sorted[0] || '';
+        if (isServerSessionToken(idToken)) {
+          await getLocalDoc('operationalSettings', 'default');
+          collections = await getCollectionCounts();
+          recentBatchesCount = collections.importBatches || 0;
+          firestoreOk = true;
+          firestoreLatencyMs = Date.now() - startedAt;
+        } else {
+          await getFirestoreDoc('operationalSettings', 'default', idToken);
+          firestoreOk = true;
+          firestoreLatencyMs = Date.now() - startedAt;
+          const batches = await listFirestoreCollection<{ createdAt?: string }>('importBatches', idToken, 50);
+          recentBatchesCount = batches.length;
+          const sorted = batches
+            .map((b) => b.createdAt || '')
+            .filter(Boolean)
+            .sort()
+            .reverse();
+          latestBatchAt = sorted[0] || '';
+        }
       } catch {
         firestoreOk = false;
         firestoreLatencyMs = Date.now() - startedAt;
       }
       const vault = await getPrivateVaultStats();
       const mem = process.memoryUsage();
+      const rssMb = Math.round(mem.rss / (1024 * 1024));
+      const heapMb = Math.round(mem.heapUsed / (1024 * 1024));
+      const uptimeSeconds = Math.round(process.uptime());
+      const nowIso = new Date().toISOString();
+
       res.json({
         ok: firestoreOk && vault.exists,
-        checkedAt: new Date().toISOString(),
-        serverUptimeSeconds: Math.round(process.uptime()),
-        memoryRssMb: Math.round(mem.rss / (1024 * 1024)),
-        memoryHeapUsedMb: Math.round(mem.heapUsed / (1024 * 1024)),
+        status: firestoreOk ? 'healthy' : 'degraded',
+        checkedAt: nowIso,
+        timestamp: nowIso,
+        uptimeSeconds,
+        serverUptimeSeconds: uptimeSeconds,
+        memoryRssMb: rssMb,
+        memoryHeapUsedMb: heapMb,
+        memoryMb: { rss: rssMb, heapUsed: heapMb },
         firestore: { ok: firestoreOk, latencyMs: firestoreLatencyMs },
+        privateVault: {
+          ok: vault.exists,
+          fileCount: vault.fileCount,
+          totalSizeMb: Number((vault.totalBytes / (1024 * 1024)).toFixed(2)),
+        },
         vault,
+        collections,
+        recentImportBatchesCount: recentBatchesCount,
         imports: { recentBatchesCount, latestBatchAt },
       });
     } catch (err) {
       res.status(500).json({ error: err instanceof Error ? err.message : 'فشل فحص صحة النظام.' });
+    }
+  });
+
+  // ==========================================
+  // FULL SYSTEM BACKUP, 1:00 AM AUTO SCHEDULER & FACTORY RESET
+  // ==========================================
+  const canManageBackupOrReset = (user: VerifiedAuthUser) =>
+    user.role === 'owner' ||
+    user.role === 'admin' ||
+    hasServerCapability(user, 'manage_settings') ||
+    hasServerPermission(user, 'settings', 'edit') ||
+    hasServerPermission(user, 'system_health', 'view');
+
+  app.get('/api/system/backups', requireAuth, async (req: AuthedRequest, res: Response) => {
+    try {
+      const actor = req.authUser!;
+      if (!canManageBackupOrReset(actor)) {
+        res.status(403).json({ error: 'صلاحياتك لا تسمح بإدارة النسخ الاحتياطي.' });
+        return;
+      }
+      const [backups, scheduler] = await Promise.all([listSavedServerBackups(), readSchedulerConfig()]);
+      res.json({ ok: true, backups, scheduler });
+    } catch (err) {
+      res.status(500).json({ error: err instanceof Error ? err.message : 'تعذر قراءة النسخ الاحتياطية.' });
+    }
+  });
+
+  app.post('/api/system/backups/create', requireAuth, async (req: AuthedRequest, res: Response) => {
+    try {
+      const actor = req.authUser!;
+      if (!canManageBackupOrReset(actor)) {
+        res.status(403).json({ error: 'صلاحياتك لا تسمح بإنشاء نسخة احتياطية.' });
+        return;
+      }
+      const note = String(req.body?.note || '').trim().slice(0, 240);
+      const doc = await buildFullSystemBackup({
+        type: 'manual',
+        createdBy: actor.email || actor.uid,
+        note: note || 'نسخة احتياطية شاملة يدوية',
+      });
+      const summary = await saveBackupToServer(doc);
+
+      const logId = `log_${Date.now()}_${crypto.randomBytes(4).toString('hex')}`;
+      await setLocalDoc('auditLogs', logId, {
+        logId,
+        action: 'SYSTEM_FULL_BACKUP_CREATED',
+        targetCollection: 'configSnapshots',
+        targetId: summary.backupId,
+        entityType: 'system_backup',
+        actorUid: actor.uid,
+        actorEmail: actor.email,
+        details: `إنشاء وحفظ نسخة احتياطية كاملة على الخادم (${summary.fileName}) — ${summary.totalDocuments} سجل، ${summary.vaultFileCount} ملف`,
+        source: 'API',
+        allowedUids: [actor.uid],
+        createdAt: new Date().toISOString(),
+      }).catch(() => {});
+
+      res.json({ ok: true, backup: summary });
+    } catch (err) {
+      res.status(500).json({ error: err instanceof Error ? err.message : 'فشل إنشاء النسخة الاحتياطية.' });
+    }
+  });
+
+  app.get('/api/system/backups/export', requireAuth, async (req: AuthedRequest, res: Response) => {
+    try {
+      const actor = req.authUser!;
+      if (!canManageBackupOrReset(actor)) {
+        res.status(403).json({ error: 'صلاحياتك لا تسمح بتصدير النسخة الاحتياطية الكاملة.' });
+        return;
+      }
+      const backupDoc = await buildFullSystemBackup({
+        type: 'manual',
+        createdBy: actor.email || actor.uid,
+        note: 'تصدير نسخة احتياطية شاملة كاملة بصيغة النظام',
+      });
+      const fileName = `fleet_ops_full_backup_${new Date().toISOString().slice(0, 10)}.json`;
+      res.setHeader('Content-Type', 'application/json; charset=utf-8');
+      res.setHeader('Content-Disposition', `attachment; filename*=UTF-8''${encodeURIComponent(fileName)}`);
+      res.send(JSON.stringify(backupDoc, null, 2));
+    } catch (err) {
+      res.status(500).json({ error: err instanceof Error ? err.message : 'فشل تصدير النسخة الاحتياطية.' });
+    }
+  });
+
+  app.get('/api/system/backups/:backupId/download', requireAuth, async (req: AuthedRequest, res: Response) => {
+    try {
+      const actor = req.authUser!;
+      if (!canManageBackupOrReset(actor)) {
+        res.status(403).json({ error: 'صلاحياتك لا تسمح بتنزيل النسخ الاحتياطية.' });
+        return;
+      }
+      const backupId = String(req.params.backupId || '').trim();
+      const doc = await readSavedServerBackup(backupId);
+      const fileName = `${backupId.replace(/[^a-zA-Z0-9._-]/g, '_')}.json`;
+      res.setHeader('Content-Type', 'application/json; charset=utf-8');
+      res.setHeader('Content-Disposition', `attachment; filename*=UTF-8''${encodeURIComponent(fileName)}`);
+      res.send(JSON.stringify(doc, null, 2));
+    } catch (err) {
+      res.status(404).json({ error: err instanceof Error ? err.message : 'النسخة الاحتياطية غير موجودة.' });
+    }
+  });
+
+  app.post('/api/system/backups/import', requireAuth, async (req: AuthedRequest, res: Response) => {
+    try {
+      const actor = req.authUser!;
+      if (actor.role !== 'owner' && actor.role !== 'admin' && !hasServerCapability(actor, 'manage_settings')) {
+        res.status(403).json({ error: 'صلاحياتك لا تسمح باستيراد واستعادة النسخة الاحتياطية الكاملة.' });
+        return;
+      }
+      const mode = req.body?.mode === 'merge' ? 'merge' : 'replace';
+      const payload = req.body?.backup !== undefined ? req.body.backup : req.body;
+      const result = await restoreFullSystemBackup({
+        payload,
+        mode,
+        actorLabel: actor.email || actor.uid,
+        actorUid: actor.uid,
+      });
+      res.json({ ok: true, ...result });
+    } catch (err) {
+      res.status(400).json({ error: err instanceof Error ? err.message : 'فشل استيراد النسخة الاحتياطية.' });
+    }
+  });
+
+  app.post('/api/system/backups/:backupId/restore', requireAuth, async (req: AuthedRequest, res: Response) => {
+    try {
+      const actor = req.authUser!;
+      if (actor.role !== 'owner' && actor.role !== 'admin' && !hasServerCapability(actor, 'manage_settings')) {
+        res.status(403).json({ error: 'صلاحياتك لا تسمح باستعادة النسخ الاحتياطية.' });
+        return;
+      }
+      const backupId = String(req.params.backupId || '').trim();
+      const mode = req.body?.mode === 'merge' ? 'merge' : 'replace';
+      const doc = await readSavedServerBackup(backupId);
+      const result = await restoreFullSystemBackup({
+        payload: doc,
+        mode,
+        actorLabel: actor.email || actor.uid,
+        actorUid: actor.uid,
+      });
+      res.json({ ok: true, ...result });
+    } catch (err) {
+      res.status(400).json({ error: err instanceof Error ? err.message : 'تعذرت استعادة النسخة الاحتياطية.' });
+    }
+  });
+
+  app.delete('/api/system/backups/:backupId', requireAuth, async (req: AuthedRequest, res: Response) => {
+    try {
+      const actor = req.authUser!;
+      if (actor.role !== 'owner' && actor.role !== 'admin' && !hasServerCapability(actor, 'manage_settings')) {
+        res.status(403).json({ error: 'صلاحياتك لا تسمح بحذف النسخ الاحتياطية.' });
+        return;
+      }
+      const backupId = String(req.params.backupId || '').trim();
+      await deleteSavedServerBackup(backupId);
+      res.json({ ok: true });
+    } catch (err) {
+      res.status(400).json({ error: err instanceof Error ? err.message : 'تعذر حذف النسخة الاحتياطية.' });
+    }
+  });
+
+  app.patch('/api/system/backups/scheduler', requireAuth, async (req: AuthedRequest, res: Response) => {
+    try {
+      const actor = req.authUser!;
+      if (!canManageBackupOrReset(actor)) {
+        res.status(403).json({ error: 'صلاحياتك لا تسمح بتعديل جدول النسخ التلقائي.' });
+        return;
+      }
+      const next = await writeSchedulerConfig({
+        enabled: typeof req.body?.enabled === 'boolean' ? req.body.enabled : undefined,
+        hour: typeof req.body?.hour === 'number' ? req.body.hour : undefined,
+        minute: typeof req.body?.minute === 'number' ? req.body.minute : undefined,
+        timezone: typeof req.body?.timezone === 'string' ? req.body.timezone : undefined,
+        retentionDays: typeof req.body?.retentionDays === 'number' ? req.body.retentionDays : undefined,
+      });
+      res.json({ ok: true, scheduler: next });
+    } catch (err) {
+      res.status(400).json({ error: err instanceof Error ? err.message : 'تعذر تحديث إعدادات الجدولة.' });
+    }
+  });
+
+  app.post('/api/system/reset', requireAuth, async (req: AuthedRequest, res: Response) => {
+    try {
+      const actor = req.authUser!;
+      if (actor.role !== 'owner' && actor.role !== 'admin') {
+        res.status(403).json({ error: 'إعادة ضبط النظام الكامل متاحة لمدير النظام الأعلى أو المالك فقط.' });
+        return;
+      }
+      const providedPassword = String(req.body?.password || '');
+      if (!verifySystemResetPassword(providedPassword)) {
+        res.status(403).json({ error: 'كلمة مرور إعادة ضبط النظام غير صحيحة. لم يتم مسح أي بيانات.' });
+        return;
+      }
+      const resetRes = await performFactorySystemReset({
+        actorLabel: actor.email || actor.uid,
+      });
+      const admin = await ensureBootstrappedAdmin(false);
+      const token = await signSessionToken(admin);
+      res.json({
+        ok: true,
+        token,
+        profile: toPublicUserProfile(admin),
+        clearedCollections: resetRes.clearedCollections,
+        resetAt: resetRes.resetAt,
+      });
+    } catch (err) {
+      res.status(500).json({ error: err instanceof Error ? err.message : 'فشل تنفيذ إعادة ضبط النظام.' });
     }
   });
 

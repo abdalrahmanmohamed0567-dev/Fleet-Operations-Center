@@ -4,7 +4,7 @@ import {
   ClipboardCheck,
   Plus,
 } from 'lucide-react';
-import { doc, serverTimestamp, setDoc } from 'firebase/firestore';
+import { doc, serverTimestamp, setDoc } from '../lib/erpDb';
 import { useMemo, useState } from 'react';
 import { db, handleFirestoreError, OperationType } from '../lib/firebase';
 import type { FleetDataset, UnifiedDailyRow } from '../lib/fleetAnalytics';

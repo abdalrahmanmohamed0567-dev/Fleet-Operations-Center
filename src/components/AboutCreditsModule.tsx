@@ -1,9 +1,9 @@
-import { doc, serverTimestamp, setDoc } from 'firebase/firestore';
+import { doc, serverTimestamp, setDoc } from '../lib/erpDb';
 import { Award, CheckCircle2, Edit3, Info, Phone, Save, ShieldCheck, Sparkles } from 'lucide-react';
 import { useState } from 'react';
 import { DEFAULT_COMPANY_BRANDING } from '../lib/dynamicSchemaEngine';
 import { writeErpAuditLog } from '../lib/erpHelpers';
-import { auth, db } from '../lib/firebase';
+import { db, getActiveAuthToken } from '../lib/firebase';
 import type { CompanyBrandingDoc, UserProfile } from '../types/fleet';
 import {
   Button,
@@ -54,14 +54,19 @@ export function AboutCreditsModule({
   onRefresh,
 }: AboutCreditsModuleProps) {
   const isOwner = currentUser.role === 'owner' || currentUser.role === 'admin';
-  const merged = { ...DEFAULT_COMPANY_BRANDING, ...branding };
+  const merged: Omit<CompanyBrandingDoc, 'createdByUid' | 'allowedUids'> = {
+    brandingId: branding?.brandingId || 'default',
+    company: { ...DEFAULT_COMPANY_BRANDING.company, ...(branding?.company || {}) },
+    branding: { ...DEFAULT_COMPANY_BRANDING.branding, ...(branding?.branding || {}) },
+    credits: { ...DEFAULT_COMPANY_BRANDING.credits, ...(branding?.credits || {}) },
+  };
 
   const [editOpen, setEditOpen] = useState(false);
-  const [devName, setDevName] = useState(merged.developerNameAr || 'م- عبدالرحمن محمد');
-  const [devPhone, setDevPhone] = useState(merged.developerPhone || '0559786939');
-  const [versionLabel, setVersionLabel] = useState(merged.systemVersion || '4.0.0');
+  const [devName, setDevName] = useState(merged.credits.developerName || 'م- عبدالرحمن محمد');
+  const [devPhone, setDevPhone] = useState(merged.credits.developerPhone || '0559786939');
+  const [versionLabel, setVersionLabel] = useState(merged.credits.version || 'v4.0 Enterprise');
   const [copyrightAr, setCopyrightAr] = useState(
-    merged.copyrightAr || 'جميع الحقوق محفوظة · FLEET OPERATIONS CENTER'
+    merged.credits.copyrightText || 'جميع الحقوق محفوظة · FLEET OPERATIONS CENTER'
   );
   const [busy, setBusy] = useState(false);
   const [toast, setToast] = useState<{ type: 'ok' | 'err'; msg: string } | null>(null);
@@ -73,21 +78,28 @@ export function AboutCreditsModule({
     setToast(null);
     try {
       const teamAllowed = Array.from(new Set([currentUser.uid, ...allowedUids].filter(Boolean))).slice(0, 20);
-      const patch = {
-        ...merged,
-        brandingId: 'default',
-        developerNameAr: devName.trim(),
+      const nextCredits = {
+        ...merged.credits,
+        developerName: devName.trim(),
         developerPhone: devPhone.trim(),
-        systemVersion: versionLabel.trim(),
-        copyrightAr: copyrightAr.trim(),
+        version: versionLabel.trim(),
+        copyrightText: copyrightAr.trim(),
+        lastUpdated: new Date().toISOString().slice(0, 10),
+      };
+      const patch = {
+        brandingId: 'default',
+        company: merged.company,
+        branding: merged.branding,
+        credits: nextCredits,
         updatedByEmail: currentUser.email,
-        createdByUid: currentUser.uid,
+        createdByUid: branding?.createdByUid || currentUser.uid,
         allowedUids: teamAllowed.length > 0 ? teamAllowed : [currentUser.uid],
+        ...(branding?.createdAt ? {} : { createdAt: serverTimestamp() }),
         updatedAt: serverTimestamp(),
       };
       await setDoc(doc(db, 'companyBranding', 'default'), patch, { merge: true });
 
-      const token = await auth.currentUser?.getIdToken();
+      const token = await getActiveAuthToken();
       if (token) {
         await fetch('/api/branding/sync-public', {
           method: 'POST',
@@ -96,11 +108,9 @@ export function AboutCreditsModule({
             Authorization: `Bearer ${token}`,
           },
           body: JSON.stringify({
-            ...merged,
-            developerNameAr: devName.trim(),
-            developerPhone: devPhone.trim(),
-            systemVersion: versionLabel.trim(),
-            copyrightAr: copyrightAr.trim(),
+            company: merged.company,
+            branding: merged.branding,
+            credits: nextCredits,
           }),
         }).catch(() => {});
       }
@@ -145,45 +155,46 @@ export function AboutCreditsModule({
         <Card className="lg:col-span-2 space-y-4">
           <div className="flex flex-wrap items-start justify-between gap-4 border-b border-slate-100 dark:border-slate-800 pb-4">
             <div className="flex items-center gap-3">
-              {merged.primaryLogoKey ? (
+              {merged.branding.primaryLogoKey ? (
                 <img
-                  src={`/api/branding/logo/${encodeURIComponent(merged.primaryLogoKey)}`}
+                  src={`/api/branding/logo/${encodeURIComponent(merged.branding.primaryLogoKey)}`}
                   alt="System Logo"
                   className="h-12 w-12 rounded-xl object-contain border border-slate-200 dark:border-slate-700 p-1 bg-white"
                 />
               ) : (
                 <div className="flex h-12 w-12 items-center justify-center rounded-xl bg-[#0f1e36] text-white font-bold text-sm">
-                  FOC
+                  {merged.company.shortName || 'FOC'}
                 </div>
               )}
               <div>
                 <h2 className="text-lg font-bold text-slate-900 dark:text-white">
-                  {merged.systemNameEn || 'FLEET OPERATIONS CENTER'}
+                  {merged.branding.systemNameEn || 'FLEET OPERATIONS CENTER'}
                 </h2>
                 <p className="text-xs text-slate-500 dark:text-slate-400">
-                  {merged.systemNameAr || 'مركز عمليات الأسطول وإدارة المندوبين'} — {merged.companyNameAr}
+                  {merged.branding.systemNameAr || 'مركز عمليات الأسطول وإدارة المندوبين'} — {merged.company.companyNameAr}
                 </p>
               </div>
             </div>
             <div className="flex items-center gap-2">
-              <StatusBadge label={`الإصدار ${merged.systemVersion || '4.0.0'}`} tone="info" className="font-mono-num" />
+              <StatusBadge label={`الإصدار ${merged.credits.version || 'v4.0 Enterprise'}`} tone="info" className="font-mono-num" />
               <StatusBadge label="حالة التشغيل: مستقر" tone="success" />
             </div>
           </div>
 
           <p className="text-sm leading-relaxed text-slate-700 dark:text-slate-300">
-            منصة مؤسسية متكاملة لإدارة عمليات شركات التوصيل وتشغيل الأساطيل، تجمع بين الموارد البشرية للمندوبين، إدارة حسابات التطبيقات، تتبع السيارات والعهد والصيانة، مركز الحالات والتنبيهات، ومنشئ النماذج والحقول الديناميكي القابل للتخصيص الكامل دون تعديل الكود.
+            {merged.credits.systemSummary ||
+              'منصة مؤسسية متكاملة لإدارة عمليات شركات التوصيل وتشغيل الأساطيل، تجمع بين الموارد البشرية للمندوبين، إدارة حسابات التطبيقات، تتبع السيارات والعهد والصيانة، مركز الحالات والتنبيهات، ومنشئ النماذج والحقول الديناميكي القابل للتخصيص الكامل دون تعديل الكود.'}
           </p>
 
           <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
             <div className="rounded-xl border border-slate-200 dark:border-slate-800 p-3 bg-slate-50/50 dark:bg-slate-950/40">
               <div className="text-[11px] text-slate-500">الشركة المشغلة</div>
-              <div className="mt-1 text-xs font-bold text-slate-900 dark:text-slate-100">{merged.companyNameAr}</div>
+              <div className="mt-1 text-xs font-bold text-slate-900 dark:text-slate-100">{merged.company.companyNameAr}</div>
             </div>
             <div className="rounded-xl border border-slate-200 dark:border-slate-800 p-3 bg-slate-50/50 dark:bg-slate-950/40">
               <div className="text-[11px] text-slate-500">رقم الإصدار</div>
               <div className="mt-1 text-xs font-bold font-mono-num text-slate-900 dark:text-slate-100">
-                {merged.systemVersion || '4.0.0'}
+                {merged.credits.version || 'v4.0 Enterprise'}
               </div>
             </div>
             <div className="rounded-xl border border-slate-200 dark:border-slate-800 p-3 bg-slate-50/50 dark:bg-slate-950/40">
@@ -197,28 +208,28 @@ export function AboutCreditsModule({
         </Card>
 
         <Card className="space-y-4">
-          <SectionHeader title="التطوير والتصميم والاعتماد" icon={<Award className="h-4 w-4 text-blue-600" />} />
+          <SectionHeader title="التطوير والتصميم والاعتماد" actions={<Award className="h-4 w-4 text-blue-600" />} />
           <div className="rounded-xl border border-blue-100 dark:border-blue-900/50 bg-blue-50/50 dark:bg-blue-950/30 p-4 space-y-2.5">
             <div className="inline-flex items-center gap-1.5 text-xs font-semibold text-blue-700 dark:text-blue-300">
               <Sparkles className="h-3.5 w-3.5" />
               <span>تم التطوير والتصميم بواسطة</span>
             </div>
             <div className="text-base font-bold text-slate-900 dark:text-white">
-              {merged.developerNameAr || 'م- عبدالرحمن محمد'}
+              {merged.credits.developerName || 'م- عبدالرحمن محمد'}
             </div>
             <div className="inline-flex items-center gap-1.5 font-mono-num text-sm font-semibold text-slate-700 dark:text-slate-200">
               <Phone className="h-3.5 w-3.5 text-slate-500" />
-              <span dir="ltr">{merged.developerPhone || '0559786939'}</span>
+              <span dir="ltr">{merged.credits.developerPhone || '0559786939'}</span>
             </div>
           </div>
           <div className="text-xs text-slate-500 dark:text-slate-400 pt-2 border-t border-slate-100 dark:border-slate-800">
-            {merged.copyrightAr || 'جميع الحقوق محفوظة · FLEET OPERATIONS CENTER'}
+            {merged.credits.copyrightText || 'جميع الحقوق محفوظة · FLEET OPERATIONS CENTER'}
           </div>
         </Card>
       </div>
 
       <Card className="space-y-4">
-        <SectionHeader title="سجل التحديثات والتطويرات (Changelog)" icon={<Info className="h-4 w-4 text-slate-500" />} />
+        <SectionHeader title="سجل التحديثات والتطويرات (Changelog)" actions={<Info className="h-4 w-4 text-slate-500" />} />
         <div className="space-y-4">
           {CHANGELOG_ITEMS.map((item) => (
             <div key={item.version} className="rounded-xl border border-slate-200 dark:border-slate-800 p-4 space-y-2">

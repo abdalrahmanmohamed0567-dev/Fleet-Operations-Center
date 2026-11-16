@@ -1,7 +1,8 @@
 import html2canvas from 'html2canvas';
 import { jsPDF } from 'jspdf';
-import type { ExportColumn } from '../server/exportEngine';
+import type { ExportColumn } from '../shared/exportCore';
 import type { CompanyBrandingDoc } from '../types/fleet';
+import { isolateClonedDocumentForHtml2Canvas } from './reportImageExport';
 
 export async function exportArabicTableToPdf(params: {
   title: string;
@@ -28,11 +29,11 @@ export async function exportArabicTableToPdf(params: {
   container.style.fontFamily = '"IBM Plex Sans Arabic", "Plus Jakarta Sans", sans-serif';
 
   const brand = params.branding;
-  const primaryColor = brand?.primaryColor || '#0f1e36';
-  const companyTitle = brand?.companyNameAr || brand?.systemNameAr || 'Fleet Operations Center';
+  const primaryColor = brand?.branding?.primaryColor || '#0f1e36';
+  const companyTitle = brand?.company?.companyNameAr || brand?.branding?.systemNameAr || 'Fleet Operations Center';
   const logoUrl =
-    params.includeLogo !== false && brand?.primaryLogoKey
-      ? `/api/branding/logo/${encodeURIComponent(brand.primaryLogoKey)}`
+    params.includeLogo !== false && brand?.branding?.primaryLogoKey
+      ? `/api/branding/logo/${encodeURIComponent(brand.branding.primaryLogoKey)}`
       : '';
 
   const maxRows = params.rows.slice(0, 100);
@@ -61,10 +62,10 @@ export async function exportArabicTableToPdf(params: {
     params.includeCompanyDetails !== false && brand
       ? `<div style="font-size:10px;color:#475569;margin-top:4px;">
           ${[
-            brand.crNumber ? `س.ت: ${brand.crNumber}` : '',
-            brand.vatNumber ? `الرقم الضريبي: ${brand.vatNumber}` : '',
-            brand.phone ? `هاتف: ${brand.phone}` : '',
-            brand.city ? `${brand.city}` : '',
+            brand.company?.crNumber ? `س.ت: ${brand.company.crNumber}` : '',
+            brand.company?.vatNumber ? `الرقم الضريبي: ${brand.company.vatNumber}` : '',
+            brand.company?.phone ? `هاتف: ${brand.company.phone}` : '',
+            brand.company?.city ? `${brand.company.city}` : '',
           ]
             .filter(Boolean)
             .map(escapeHtml)
@@ -72,7 +73,7 @@ export async function exportArabicTableToPdf(params: {
         </div>`
       : '';
 
-  const footerText = brand?.officialFooterText || `${companyTitle} · نظام إدارة العمليات والأسطول`;
+  const footerText = brand?.company?.officialFooterText || `${companyTitle} · نظام إدارة العمليات والأسطول`;
 
   container.innerHTML = `
     <div style="display:flex;align-items:center;justify-content:space-between;gap:16px;border-bottom:3px solid ${escapeHtml(primaryColor)};padding-bottom:14px;margin-bottom:16px;">
@@ -102,7 +103,15 @@ export async function exportArabicTableToPdf(params: {
 
   document.body.appendChild(container);
   try {
-    const canvas = await html2canvas(container, { scale: 1.5, backgroundColor: '#ffffff', useCORS: true });
+    const canvas = await html2canvas(container, {
+      scale: 1.5,
+      backgroundColor: '#ffffff',
+      useCORS: true,
+      logging: false,
+      onclone: (clonedDoc, clonedEl) => {
+        isolateClonedDocumentForHtml2Canvas(clonedDoc, clonedEl);
+      },
+    });
     const imgData = canvas.toDataURL('image/png');
     const pdf = new jsPDF({ orientation, unit: 'pt', format: 'a4' });
     const pdfWidth = pdf.internal.pageSize.getWidth();

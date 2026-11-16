@@ -1,4 +1,4 @@
-import { deleteDoc, doc, serverTimestamp, setDoc, updateDoc } from 'firebase/firestore';
+import { deleteDoc, doc, serverTimestamp, setDoc, updateDoc } from '../lib/erpDb';
 import {
   AlertTriangle,
   Car,
@@ -637,6 +637,7 @@ export function ExecutiveAdminModule({
           </div>
 
           <DataTable
+            tableId="executive_tasks"
             rows={filteredTasks}
             columns={taskCols}
             rowKey={(t) => t.noteTaskId}

@@ -26,6 +26,15 @@ import {
   resolveEffectivePermissions,
 } from '../shared/rbacCore.js';
 import type { ParsedCollectionRecord } from './excelParser.js';
+import { isServerSessionToken, verifySessionTokenToUser } from './authStore.js';
+import {
+  batchCheckLocalExisting,
+  commitLocalBatch,
+  deleteLocalDoc,
+  getLocalDoc,
+  listLocalCollection,
+  type LocalBatchOp,
+} from './localStore.js';
 
 interface FirebaseAppletConfig {
   projectId: string;
@@ -77,6 +86,9 @@ export interface VerifiedAuthUser {
 }
 
 export async function verifyUserFromToken(idToken: string): Promise<VerifiedAuthUser> {
+  if (isServerSessionToken(idToken)) {
+    return verifySessionTokenToUser(idToken);
+  }
   const cfg = getFirebaseConfig();
   const res = await fetch(`https://identitytoolkit.googleapis.com/v1/accounts:lookup?key=${cfg.apiKey}`, {
     method: 'POST',
@@ -237,6 +249,9 @@ export async function getFirestoreDoc(
   docId: string,
   idToken: string
 ): Promise<Record<string, unknown> | null> {
+  if (isServerSessionToken(idToken)) {
+    return getLocalDoc(collection, docId);
+  }
   const res = await fetch(`${dbBaseUrl()}/${collection}/${encodeURIComponent(docId)}`, {
     headers: { Authorization: `Bearer ${idToken}` },
   });
@@ -254,6 +269,10 @@ export async function deleteFirestoreDoc(
   docId: string,
   idToken: string
 ): Promise<void> {
+  if (isServerSessionToken(idToken)) {
+    await deleteLocalDoc(collection, docId);
+    return;
+  }
   const res = await fetch(`${dbBaseUrl()}/${collection}/${encodeURIComponent(docId)}`, {
     method: 'DELETE',
     headers: { Authorization: `Bearer ${idToken}` },
@@ -288,6 +307,9 @@ export async function listFirestoreCollection<T = Record<string, unknown>>(
   idToken: string,
   pageSize = 1000
 ): Promise<T[]> {
+  if (isServerSessionToken(idToken)) {
+    return listLocalCollection<T>(collection);
+  }
   const items: T[] = [];
   let pageToken = '';
   do {
@@ -322,6 +344,9 @@ export async function batchCheckExisting(
   items: Array<{ collection: string; docId: string }>,
   idToken: string
 ): Promise<Map<string, ExistingDocMeta>> {
+  if (isServerSessionToken(idToken)) {
+    return batchCheckLocalExisting(items);
+  }
   const result = new Map<string, ExistingDocMeta>();
   if (items.length === 0) return result;
 
@@ -374,6 +399,18 @@ export interface WriteOperation {
 
 export async function commitFirestoreWrites(writes: WriteOperation[], idToken: string): Promise<void> {
   if (writes.length === 0) return;
+  if (isServerSessionToken(idToken)) {
+    const batchOps: LocalBatchOp[] = writes.map((w) => ({
+      type: 'set',
+      collection: w.collection,
+      docId: w.docId,
+      data: w.data,
+      serverTimestampFields: w.serverTimestampFields,
+      preserveTimestampFields: w.preserveTimestampFields,
+    }));
+    await commitLocalBatch(batchOps);
+    return;
+  }
 
   // Keep under Firestore 500 writes/transforms limit per commit (each doc with transforms counts toward limit)
   const chunkSize = 200;

@@ -1,5 +1,5 @@
 import { BookOpen, Building2, Car, FolderLock, Globe, Plus, Save, Shield, Trash2, UserPlus } from 'lucide-react';
-import { doc, serverTimestamp, setDoc, updateDoc } from 'firebase/firestore';
+import { doc, serverTimestamp, setDoc, updateDoc } from '../lib/erpDb';
 import { useMemo, useState } from 'react';
 import { writeErpAuditLog } from '../lib/erpHelpers';
 import {

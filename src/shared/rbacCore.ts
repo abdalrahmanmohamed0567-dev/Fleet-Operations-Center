@@ -329,6 +329,30 @@ export function mapLegacyRoleToTemplateId(role: UserRole | string | undefined): 
   }
 }
 
+export function mapTemplateToLegacyRole(templateId: string | undefined): UserRole {
+  switch (templateId) {
+    case 'super_admin':
+      return 'admin';
+    case 'operations_manager':
+      return 'operations_manager';
+    case 'hr_manager':
+      return 'hr_manager';
+    case 'hr_employee':
+      return 'hr_employee';
+    case 'fleet_manager':
+      return 'fleet_manager';
+    case 'fleet_employee':
+      return 'fleet_employee';
+    case 'platform_supervisor':
+      return 'supervisor';
+    case 'accountant':
+      return 'accountant';
+    case 'reports_viewer':
+    default:
+      return 'viewer';
+  }
+}
+
 export function isSystemOwnerUser(user: Pick<UserProfile, 'email' | 'role'> | null | undefined): boolean {
   if (!user) return false;
   if ((user.email || '').trim().toLowerCase() === BOOTSTRAPPED_OWNER_EMAIL_LOWER) return true;
