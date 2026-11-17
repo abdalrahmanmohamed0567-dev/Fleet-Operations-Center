@@ -74,6 +74,44 @@ import {
   type QueryFilterClause,
 } from './src/server/localStore.js';
 import { matchesDataScope } from './src/shared/rbacCore.js';
+import {
+  approvePendingReturnTransactional,
+  attachDelegationToApprovalTransactional,
+  cancelFleetApprovalTransactional,
+  completeMaintenanceWorkOrderTransactional,
+  createMaintenanceWorkOrderTransactional,
+  createVehicleTransactional,
+  decideAdminApprovalTransactional,
+  decideOperationsApprovalTransactional,
+  decideVehicleDocumentTransactional,
+  executeVehicleHandoverTransactional,
+  executeVehicleReturnTransactional,
+  getFleetAvailabilityMatrix,
+  getScopedFleetOverview,
+  getVehicleProfile360,
+  hasFleetPermOnUser,
+  isVehicleInUserScope,
+  markFleetNotificationsReadTransactional,
+  requestVehicleAssignmentTransactional,
+  runSafeFleetPhase1Migration,
+  transferVehicleCustodyTransactional,
+  transitionVehicleStatusTransactional,
+  updateDamageClaimTransactional,
+  updateFleetConfigTransactional,
+  updateVehicleTransactional,
+  upsertVehicleDocumentTransactional,
+  type CreateMaintenanceInput,
+  type CreateVehicleInput,
+  type ExecuteHandoverInput,
+  type ExecuteReturnInput,
+  type RequestVehicleAssignmentInput,
+} from './src/server/fleetService.js';
+
+const SERVER_ONLY_IMMUTABLE_COLLECTIONS = new Set<string>([
+  'vehicleStatusHistory',
+  'vehicleMovementHistory',
+  'idempotencyKeys',
+]);
 
 dotenv.config();
 
@@ -134,11 +172,34 @@ function checkDbCollectionPermission(
       return (
         hasServerPermission(user, 'documents', 'view') ||
         hasServerPermission(user, 'hr', 'view') ||
-        hasServerPermission(user, 'fleet', 'view')
+        hasServerPermission(user, 'fleet', 'view') ||
+        hasFleetPermOnUser(user, 'fleet.documents.view')
       );
     }
-    if (['vehicles', 'vehicleAssignments', 'vehicleMaintenance'].includes(collection)) {
-      return hasServerPermission(user, 'fleet', 'view') || hasServerPermission(user, 'operations', 'view');
+    if (
+      [
+        'vehicles',
+        'vehicleAssignments',
+        'vehicleMaintenance',
+        'vehicleCustodies',
+        'vehicleHandovers',
+        'vehicleReturns',
+        'vehicleStatusHistory',
+        'vehicleMovementHistory',
+        'fleetApprovalRequests',
+        'vehicleDocuments',
+        'vehicleDamageClaims',
+        'fleetNotifications',
+      ].includes(collection)
+    ) {
+      return (
+        hasServerPermission(user, 'fleet', 'view') ||
+        hasServerPermission(user, 'operations', 'view') ||
+        hasFleetPermOnUser(user, 'fleet.view')
+      );
+    }
+    if (collection === 'idempotencyKeys') {
+      return false;
     }
     if (['riderMaster', 'riderIdentityMapping'].includes(collection)) {
       return (
@@ -243,8 +304,31 @@ function checkDbCollectionPermission(
       return (
         hasServerPermission(user, 'fleet', 'add') ||
         hasServerPermission(user, 'fleet', 'edit') ||
-        hasServerPermission(user, 'fleet', 'delete')
+        hasServerPermission(user, 'fleet', 'delete') ||
+        hasFleetPermOnUser(user, 'fleet.create') ||
+        hasFleetPermOnUser(user, 'fleet.edit')
       );
+    case 'vehicleCustodies':
+    case 'vehicleHandovers':
+      return hasFleetPermOnUser(user, 'fleet.handover.create') || hasFleetPermOnUser(user, 'fleet.handover.approve');
+    case 'vehicleReturns':
+      return hasFleetPermOnUser(user, 'fleet.return.create') || hasFleetPermOnUser(user, 'fleet.return.approve');
+    case 'fleetApprovalRequests':
+      return (
+        hasFleetPermOnUser(user, 'fleet.assignment.request') ||
+        hasFleetPermOnUser(user, 'fleet.assignment.operations_approve') ||
+        hasFleetPermOnUser(user, 'fleet.assignment.admin_approve')
+      );
+    case 'vehicleDocuments':
+      return hasFleetPermOnUser(user, 'fleet.documents.upload') || hasFleetPermOnUser(user, 'fleet.documents.approve');
+    case 'vehicleDamageClaims':
+      return hasFleetPermOnUser(user, 'fleet.maintenance.create') || hasFleetPermOnUser(user, 'fleet.maintenance.approve');
+    case 'fleetNotifications':
+      return hasFleetPermOnUser(user, 'fleet.view');
+    case 'vehicleStatusHistory':
+    case 'vehicleMovementHistory':
+    case 'idempotencyKeys':
+      return false;
     case 'entityNotesTasks':
     case 'operationalCases':
     case 'riderNotes':
@@ -339,6 +423,13 @@ async function getTeamAllowedUids(callerUid: string, idToken: string): Promise<s
 
 async function startServer() {
   await ensureBootstrappedAdmin(false);
+  await runSafeFleetPhase1Migration({
+    actorUid: 'owner_0559786939',
+    actorEmail: 'system@fleetops.local',
+    createPreMigrationBackup: false,
+  }).catch((err) => {
+    console.warn('Initial fleet migration check failed:', err);
+  });
   startDailyBackupScheduler();
 
   const app = express();
@@ -454,6 +545,7 @@ async function startServer() {
         dataScope: req.body?.dataScope,
         permissionOverrides: req.body?.permissionOverrides,
         capabilityOverrides: req.body?.capabilityOverrides,
+        fleetPermissionOverrides: req.body?.fleetPermissionOverrides,
       });
 
       const logId = `log_${Date.now()}_${crypto.randomBytes(4).toString('hex')}`;
@@ -543,6 +635,10 @@ async function startServer() {
         res.status(400).json({ error: 'معرّف المجموعة أو السجل غير صالح.' });
         return;
       }
+      if (SERVER_ONLY_IMMUTABLE_COLLECTIONS.has(col)) {
+        res.status(403).json({ error: `المجموعة (${col}) محمية وتُدار حصريًا من الخادم ولا يمكن الكتابة فيها مباشرة.` });
+        return;
+      }
       if (!checkDbCollectionPermission(actor, col, 'write')) {
         res.status(403).json({ error: `صلاحياتك لا تسمح بالكتابة في ${col}.` });
         return;
@@ -567,6 +663,7 @@ async function startServer() {
             dataScope: payload.dataScope as VerifiedAuthUser['dataScope'] | undefined,
             permissionOverrides: payload.permissionOverrides as Record<string, unknown> | undefined,
             capabilityOverrides: payload.capabilityOverrides as Record<string, unknown> | undefined,
+            fleetPermissionOverrides: payload.fleetPermissionOverrides as Record<string, unknown> | undefined,
           });
           res.json({ ok: true, id: docId, data: updated });
           return;
@@ -587,6 +684,10 @@ async function startServer() {
       const docId = String(req.params.docId || '');
       if (!isValidCollectionName(col) || !isValidDocId(docId)) {
         res.status(400).json({ error: 'معرّف المجموعة أو السجل غير صالح.' });
+        return;
+      }
+      if (SERVER_ONLY_IMMUTABLE_COLLECTIONS.has(col)) {
+        res.status(403).json({ error: `المجموعة (${col}) محمية وتُدار حصريًا من الخادم.` });
         return;
       }
       if (!checkDbCollectionPermission(actor, col, 'write')) {
@@ -610,6 +711,7 @@ async function startServer() {
           dataScope: patch.dataScope as VerifiedAuthUser['dataScope'] | undefined,
           permissionOverrides: patch.permissionOverrides as Record<string, unknown> | undefined,
           capabilityOverrides: patch.capabilityOverrides as Record<string, unknown> | undefined,
+          fleetPermissionOverrides: patch.fleetPermissionOverrides as Record<string, unknown> | undefined,
         });
         res.json({ ok: true, id: docId, data: updated });
         return;
@@ -629,6 +731,10 @@ async function startServer() {
       const docId = String(req.params.docId || '');
       if (!isValidCollectionName(col) || !isValidDocId(docId)) {
         res.status(400).json({ error: 'معرّف المجموعة أو السجل غير صالح.' });
+        return;
+      }
+      if (SERVER_ONLY_IMMUTABLE_COLLECTIONS.has(col)) {
+        res.status(403).json({ error: `لا يمكن حذف السجلات التاريخية المحمية (${col}).` });
         return;
       }
       if (!checkDbCollectionPermission(actor, col, 'write')) {
@@ -672,6 +778,10 @@ async function startServer() {
       for (const op of ops) {
         if (!isValidCollectionName(op.collection) || !isValidDocId(op.docId)) {
           res.status(400).json({ error: `عملية غير صالحة في الدفعة (${op.collection}/${op.docId}).` });
+          return;
+        }
+        if (SERVER_ONLY_IMMUTABLE_COLLECTIONS.has(op.collection)) {
+          res.status(403).json({ error: `المجموعة (${op.collection}) محمية وتُدار عبر الخادم فقط.` });
           return;
         }
         if (!checkDbCollectionPermission(actor, op.collection, 'write')) {
@@ -1514,6 +1624,28 @@ async function startServer() {
   // ==========================================
   // PRIVATE SERVER-SIDE DOCUMENT VAULT APIs
   // ==========================================
+  const ALLOWED_VAULT_ENTITY_TYPES = [
+    'rider',
+    'vehicle',
+    'handover',
+    'return',
+    'maintenance',
+    'delegation',
+    'damage_claim',
+    'vehicle_doc',
+    'custom_field',
+    'branding',
+  ] as const;
+  const FLEET_VAULT_ENTITY_TYPES = new Set<string>([
+    'vehicle',
+    'handover',
+    'return',
+    'maintenance',
+    'delegation',
+    'damage_claim',
+    'vehicle_doc',
+  ]);
+
   app.post('/api/documents/upload', requireAuth, docUpload.single('file'), async (req: AuthedRequest, res: Response) => {
     try {
       const user = req.authUser!;
@@ -1521,7 +1653,13 @@ async function startServer() {
       const existingDocId = String(req.body?.docId || '').trim();
       const isReplace = Boolean(existingDocId);
 
-      if (isReplace ? !hasServerPermission(user, 'documents', 'edit') : !hasServerPermission(user, 'documents', 'add')) {
+      const entityType = String(req.body?.entityType || '').trim() as PrivateDocumentRecord['entityType'];
+      const isFleetEntity = FLEET_VAULT_ENTITY_TYPES.has(entityType);
+      const hasDocPerm = isReplace
+        ? hasServerPermission(user, 'documents', 'edit') || (isFleetEntity && hasFleetPermOnUser(user, 'fleet.documents.upload'))
+        : hasServerPermission(user, 'documents', 'add') || (isFleetEntity && hasFleetPermOnUser(user, 'fleet.documents.upload'));
+
+      if (!hasDocPerm) {
         res.status(403).json({ error: 'صلاحياتك الحالية لا تسمح برفع أو استبدال المستندات.' });
         return;
       }
@@ -1532,7 +1670,6 @@ async function startServer() {
         return;
       }
 
-      const entityType = String(req.body?.entityType || '').trim() as 'rider' | 'vehicle' | 'handover' | 'custom_field' | 'branding';
       const entityId = String(req.body?.entityId || '').trim();
       const entityLabel = String(req.body?.entityLabel || '').trim().slice(0, 180);
       const docTypeId = String(req.body?.docTypeId || '').trim();
@@ -1543,7 +1680,7 @@ async function startServer() {
       const notes = String(req.body?.notes || '').trim().slice(0, 600);
       const versionNote = String(req.body?.versionNote || '').trim().slice(0, 300);
 
-      if (!['rider', 'vehicle', 'handover', 'custom_field', 'branding'].includes(entityType) || !entityId || !docTypeId) {
+      if (!ALLOWED_VAULT_ENTITY_TYPES.includes(entityType) || !entityId || !docTypeId) {
         res.status(400).json({ error: 'بيانات ربط المستند بالكيان غير مكتملة.' });
         return;
       }
@@ -1563,6 +1700,15 @@ async function startServer() {
           )
         ) {
           res.status(403).json({ error: 'المندوب خارج نطاق صلاحيات الفروع/المدن الخاص بك.' });
+          return;
+        }
+      }
+
+      // Check data scope when linked to a vehicle/fleet entity
+      if (isFleetEntity) {
+        const vehicleDoc = await getFirestoreDoc('vehicles', entityId, idToken).catch(() => null);
+        if (vehicleDoc && !isVehicleInUserScope(vehicleDoc as never, user)) {
+          res.status(403).json({ error: 'المركبة خارج نطاق الفروع/المدن المصرح لك بها.' });
           return;
         }
       }
@@ -1668,7 +1814,7 @@ async function startServer() {
     try {
       const user = req.authUser!;
       const idToken = req.idToken!;
-      if (!hasServerPermission(user, 'documents', 'view')) {
+      if (!hasServerPermission(user, 'documents', 'view') && !hasFleetPermOnUser(user, 'fleet.documents.view')) {
         res.status(403).json({ error: 'صلاحياتك لا تسمح بعرض أو تنزيل المستندات الخاصة.' });
         return;
       }
@@ -1698,6 +1844,14 @@ async function startServer() {
         }
       }
 
+      if (FLEET_VAULT_ENTITY_TYPES.has(docRecord.entityType)) {
+        const vehicleDoc = await getFirestoreDoc('vehicles', docRecord.entityId, idToken).catch(() => null);
+        if (vehicleDoc && !isVehicleInUserScope(vehicleDoc as never, user)) {
+          res.status(403).json({ error: 'لا تملك صلاحية عرض مستندات مركبة خارج نطاق فرعك.' });
+          return;
+        }
+      }
+
       const reqVersion = req.query.version ? Number(req.query.version) : docRecord.currentVersion;
       const versionObj =
         docRecord.versions?.find((v) => v.version === reqVersion) ||
@@ -1710,6 +1864,22 @@ async function startServer() {
       const fileBuf = await readPrivateVaultFile(versionObj.storageKey);
       const isDownload = req.query.download === '1' || req.query.download === 'true';
       const safeName = (versionObj.originalFileName || `${docId}.pdf`).replace(/[^a-zA-Z0-9._\-\u0600-\u06FF ]/g, '_');
+
+      // Audit view/download access
+      const accessLogId = `log_${Date.now()}_${crypto.randomBytes(4).toString('hex')}`;
+      void setLocalDoc('auditLogs', accessLogId, {
+        logId: accessLogId,
+        action: isDownload ? 'DOCUMENT_DOWNLOADED' : 'DOCUMENT_VIEWED',
+        targetCollection: 'privateDocuments',
+        targetId: docId,
+        entityType: 'document',
+        actorUid: user.uid,
+        actorEmail: user.email,
+        details: `${isDownload ? 'تنزيل' : 'معاينة'} ملف: ${docRecord.title} (إصدار ${versionObj.version})`,
+        source: 'API',
+        allowedUids: [user.uid],
+        createdAt: new Date().toISOString(),
+      }).catch(() => {});
 
       res.setHeader('Content-Type', versionObj.mimeType || 'application/octet-stream');
       res.setHeader('X-Content-Type-Options', 'nosniff');
@@ -1773,6 +1943,400 @@ async function startServer() {
       res.json({ success: true });
     } catch (err) {
       res.status(500).json({ error: err instanceof Error ? err.message : 'فشل حذف المستند.' });
+    }
+  });
+
+  // ==========================================
+  // ENTERPRISE FLEET MANAGEMENT APIs (PHASE 1 & 2)
+  // ==========================================
+  const handleFleetError = (res: Response, err: unknown, fallbackMsg: string) => {
+    const status =
+      typeof err === 'object' &&
+      err !== null &&
+      'statusCode' in err &&
+      typeof (err as { statusCode?: number }).statusCode === 'number'
+        ? (err as { statusCode: number }).statusCode
+        : 400;
+    res.status(status).json({ error: err instanceof Error ? err.message : fallbackMsg });
+  };
+
+  app.post('/api/fleet/migration/sync', requireAuth, async (req: AuthedRequest, res: Response) => {
+    try {
+      const user = req.authUser!;
+      if (user.role !== 'owner' && user.role !== 'admin' && !hasFleetPermOnUser(user, 'fleet.settings.manage')) {
+        res.status(403).json({ error: 'صلاحياتك لا تسمح بتشغيل مزامنة وترحيل بيانات الأسطول.' });
+        return;
+      }
+      const createPreMigrationBackup = req.body?.createPreMigrationBackup !== false;
+      const result = await runSafeFleetPhase1Migration({
+        actorUid: user.uid,
+        actorEmail: user.email,
+        createPreMigrationBackup,
+      });
+      res.json(result);
+    } catch (err) {
+      handleFleetError(res, err, 'فشل تشغيل مزامنة بيانات الأسطول.');
+    }
+  });
+
+  app.get('/api/fleet/overview', requireAuth, async (req: AuthedRequest, res: Response) => {
+    try {
+      const overview = await getScopedFleetOverview(req.authUser!);
+      res.json({ ok: true, ...overview });
+    } catch (err) {
+      handleFleetError(res, err, 'تعذر تحميل نظرة الأسطول.');
+    }
+  });
+
+  app.get('/api/fleet/availability', requireAuth, async (req: AuthedRequest, res: Response) => {
+    try {
+      const matrix = await getFleetAvailabilityMatrix(req.authUser!);
+      res.json({ ok: true, ...matrix });
+    } catch (err) {
+      handleFleetError(res, err, 'تعذر تحميل مصفوفة جاهزية المركبات.');
+    }
+  });
+
+  app.get('/api/fleet/vehicles/:vehicleId/profile360', requireAuth, async (req: AuthedRequest, res: Response) => {
+    try {
+      const vehicleId = String(req.params.vehicleId || '').trim();
+      const profile = await getVehicleProfile360(req.authUser!, vehicleId);
+      res.json({ ok: true, ...profile });
+    } catch (err) {
+      handleFleetError(res, err, 'تعذر تحميل ملف المركبة 360.');
+    }
+  });
+
+  app.post('/api/fleet/vehicles', requireAuth, async (req: AuthedRequest, res: Response) => {
+    try {
+      const idempotencyKey = String(req.headers['idempotency-key'] || '').trim() || undefined;
+      const result = await createVehicleTransactional(req.authUser!, (req.body || {}) as CreateVehicleInput, idempotencyKey);
+      res.status(201).json({ ok: true, ...result });
+    } catch (err) {
+      handleFleetError(res, err, 'تعذر تسجيل المركبة الجديدة.');
+    }
+  });
+
+  app.patch('/api/fleet/vehicles/:vehicleId', requireAuth, async (req: AuthedRequest, res: Response) => {
+    try {
+      const vehicleId = String(req.params.vehicleId || '').trim();
+      const idempotencyKey = String(req.headers['idempotency-key'] || '').trim() || undefined;
+      const result = await updateVehicleTransactional(req.authUser!, vehicleId, (req.body || {}) as Partial<CreateVehicleInput>, idempotencyKey);
+      res.json({ ok: true, ...result });
+    } catch (err) {
+      handleFleetError(res, err, 'تعذر تحديث بيانات المركبة.');
+    }
+  });
+
+  app.post('/api/fleet/vehicles/:vehicleId/status', requireAuth, async (req: AuthedRequest, res: Response) => {
+    try {
+      const vehicleId = String(req.params.vehicleId || '').trim();
+      const idempotencyKey = String(req.headers['idempotency-key'] || '').trim() || undefined;
+      const result = await transitionVehicleStatusTransactional(
+        req.authUser!,
+        vehicleId,
+        {
+          toStatus: req.body?.toStatus,
+          reason: req.body?.reason,
+        },
+        idempotencyKey
+      );
+      res.json({ ok: true, ...result });
+    } catch (err) {
+      handleFleetError(res, err, 'تعذر تغيير حالة المركبة.');
+    }
+  });
+
+  // Phase 3: Assignment Request, Dual-Stage Approvals & Delegation Management
+  app.post('/api/fleet/assignments/request', requireAuth, async (req: AuthedRequest, res: Response) => {
+    try {
+      const idempotencyKey = String(req.headers['idempotency-key'] || '').trim() || undefined;
+      const result = await requestVehicleAssignmentTransactional(
+        req.authUser!,
+        (req.body || {}) as RequestVehicleAssignmentInput,
+        idempotencyKey
+      );
+      res.status(201).json({ ok: true, ...result });
+    } catch (err) {
+      handleFleetError(res, err, 'تعذر رفع طلب ربط وتفويض المركبة.');
+    }
+  });
+
+  app.post('/api/fleet/approvals/:requestId/operations-decision', requireAuth, async (req: AuthedRequest, res: Response) => {
+    try {
+      const requestId = String(req.params.requestId || '').trim();
+      const idempotencyKey = String(req.headers['idempotency-key'] || '').trim() || undefined;
+      const result = await decideOperationsApprovalTransactional(
+        req.authUser!,
+        requestId,
+        {
+          decision: req.body?.decision,
+          note: req.body?.note,
+        },
+        idempotencyKey
+      );
+      res.json({ ok: true, ...result });
+    } catch (err) {
+      handleFleetError(res, err, 'تعذر تنفيذ الاعتماد التشغيلي للطلب.');
+    }
+  });
+
+  app.post('/api/fleet/approvals/:requestId/admin-decision', requireAuth, async (req: AuthedRequest, res: Response) => {
+    try {
+      const requestId = String(req.params.requestId || '').trim();
+      const idempotencyKey = String(req.headers['idempotency-key'] || '').trim() || undefined;
+      const result = await decideAdminApprovalTransactional(
+        req.authUser!,
+        requestId,
+        {
+          decision: req.body?.decision,
+          note: req.body?.note,
+        },
+        idempotencyKey
+      );
+      res.json({ ok: true, ...result });
+    } catch (err) {
+      handleFleetError(res, err, 'تعذر تنفيذ الاعتماد الإداري النهائي للطلب.');
+    }
+  });
+
+  app.post('/api/fleet/approvals/:requestId/delegation', requireAuth, async (req: AuthedRequest, res: Response) => {
+    try {
+      const requestId = String(req.params.requestId || '').trim();
+      const idempotencyKey = String(req.headers['idempotency-key'] || '').trim() || undefined;
+      const result = await attachDelegationToApprovalTransactional(
+        req.authUser!,
+        requestId,
+        {
+          delegationNumber: req.body?.delegationNumber,
+          delegationStartDate: req.body?.delegationStartDate,
+          delegationExpiryDate: req.body?.delegationExpiryDate,
+          privateDocId: req.body?.privateDocId,
+          issuerName: req.body?.issuerName,
+          notes: req.body?.notes,
+        },
+        idempotencyKey
+      );
+      res.json({ ok: true, ...result });
+    } catch (err) {
+      handleFleetError(res, err, 'تعذر إرفاق وثيقة التفويض بالطلب.');
+    }
+  });
+
+  app.post('/api/fleet/approvals/:requestId/cancel', requireAuth, async (req: AuthedRequest, res: Response) => {
+    try {
+      const requestId = String(req.params.requestId || '').trim();
+      const idempotencyKey = String(req.headers['idempotency-key'] || '').trim() || undefined;
+      const result = await cancelFleetApprovalTransactional(
+        req.authUser!,
+        requestId,
+        req.body?.reason,
+        idempotencyKey
+      );
+      res.json({ ok: true, ...result });
+    } catch (err) {
+      handleFleetError(res, err, 'تعذر إلغاء طلب الاعتماد.');
+    }
+  });
+
+  // Phase 4: Enterprise Handover, Return Inspection & Custody Transfer
+  app.post('/api/fleet/handovers', requireAuth, async (req: AuthedRequest, res: Response) => {
+    try {
+      const idempotencyKey = String(req.headers['idempotency-key'] || '').trim() || undefined;
+      const result = await executeVehicleHandoverTransactional(
+        req.authUser!,
+        (req.body || {}) as ExecuteHandoverInput,
+        idempotencyKey
+      );
+      res.status(201).json({ ok: true, ...result });
+    } catch (err) {
+      handleFleetError(res, err, 'تعذر تنفيذ محضر تسليم المركبة.');
+    }
+  });
+
+  app.post('/api/fleet/returns', requireAuth, async (req: AuthedRequest, res: Response) => {
+    try {
+      const idempotencyKey = String(req.headers['idempotency-key'] || '').trim() || undefined;
+      const result = await executeVehicleReturnTransactional(
+        req.authUser!,
+        (req.body || {}) as ExecuteReturnInput,
+        idempotencyKey
+      );
+      res.status(201).json({ ok: true, ...result });
+    } catch (err) {
+      handleFleetError(res, err, 'تعذر تنفيذ محضر استلام وفحص المركبة.');
+    }
+  });
+
+  app.post('/api/fleet/returns/:returnId/approve', requireAuth, async (req: AuthedRequest, res: Response) => {
+    try {
+      const returnId = String(req.params.returnId || '').trim();
+      const idempotencyKey = String(req.headers['idempotency-key'] || '').trim() || undefined;
+      const result = await approvePendingReturnTransactional(
+        req.authUser!,
+        returnId,
+        {
+          nextVehicleStatus: req.body?.nextVehicleStatus,
+          note: req.body?.note,
+        },
+        idempotencyKey
+      );
+      res.json({ ok: true, ...result });
+    } catch (err) {
+      handleFleetError(res, err, 'تعذر اعتماد إغلاق محضر الاستلام.');
+    }
+  });
+
+  app.post('/api/fleet/custodies/:custodyId/transfer', requireAuth, async (req: AuthedRequest, res: Response) => {
+    try {
+      const custodyId = String(req.params.custodyId || '').trim();
+      const idempotencyKey = String(req.headers['idempotency-key'] || '').trim() || undefined;
+      const result = await transferVehicleCustodyTransactional(
+        req.authUser!,
+        custodyId,
+        {
+          toRiderId: req.body?.toRiderId,
+          transferDate: req.body?.transferDate,
+          odometer: req.body?.odometer,
+          fuelLevel: req.body?.fuelLevel,
+          condition: req.body?.condition,
+          notes: req.body?.notes,
+        },
+        idempotencyKey
+      );
+      res.json({ ok: true, ...result });
+    } catch (err) {
+      handleFleetError(res, err, 'تعذر نقل عهدة المركبة إلى المندوب الجديد.');
+    }
+  });
+
+  // Phase 5: Maintenance Work Orders, Damage Claims & Structured Documents
+  app.post('/api/fleet/maintenance', requireAuth, async (req: AuthedRequest, res: Response) => {
+    try {
+      const idempotencyKey = String(req.headers['idempotency-key'] || '').trim() || undefined;
+      const result = await createMaintenanceWorkOrderTransactional(
+        req.authUser!,
+        (req.body || {}) as CreateMaintenanceInput,
+        idempotencyKey
+      );
+      res.status(201).json({ ok: true, ...result });
+    } catch (err) {
+      handleFleetError(res, err, 'تعذر فتح أمر الصيانة.');
+    }
+  });
+
+  app.post('/api/fleet/maintenance/:maintenanceId/complete', requireAuth, async (req: AuthedRequest, res: Response) => {
+    try {
+      const maintenanceId = String(req.params.maintenanceId || '').trim();
+      const idempotencyKey = String(req.headers['idempotency-key'] || '').trim() || undefined;
+      const result = await completeMaintenanceWorkOrderTransactional(
+        req.authUser!,
+        maintenanceId,
+        {
+          actualCost: req.body?.actualCost,
+          completedOdometer: req.body?.completedOdometer,
+          completedAt: req.body?.completedAt,
+          invoiceDocId: req.body?.invoiceDocId,
+          releaseVehicleToAvailable: req.body?.releaseVehicleToAvailable,
+          details: req.body?.details,
+        },
+        idempotencyKey
+      );
+      res.json({ ok: true, ...result });
+    } catch (err) {
+      handleFleetError(res, err, 'تعذر إغلاق واعتماد أمر الصيانة.');
+    }
+  });
+
+  app.patch('/api/fleet/damage-claims/:claimId', requireAuth, async (req: AuthedRequest, res: Response) => {
+    try {
+      const claimId = String(req.params.claimId || '').trim();
+      const idempotencyKey = String(req.headers['idempotency-key'] || '').trim() || undefined;
+      const result = await updateDamageClaimTransactional(
+        req.authUser!,
+        claimId,
+        {
+          liability: req.body?.liability,
+          status: req.body?.status,
+          actualRepairCost: req.body?.actualRepairCost,
+          notes: req.body?.notes,
+        },
+        idempotencyKey
+      );
+      res.json({ ok: true, ...result });
+    } catch (err) {
+      handleFleetError(res, err, 'تعذر تحديث مطالبة الضرر.');
+    }
+  });
+
+  app.post('/api/fleet/documents', requireAuth, async (req: AuthedRequest, res: Response) => {
+    try {
+      const idempotencyKey = String(req.headers['idempotency-key'] || '').trim() || undefined;
+      const result = await upsertVehicleDocumentTransactional(
+        req.authUser!,
+        {
+          vehicleDocId: req.body?.vehicleDocId,
+          vehicleInternalId: req.body?.vehicleInternalId,
+          docCategory: req.body?.docCategory,
+          titleAr: req.body?.titleAr,
+          documentNumber: req.body?.documentNumber,
+          issuerName: req.body?.issuerName,
+          issueDate: req.body?.issueDate,
+          expiryDate: req.body?.expiryDate,
+          privateDocId: req.body?.privateDocId,
+          notes: req.body?.notes,
+        },
+        idempotencyKey
+      );
+      res.json({ ok: true, ...result });
+    } catch (err) {
+      handleFleetError(res, err, 'تعذر حفظ وثيقة المركبة.');
+    }
+  });
+
+  app.post('/api/fleet/documents/:vehicleDocId/decision', requireAuth, async (req: AuthedRequest, res: Response) => {
+    try {
+      const vehicleDocId = String(req.params.vehicleDocId || '').trim();
+      const idempotencyKey = String(req.headers['idempotency-key'] || '').trim() || undefined;
+      const result = await decideVehicleDocumentTransactional(
+        req.authUser!,
+        vehicleDocId,
+        {
+          decision: req.body?.decision,
+          rejectionReason: req.body?.rejectionReason,
+        },
+        idempotencyKey
+      );
+      res.json({ ok: true, ...result });
+    } catch (err) {
+      handleFleetError(res, err, 'تعذر اعتماد أو رفض وثيقة المركبة.');
+    }
+  });
+
+  // Phase 7: Fleet Settings & Notification Read Endpoints
+  app.patch('/api/fleet/settings', requireAuth, async (req: AuthedRequest, res: Response) => {
+    try {
+      const idempotencyKey = String(req.headers['idempotency-key'] || '').trim() || undefined;
+      const result = await updateFleetConfigTransactional(
+        req.authUser!,
+        (req.body || {}) as Record<string, unknown>,
+        idempotencyKey
+      );
+      res.json({ ok: true, ...result });
+    } catch (err) {
+      handleFleetError(res, err, 'تعذر تحديث إعدادات وسياسات الأسطول.');
+    }
+  });
+
+  app.post('/api/fleet/notifications/read', requireAuth, async (req: AuthedRequest, res: Response) => {
+    try {
+      const result = await markFleetNotificationsReadTransactional(req.authUser!, {
+        notificationIds: Array.isArray(req.body?.notificationIds) ? req.body.notificationIds : undefined,
+        markAll: Boolean(req.body?.markAll),
+      });
+      res.json({ ok: true, ...result });
+    } catch (err) {
+      handleFleetError(res, err, 'تعذر تحديث حالة قراءة إشعارات الأسطول.');
     }
   });
 

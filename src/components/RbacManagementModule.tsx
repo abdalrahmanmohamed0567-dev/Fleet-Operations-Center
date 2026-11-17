@@ -20,8 +20,11 @@ import { ConfirmModal } from './ConfirmModal';
 import {
   BOOTSTRAPPED_OWNER_EMAIL_LOWER,
   createEmptyCapabilities,
+  createEmptyFleetPermissions,
   createEmptyPermissionMatrix,
   DEFAULT_ROLE_TEMPLATES,
+  deriveLegacyFleetPermissions,
+  FLEET_GRANULAR_PERMISSIONS,
   getMergedPlatformCatalog,
   GRANULAR_CAPABILITIES,
   hasPermission,
@@ -32,12 +35,15 @@ import {
   PERMISSION_MODULES,
   resolveDataScope,
   resolveEffectiveCapabilities,
+  resolveEffectiveFleetPermissions,
   resolveEffectivePermissions,
 } from '../shared/rbacCore';
 import type {
   AuditLog,
   CapabilityMap,
   DataScope,
+  FleetPermissionAction,
+  FleetPermissionMap,
   GranularCapability,
   ModulePermissions,
   OperationalSettings,
@@ -117,7 +123,7 @@ export function RbacManagementModule({
     email: '',
     customRoleId: 'reports_viewer',
     active: true,
-    dataScope: { allBranches: true, branches: [], cities: [], platforms: ['hungerstation'], riderIds: [] },
+    dataScope: { allBranches: true, branches: [], cities: [], platforms: ['hungerstation'], riderIds: [], vehicleIds: [] },
   });
 
   // Delete User Modal
@@ -134,6 +140,7 @@ export function RbacManagementModule({
     dataScope: DataScope;
     permissionOverrides: Partial<Record<PermissionModule, Partial<ModulePermissions>>>;
     capabilityOverrides: Partial<CapabilityMap>;
+    fleetPermissionOverrides: Partial<FleetPermissionMap>;
     useOverrides: boolean;
   }>({
     displayName: '',
@@ -141,9 +148,10 @@ export function RbacManagementModule({
     newPassword: '',
     customRoleId: 'reports_viewer',
     active: true,
-    dataScope: { allBranches: true, branches: [], cities: [], platforms: [], riderIds: [] },
+    dataScope: { allBranches: true, branches: [], cities: [], platforms: [], riderIds: [], vehicleIds: [] },
     permissionOverrides: {},
     capabilityOverrides: {},
+    fleetPermissionOverrides: {},
     useOverrides: false,
   });
 
@@ -159,6 +167,7 @@ export function RbacManagementModule({
   });
   const [roleMatrixDraft, setRoleMatrixDraft] = useState<PermissionMatrix | null>(null);
   const [roleCapsDraft, setRoleCapsDraft] = useState<CapabilityMap | null>(null);
+  const [roleFleetPermsDraft, setRoleFleetPermsDraft] = useState<FleetPermissionMap | null>(null);
 
   // Audit filters
   const [auditSourceFilter, setAuditSourceFilter] = useState<string>('all');
@@ -205,6 +214,12 @@ export function RbacManagementModule({
     ...createEmptyCapabilities(),
     ...(roleCapsDraft || selectedTemplate?.capabilities || {}),
   };
+  const activeFleetPermissions: FleetPermissionMap = {
+    ...createEmptyFleetPermissions(),
+    ...deriveLegacyFleetPermissions(activeMatrix, selectedTemplate?.roleId),
+    ...(selectedTemplate?.fleetPermissions || {}),
+    ...(roleFleetPermsDraft || {}),
+  };
 
   const openCreateUser = () => {
     setShowNewPassword(false);
@@ -215,7 +230,7 @@ export function RbacManagementModule({
       email: '',
       customRoleId: 'reports_viewer',
       active: true,
-      dataScope: { allBranches: true, branches: [], cities: [], platforms: ['hungerstation'], riderIds: [] },
+      dataScope: { allBranches: true, branches: [], cities: [], platforms: ['hungerstation'], riderIds: [], vehicleIds: [] },
     });
     setCreateUserOpen(true);
   };
@@ -310,12 +325,15 @@ export function RbacManagementModule({
         cities: [...scope.cities],
         platforms: [...scope.platforms],
         riderIds: [...scope.riderIds],
+        vehicleIds: [...(scope.vehicleIds || [])],
       },
       permissionOverrides: u.permissionOverrides ? JSON.parse(JSON.stringify(u.permissionOverrides)) : {},
       capabilityOverrides: u.capabilityOverrides ? { ...u.capabilityOverrides } : {},
+      fleetPermissionOverrides: u.fleetPermissionOverrides ? { ...u.fleetPermissionOverrides } : {},
       useOverrides: Boolean(
         (u.permissionOverrides && Object.keys(u.permissionOverrides).length > 0) ||
-          (u.capabilityOverrides && Object.keys(u.capabilityOverrides).length > 0)
+          (u.capabilityOverrides && Object.keys(u.capabilityOverrides).length > 0) ||
+          (u.fleetPermissionOverrides && Object.keys(u.fleetPermissionOverrides).length > 0)
       ),
     });
   };
@@ -346,10 +364,11 @@ export function RbacManagementModule({
         active: isTargetOwner ? true : userForm.active,
         allowedPlatforms: validPlatforms.length > 0 ? validPlatforms : ['hungerstation'],
         dataScope: isTargetOwner
-          ? { allBranches: true, branches: [], cities: [], platforms: [], riderIds: [] }
+          ? { allBranches: true, branches: [], cities: [], platforms: [], riderIds: [], vehicleIds: [] }
           : userForm.dataScope,
         permissionOverrides: !isTargetOwner && userForm.useOverrides ? userForm.permissionOverrides : {},
         capabilityOverrides: !isTargetOwner && userForm.useOverrides ? userForm.capabilityOverrides : {},
+        fleetPermissionOverrides: !isTargetOwner && userForm.useOverrides ? userForm.fleetPermissionOverrides : {},
       };
       if (userForm.newPassword.trim()) {
         patchPayload.password = userForm.newPassword.trim();
@@ -408,6 +427,14 @@ export function RbacManagementModule({
     });
   };
 
+  const toggleFleetPermissionCell = (permKey: FleetPermissionAction) => {
+    if (!canEditRoles || selectedTemplate?.roleId === 'super_admin') return;
+    setRoleFleetPermsDraft({
+      ...activeFleetPermissions,
+      [permKey]: !activeFleetPermissions[permKey],
+    });
+  };
+
   const handleSaveRoleTemplate = async () => {
     if (!selectedTemplate || !canEditRoles) return;
     setBusy(true);
@@ -422,6 +449,7 @@ export function RbacManagementModule({
         isSystemPreset: selectedTemplate.isSystemPreset,
         permissions: activeMatrix,
         capabilities: activeCapabilities,
+        fleetPermissions: activeFleetPermissions,
         createdByUid: selectedTemplate.createdByUid || currentUser.uid,
         allowedUids: teamAllowed.length > 0 ? teamAllowed : [currentUser.uid],
         createdAt: serverTimestamp(),
@@ -433,16 +461,21 @@ export function RbacManagementModule({
         targetCollection: 'roleTemplates',
         targetId: selectedTemplate.roleId,
         entityType: 'role_template',
-        details: `تعديل مصفوفة الصلاحيات والقدرات للقالب: ${selectedTemplate.nameAr}`,
+        details: `تعديل مصفوفة الصلاحيات والقدرات وصلاحيات الأسطول للقالب: ${selectedTemplate.nameAr}`,
         oldValue: selectedTemplate.permissions,
-        newValue: { permissions: activeMatrix, capabilities: activeCapabilities },
+        newValue: {
+          permissions: activeMatrix,
+          capabilities: activeCapabilities,
+          fleetPermissions: activeFleetPermissions,
+        },
         user: currentUser,
         allowedUids,
       });
 
       setRoleMatrixDraft(null);
       setRoleCapsDraft(null);
-      setToast({ type: 'ok', msg: `تم حفظ مصفوفة الصلاحيات والقدرات للدور "${selectedTemplate.nameAr}".` });
+      setRoleFleetPermsDraft(null);
+      setToast({ type: 'ok', msg: `تم حفظ مصفوفة الصلاحيات وصلاحيات الأسطول للدور "${selectedTemplate.nameAr}".` });
       await onRefresh();
     } catch (err) {
       setToast({ type: 'err', msg: err instanceof Error ? err.message : 'فشل حفظ مصفوفة الدور.' });
@@ -459,6 +492,9 @@ export function RbacManagementModule({
     const copySrc = mergedRoles.find((r) => r.roleId === newRoleForm.copyFromId);
     const permissions = copySrc ? JSON.parse(JSON.stringify(copySrc.permissions)) : createEmptyPermissionMatrix();
     const capabilities = copySrc?.capabilities ? { ...copySrc.capabilities } : createEmptyCapabilities();
+    const fleetPermissions = copySrc?.fleetPermissions
+      ? { ...copySrc.fleetPermissions }
+      : deriveLegacyFleetPermissions(permissions, copySrc?.roleId);
 
     setBusy(true);
     try {
@@ -471,6 +507,7 @@ export function RbacManagementModule({
         isSystemPreset: false,
         permissions,
         capabilities,
+        fleetPermissions,
         createdByUid: currentUser.uid,
         allowedUids: teamAllowed.length > 0 ? teamAllowed : [currentUser.uid],
         createdAt: serverTimestamp(),
@@ -491,6 +528,7 @@ export function RbacManagementModule({
       setSelectedRoleId(roleId);
       setRoleMatrixDraft(null);
       setRoleCapsDraft(null);
+      setRoleFleetPermsDraft(null);
       setToast({ type: 'ok', msg: `تم إنشاء قالب الدور "${newRoleForm.nameAr}" بنجاح.` });
       await onRefresh();
     } catch (err) {
@@ -534,7 +572,8 @@ export function RbacManagementModule({
         return (
           <div className="flex flex-wrap items-center gap-1.5 text-xs">
             <span className="font-semibold text-slate-800 dark:text-slate-200">{tpl?.nameAr || tplId}</span>
-            {u.permissionOverrides && Object.keys(u.permissionOverrides).length > 0 && (
+            {((u.permissionOverrides && Object.keys(u.permissionOverrides).length > 0) ||
+              (u.fleetPermissionOverrides && Object.keys(u.fleetPermissionOverrides).length > 0)) && (
               <StatusBadge label="استثناءات فردية" tone="warning" />
             )}
           </div>
@@ -691,6 +730,7 @@ export function RbacManagementModule({
                       setSelectedRoleId(r.roleId);
                       setRoleMatrixDraft(null);
                       setRoleCapsDraft(null);
+                      setRoleFleetPermsDraft(null);
                     }}
                     className={`w-full rounded-lg border px-3 py-2 text-right transition-colors ${
                       active
@@ -716,13 +756,14 @@ export function RbacManagementModule({
               actions={
                 canEditRoles ? (
                   <>
-                    {(roleMatrixDraft || roleCapsDraft) && (
+                    {(roleMatrixDraft || roleCapsDraft || roleFleetPermsDraft) && (
                       <Button
                         size="sm"
                         variant="secondary"
                         onClick={() => {
                           setRoleMatrixDraft(null);
                           setRoleCapsDraft(null);
+                          setRoleFleetPermsDraft(null);
                         }}
                       >
                         تراجع
@@ -732,7 +773,7 @@ export function RbacManagementModule({
                       size="sm"
                       variant="primary"
                       loading={busy}
-                      disabled={busy || (!roleMatrixDraft && !roleCapsDraft)}
+                      disabled={busy || (!roleMatrixDraft && !roleCapsDraft && !roleFleetPermsDraft)}
                       onClick={() => void handleSaveRoleTemplate()}
                     >
                       حفظ مصفوفة الصلاحيات
@@ -826,6 +867,62 @@ export function RbacManagementModule({
                         <div className="text-[11px] text-slate-500 dark:text-slate-400">{cap.descriptionAr}</div>
                       </div>
                     </label>
+                  );
+                })}
+              </div>
+            </div>
+
+            {/* Granular Fleet Management Permissions (19 Actions) */}
+            <div className="border-t border-slate-200 dark:border-slate-800 pt-4 space-y-3">
+              <div>
+                <h4 className="text-xs font-bold text-slate-900 dark:text-slate-100">
+                  صلاحيات إدارة الأسطول التفصيلية (19 صلاحية تشغيلية)
+                </h4>
+                <p className="text-[11px] text-slate-500 dark:text-slate-400">
+                  فصل دقيق لصلاحيات المركبات، الوثائق والتفويض، تسليم واستلام العهد، اعتمادات التشغيل والإدارة، والصيانة
+                </p>
+              </div>
+              <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
+                {Array.from(new Set(FLEET_GRANULAR_PERMISSIONS.map((p) => p.groupAr))).map((groupName) => {
+                  const groupItems = FLEET_GRANULAR_PERMISSIONS.filter((p) => p.groupAr === groupName);
+                  return (
+                    <div
+                      key={groupName}
+                      className="rounded-xl border border-slate-200 dark:border-slate-800 bg-slate-50/40 dark:bg-slate-950/30 p-3 space-y-2"
+                    >
+                      <div className="text-[11px] font-bold text-[#0f1e36] dark:text-blue-400 border-b border-slate-200 dark:border-slate-800 pb-1.5">
+                        {groupName}
+                      </div>
+                      <div className="space-y-1.5">
+                        {groupItems.map((perm) => {
+                          const checked = Boolean(activeFleetPermissions[perm.key]);
+                          return (
+                            <label
+                              key={perm.key}
+                              className={`flex items-center justify-between gap-2 rounded-lg px-2 py-1 text-xs ${
+                                !canEditRoles || selectedTemplate?.roleId === 'super_admin'
+                                  ? 'opacity-70 cursor-not-allowed'
+                                  : 'cursor-pointer hover:bg-white dark:hover:bg-slate-900'
+                              }`}
+                            >
+                              <div className="flex items-center gap-2">
+                                <input
+                                  type="checkbox"
+                                  disabled={!canEditRoles || selectedTemplate?.roleId === 'super_admin'}
+                                  checked={checked}
+                                  onChange={() => toggleFleetPermissionCell(perm.key)}
+                                  className="h-4 w-4 rounded border-slate-300 dark:border-slate-700 accent-[#0f1e36] dark:accent-blue-600"
+                                />
+                                <span className="font-medium text-slate-800 dark:text-slate-200">{perm.labelAr}</span>
+                              </div>
+                              <span className="font-mono-num text-[10px] text-slate-400" dir="ltr">
+                                {perm.key}
+                              </span>
+                            </label>
+                          );
+                        })}
+                      </div>
+                    </div>
                   );
                 })}
               </div>
@@ -1191,6 +1288,50 @@ export function RbacManagementModule({
                               }
                             />
                             <span className="font-medium text-slate-800 dark:text-slate-200">{cap.labelAr}</span>
+                          </label>
+                        ));
+                      })()}
+                    </div>
+                  </div>
+
+                  <div className="border-t border-slate-200 dark:border-slate-800 pt-2.5 space-y-2">
+                    <div className="text-[11px] font-bold text-slate-700 dark:text-slate-200">
+                      استثناءات صلاحيات الأسطول التفصيلية (Fleet Granular Overrides)
+                    </div>
+                    <div className="grid grid-cols-1 gap-2 sm:grid-cols-2 max-h-56 overflow-y-auto erp-scroll">
+                      {(() => {
+                        const previewFleet = resolveEffectiveFleetPermissions(
+                          {
+                            ...editingUser,
+                            customRoleId: userForm.customRoleId,
+                            active: userForm.active,
+                            permissionOverrides: userForm.permissionOverrides,
+                            fleetPermissionOverrides: userForm.fleetPermissionOverrides,
+                          },
+                          mergedRoles
+                        );
+                        return FLEET_GRANULAR_PERMISSIONS.map((perm) => (
+                          <label
+                            key={perm.key}
+                            className="flex items-center gap-2 rounded-lg border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 px-2.5 py-1.5 text-[11px] cursor-pointer"
+                          >
+                            <input
+                              type="checkbox"
+                              disabled={editingUser.email.trim().toLowerCase() === BOOTSTRAPPED_OWNER_EMAIL_LOWER}
+                              checked={Boolean(previewFleet[perm.key])}
+                              onChange={(e) =>
+                                setUserForm({
+                                  ...userForm,
+                                  fleetPermissionOverrides: {
+                                    ...userForm.fleetPermissionOverrides,
+                                    [perm.key]: e.target.checked,
+                                  },
+                                })
+                              }
+                            />
+                            <span className="font-medium text-slate-800 dark:text-slate-200">
+                              <span className="text-slate-400 font-normal">[{perm.groupAr}]</span> {perm.labelAr}
+                            </span>
                           </label>
                         ));
                       })()}

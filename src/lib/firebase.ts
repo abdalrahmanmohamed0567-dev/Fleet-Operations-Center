@@ -1,4 +1,4 @@
-import type { OperationalSettings, UserProfile } from '../types/fleet';
+import type { FleetConfigSettings, OperationalSettings, UserProfile } from '../types/fleet';
 import {
   doc,
   erpDbClient,
@@ -187,6 +187,59 @@ export function canAccessGlobalHub(profile: UserProfile | null | undefined): boo
   return false;
 }
 
+export const DEFAULT_FLEET_CONFIG: FleetConfigSettings = {
+  mandatoryDocCategories: ['istimara', 'insurance', 'periodic_inspection'],
+  documentAlertDays: [30, 15, 7, 3, 0],
+  delegationAlertDays: [14, 7, 3, 0],
+  maintenanceAlertDays: 14,
+  maintenanceAlertKm: 1000,
+  singleVehiclePerRider: true,
+  strictSeparationOfDuties: true,
+  requireOpsAndAdminForDelegation: true,
+  requirePhotosOnHandover: true,
+  requirePhotosOnReturn: true,
+  mandatoryPhotoSlots: [
+    { slotKey: 'front', labelAr: 'الواجهة الأمامية', required: true },
+    { slotKey: 'rear', labelAr: 'الجهة الخلفية', required: true },
+    { slotKey: 'right', labelAr: 'الجانب الأيمن', required: true },
+    { slotKey: 'left', labelAr: 'الجانب الأيسر', required: true },
+    { slotKey: 'plate', labelAr: 'لوحة المركبة', required: true },
+    { slotKey: 'odometer', labelAr: 'لوحة العداد', required: true },
+    { slotKey: 'fuel', labelAr: 'مؤشر الوقود', required: true },
+    { slotKey: 'damage', labelAr: 'مواضع الملاحظات والأضرار', required: false },
+  ],
+  defaultChecklistItems: [
+    { itemKey: 'body_exterior', labelAr: 'سلامة الهيكل الخارجي والدهان' },
+    { itemKey: 'lights_signals', labelAr: 'الإضاءة الأمامية والخلفية والإشارات' },
+    { itemKey: 'tires_rims', labelAr: 'حالة الإطارات والجنوط' },
+    { itemKey: 'spare_tire', labelAr: 'الإطار الاحتياطي والرافعة' },
+    { itemKey: 'windshield_mirrors', labelAr: 'الزجاج الأمامي والمرايا' },
+    { itemKey: 'ac_cooling', labelAr: 'كفاءة المكيف والتبريد' },
+    { itemKey: 'brakes_handbrake', labelAr: 'الفرامل وفرامل اليد' },
+    { itemKey: 'engine_sounds', labelAr: 'صوت المحرك وعدم وجود تهريبات' },
+    { itemKey: 'interior_seats', labelAr: 'نظافة المقصورة والمقاعد' },
+    { itemKey: 'battery_start', labelAr: 'البطارية وسرعة التشغيل' },
+    { itemKey: 'wipers_washer', labelAr: 'المساحات ورشاش الماء' },
+    { itemKey: 'horn_locks', labelAr: 'البوق وأقفال الأبواب والريموت' },
+    { itemKey: 'istimara_copy', labelAr: 'نسخة الاستمارة داخل المركبة' },
+    { itemKey: 'insurance_copy', labelAr: 'نسخة وثيقة التأمين' },
+    { itemKey: 'safety_triangle', labelAr: 'مثلث السلامة وطفاية الحريق' },
+    { itemKey: 'first_aid', labelAr: 'حقيبة الإسعافات الأولية' },
+  ],
+  defaultAccessories: [
+    { accessoryKey: 'main_key', labelAr: 'المفتاح الرئيسي' },
+    { accessoryKey: 'spare_key', labelAr: 'المفتاح الاحتياطي' },
+    { accessoryKey: 'fuel_card', labelAr: 'بطاقة الوقود' },
+    { accessoryKey: 'delivery_box', labelAr: 'صندوق / حقيبة التوصيل' },
+    { accessoryKey: 'phone_mount', labelAr: 'حامل الجوال والشاحن' },
+    { accessoryKey: 'gps_tracker', labelAr: 'جهاز التتبع (GPS)' },
+  ],
+  companyReportHeader: {
+    showLogo: true,
+    footerDisclaimerAr: 'وثيقة صادرة من مركز عمليات الأسطول — تخضع للمراجعة والاعتماد الإلكتروني.',
+  },
+};
+
 export const DEFAULT_OPERATIONAL_SETTINGS: Omit<OperationalSettings, 'createdByUid' | 'allowedUids' | 'updatedAt'> = {
   settingsId: 'default',
   minDailyWorkingHours: 8,
@@ -223,6 +276,7 @@ export const DEFAULT_OPERATIONAL_SETTINGS: Omit<OperationalSettings, 'createdByU
   keetaHidden: true,
   expiryAlertDays: [90, 60, 30, 7, 0],
   customVehicleTypes: ['سيارة سيدان', 'فان / توصيل', 'دراجة نارية', 'دراجة كهربائية'],
+  fleetConfig: DEFAULT_FLEET_CONFIG,
 };
 
 export function hydrateOperationalSettings(raw: Partial<OperationalSettings>): OperationalSettings {
@@ -258,6 +312,10 @@ export function hydrateOperationalSettings(raw: Partial<OperationalSettings>): O
       Array.isArray(raw.customVehicleTypes) && raw.customVehicleTypes.length > 0
         ? raw.customVehicleTypes
         : DEFAULT_OPERATIONAL_SETTINGS.customVehicleTypes,
+    fleetConfig: {
+      ...DEFAULT_FLEET_CONFIG,
+      ...(raw.fleetConfig || {}),
+    },
     createdByUid: raw.createdByUid || '',
     allowedUids: Array.isArray(raw.allowedUids) ? raw.allowedUids : [],
   };

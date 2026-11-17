@@ -47,6 +47,16 @@ export const VALID_COLLECTIONS = [
   'trashItems',
   'configSnapshots',
   'customReportTemplates',
+  'vehicleCustodies',
+  'vehicleHandovers',
+  'vehicleReturns',
+  'vehicleStatusHistory',
+  'vehicleMovementHistory',
+  'fleetApprovalRequests',
+  'vehicleDocuments',
+  'vehicleDamageClaims',
+  'fleetNotifications',
+  'idempotencyKeys',
 ] as const;
 
 export type ValidCollectionName = (typeof VALID_COLLECTIONS)[number];
@@ -71,6 +81,16 @@ function withCollectionLock<T>(collection: string, fn: () => Promise<T>): Promis
     next.catch(() => undefined)
   );
   return next;
+}
+
+export async function withMultiCollectionLock<T>(collections: string[], fn: () => Promise<T>): Promise<T> {
+  const sorted = Array.from(new Set(collections)).sort();
+  if (sorted.length === 0) return fn();
+  const acquire = (idx: number): Promise<T> => {
+    if (idx >= sorted.length) return fn();
+    return withCollectionLock(sorted[idx], () => acquire(idx + 1));
+  };
+  return acquire(0);
 }
 
 function collectionFilePath(collection: string): string {
@@ -291,6 +311,107 @@ export async function commitLocalBatch(ops: LocalBatchOp[]): Promise<void> {
   }
 }
 
+export interface LocalTransactionContext {
+  get: (collection: ValidCollectionName, docId: string) => Promise<Record<string, unknown> | null>;
+  list: <T = Record<string, unknown>>(collection: ValidCollectionName) => Promise<T[]>;
+  set: (collection: ValidCollectionName, docId: string, data: Record<string, unknown>, options?: { merge?: boolean }) => Promise<Record<string, unknown>>;
+  update: (collection: ValidCollectionName, docId: string, patch: Record<string, unknown>) => Promise<Record<string, unknown>>;
+  delete: (collection: ValidCollectionName, docId: string) => Promise<void>;
+}
+
+export async function runLocalTransaction<T>(
+  collections: ValidCollectionName[],
+  fn: (tx: LocalTransactionContext) => Promise<T>
+): Promise<T> {
+  const uniqueCols = Array.from(new Set(collections));
+  for (const col of uniqueCols) {
+    if (!isValidCollectionName(col)) throw new Error(`مجموعة غير صالحة: ${col}`);
+  }
+
+  return withMultiCollectionLock(uniqueCols, async () => {
+    const snapshots = new Map<string, Record<string, Record<string, unknown>>>();
+    const working = new Map<string, Record<string, Record<string, unknown>>>();
+    const dirtyCols = new Set<string>();
+    const allowedSet = new Set<string>(uniqueCols);
+
+    const ensureLoaded = async (col: ValidCollectionName) => {
+      if (!allowedSet.has(col)) {
+        throw new Error(`المجموعة (${col}) غير مدرجة ضمن نطاق القفل الذري للعملية.`);
+      }
+      if (!working.has(col)) {
+        const current = await readCollectionMapUnsafe(col);
+        snapshots.set(col, JSON.parse(JSON.stringify(current)) as Record<string, Record<string, unknown>>);
+        working.set(col, current);
+      }
+      return working.get(col)!;
+    };
+
+    const nowIso = new Date().toISOString();
+
+    const tx: LocalTransactionContext = {
+      get: async (col, docId) => {
+        if (!isValidDocId(docId)) return null;
+        const map = await ensureLoaded(col);
+        return map[docId] ? { ...map[docId] } : null;
+      },
+      list: async <R = Record<string, unknown>>(col: ValidCollectionName) => {
+        const map = await ensureLoaded(col);
+        return Object.values(map) as unknown as R[];
+      },
+      set: async (col, docId, data, options) => {
+        if (!isValidDocId(docId)) throw new Error(`معرف سجل غير صالح: ${docId}`);
+        const map = await ensureLoaded(col);
+        const resolved = resolveServerTimestamps(data, nowIso) as Record<string, unknown>;
+        const nextDoc = options?.merge && map[docId] ? { ...map[docId], ...resolved } : { ...resolved };
+        map[docId] = nextDoc;
+        dirtyCols.add(col);
+        return { ...nextDoc };
+      },
+      update: async (col, docId, patch) => {
+        if (!isValidDocId(docId)) throw new Error(`معرف سجل غير صالح: ${docId}`);
+        const map = await ensureLoaded(col);
+        if (!map[docId]) throw new Error(`السجل غير موجود (${col}/${docId}).`);
+        const resolved = resolveServerTimestamps(patch, nowIso) as Record<string, unknown>;
+        const updated = { ...map[docId], ...resolved };
+        map[docId] = updated;
+        dirtyCols.add(col);
+        return { ...updated };
+      },
+      delete: async (col, docId) => {
+        if (!isValidDocId(docId)) return;
+        const map = await ensureLoaded(col);
+        if (docId in map) {
+          delete map[docId];
+          dirtyCols.add(col);
+        }
+      },
+    };
+
+    const result = await fn(tx);
+
+    const writtenCols: string[] = [];
+    try {
+      for (const col of dirtyCols) {
+        const map = working.get(col);
+        if (map) {
+          await writeCollectionMapUnsafe(col, map);
+          writtenCols.push(col);
+        }
+      }
+    } catch (writeErr) {
+      for (const col of writtenCols) {
+        const snap = snapshots.get(col);
+        if (snap) {
+          await writeCollectionMapUnsafe(col, snap).catch(() => {});
+        }
+      }
+      throw writeErr;
+    }
+
+    return result;
+  });
+}
+
 export async function batchCheckLocalExisting(
   items: Array<{ collection: string; docId: string }>
 ): Promise<Map<string, { rowChecksum: string; importedAt?: string; createdAt?: string; createdByUid?: string }>> {
@@ -382,6 +503,16 @@ export async function importAllLocalCollections(
                 obj.brandingId ||
                 obj.platformId ||
                 obj.typeId ||
+                obj.custodyId ||
+                obj.handoverId ||
+                obj.returnId ||
+                obj.historyId ||
+                obj.movementId ||
+                obj.requestId ||
+                obj.vehicleDocId ||
+                obj.claimId ||
+                obj.notificationId ||
+                obj.idempotencyKey ||
                 ''
             );
             if (isValidDocId(inferredId)) {

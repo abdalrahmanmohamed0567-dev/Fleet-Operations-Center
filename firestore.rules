@@ -128,6 +128,36 @@ service cloud.firestore {
         );
     }
 
+    function hasFleetGranularPerm(permKey, legacyAction) {
+      return isBootstrappedOwner()
+        || isAdmin()
+        || (
+          isVerified()
+          && exists(/databases/$(database)/documents/users/$(request.auth.uid))
+          && getUserDoc().data.active == true
+          && (
+            (
+              'fleetPermissionOverrides' in getUserDoc().data
+              && getUserDoc().data.fleetPermissionOverrides is map
+              && permKey in getUserDoc().data.fleetPermissionOverrides
+            )
+              ? getUserDoc().data.fleetPermissionOverrides[permKey] == true
+              : (
+                (
+                  'customRoleId' in getUserDoc().data
+                  && getUserDoc().data.customRoleId is string
+                  && getUserDoc().data.customRoleId.size() >= 1
+                  && exists(/databases/$(database)/documents/roleTemplates/$(getUserDoc().data.customRoleId))
+                  && get(/databases/$(database)/documents/roleTemplates/$(getUserDoc().data.customRoleId)).data.fleetPermissions is map
+                  && permKey in get(/databases/$(database)/documents/roleTemplates/$(getUserDoc().data.customRoleId)).data.fleetPermissions
+                )
+                  ? get(/databases/$(database)/documents/roleTemplates/$(getUserDoc().data.customRoleId)).data.fleetPermissions[permKey] == true
+                  : hasModulePerm('fleet', legacyAction)
+              )
+          )
+        );
+    }
+
     function hasPlatformAccess(platform) {
       return isBootstrappedOwner()
         || hasActiveRole(['owner', 'admin'])
@@ -191,7 +221,7 @@ service cloud.firestore {
         && data.keys().hasOnly([
           'uid', 'phone', 'email', 'displayName', 'role', 'customRoleId', 'active',
           'allowedPlatforms', 'assignedBranch', 'assignedCity', 'dataScope',
-          'permissionOverrides', 'capabilityOverrides', 'managedByAdminUids', 'createdAt', 'updatedAt'
+          'permissionOverrides', 'capabilityOverrides', 'fleetPermissionOverrides', 'managedByAdminUids', 'createdAt', 'updatedAt'
         ])
         && data.uid == userId
         && isValidId(data.uid)
@@ -216,6 +246,7 @@ service cloud.firestore {
         && (!('dataScope' in data) || data.dataScope is map)
         && (!('permissionOverrides' in data) || data.permissionOverrides is map)
         && isOptionalMap(data, 'capabilityOverrides')
+        && isOptionalMap(data, 'fleetPermissionOverrides')
         && (!('managedByAdminUids' in data) || (data.managedByAdminUids is list && data.managedByAdminUids.size() <= 10))
         && data.createdAt is timestamp
         && data.updatedAt is timestamp;
@@ -524,7 +555,7 @@ service cloud.firestore {
           'scoreWeightQuality', 'scoreWeightAcceptance', 'scoreWeightCancellation',
           'minActiveOrdersPerDay', 'minActiveHoursPerDay', 'caseOverdueDays',
           'configuredBranches', 'importMaxFiles', 'importAllowUpdates', 'importStrictDates',
-          'keetaEnabled', 'keetaHidden', 'expiryAlertDays', 'customVehicleTypes',
+          'keetaEnabled', 'keetaHidden', 'expiryAlertDays', 'customVehicleTypes', 'fleetConfig',
           'createdByUid', 'allowedUids', 'updatedByEmail', 'updatedAt'
         ])
         && data.settingsId == docId && isValidId(data.settingsId)
@@ -562,6 +593,7 @@ service cloud.firestore {
         && isOptionalBool(data, 'keetaHidden')
         && (!('expiryAlertDays' in data) || (data.expiryAlertDays is list && data.expiryAlertDays.size() <= 15))
         && (!('customVehicleTypes' in data) || (data.customVehicleTypes is list && data.customVehicleTypes.size() <= 40))
+        && isOptionalMap(data, 'fleetConfig')
         && isOptionalString(data, 'updatedByEmail', 200)
         && isValidId(data.createdByUid)
         && isValidAllowedUids(data.allowedUids)
@@ -704,7 +736,7 @@ service cloud.firestore {
 
     function isValidRoleTemplate(data, docId) {
       return data.keys().hasAll(['roleId', 'nameAr', 'nameEn', 'isSystemPreset', 'permissions', 'createdByUid', 'allowedUids', 'createdAt', 'updatedAt'])
-        && data.keys().hasOnly(['roleId', 'nameAr', 'nameEn', 'description', 'isSystemPreset', 'permissions', 'capabilities', 'createdByUid', 'allowedUids', 'createdAt', 'updatedAt'])
+        && data.keys().hasOnly(['roleId', 'nameAr', 'nameEn', 'description', 'isSystemPreset', 'permissions', 'capabilities', 'fleetPermissions', 'createdByUid', 'allowedUids', 'createdAt', 'updatedAt'])
         && data.roleId == docId && isValidId(data.roleId)
         && data.nameAr is string && data.nameAr.size() >= 1 && data.nameAr.size() <= 120
         && data.nameEn is string && data.nameEn.size() >= 1 && data.nameEn.size() <= 120
@@ -712,6 +744,7 @@ service cloud.firestore {
         && data.isSystemPreset is bool
         && data.permissions is map
         && isOptionalMap(data, 'capabilities')
+        && isOptionalMap(data, 'fleetPermissions')
         && isValidId(data.createdByUid)
         && isValidAllowedUids(data.allowedUids)
         && data.createdAt is timestamp
@@ -738,7 +771,7 @@ service cloud.firestore {
       return data.keys().hasAll(['docId', 'entityType', 'entityId', 'docTypeId', 'docTypeName', 'title', 'currentVersion', 'versions', 'createdByUid', 'allowedUids', 'createdAt', 'updatedAt'])
         && data.keys().hasOnly(['docId', 'entityType', 'entityId', 'entityLabel', 'docTypeId', 'docTypeName', 'title', 'issueDate', 'expiryDate', 'notes', 'currentVersion', 'versions', 'createdByUid', 'allowedUids', 'createdAt', 'updatedAt'])
         && data.docId == docId && isValidId(data.docId)
-        && data.entityType in ['rider', 'vehicle', 'handover', 'custom_field', 'branding']
+        && data.entityType in ['rider', 'vehicle', 'handover', 'return', 'maintenance', 'delegation', 'damage_claim', 'vehicle_doc', 'custom_field', 'branding']
         && data.entityId is string && data.entityId.size() >= 1 && data.entityId.size() <= 128
         && isOptionalString(data, 'entityLabel', 180)
         && data.docTypeId is string && data.docTypeId.size() >= 1 && data.docTypeId.size() <= 64
@@ -806,22 +839,34 @@ service cloud.firestore {
     function isValidVehicleMaster(data, docId) {
       return data.keys().hasAll(['vehicleInternalId', 'plateNumber', 'vehicleType', 'make', 'model', 'ownershipType', 'status', 'createdByUid', 'allowedUids', 'createdAt', 'updatedAt'])
         && data.keys().hasOnly([
-          'vehicleInternalId', 'plateNumber', 'vehicleType', 'make', 'model', 'year', 'color', 'vin',
-          'ownershipType', 'ownerOrLeasingCompany', 'status', 'istimaraNumber', 'istimaraExpiryDate',
+          'vehicleInternalId', 'plateNumber', 'plateNumberNormalized', 'vehicleType', 'make', 'model', 'year', 'color', 'vin', 'vinNormalized',
+          'ownershipType', 'sourceType', 'ownerOrLeasingCompany', 'branch', 'city', 'fuelType', 'currentOdometer',
+          'status', 'legacyStatus', 'stopReason', 'stoppedAt', 'istimaraNumber', 'istimaraExpiryDate',
           'insuranceCompany', 'insurancePolicyNumber', 'insuranceExpiryDate', 'periodicInspectionExpiryDate',
-          'currentRiderId', 'currentAssignmentId', 'notes', 'customFields', 'createdByUid', 'allowedUids', 'createdAt', 'updatedAt'
+          'currentRiderId', 'currentAssignmentId', 'activeCustodyId', 'reservedForRequestId',
+          'readyToDispatch', 'blockingReasons', 'notes', 'customFields', 'createdByUid', 'allowedUids', 'createdAt', 'updatedAt'
         ])
         && data.vehicleInternalId == docId && isValidId(data.vehicleInternalId)
         && data.plateNumber is string && data.plateNumber.size() >= 1 && data.plateNumber.size() <= 40
+        && isOptionalString(data, 'plateNumberNormalized', 40)
         && data.vehicleType is string && data.vehicleType.size() >= 1 && data.vehicleType.size() <= 64
         && data.make is string && data.make.size() >= 1 && data.make.size() <= 80
         && data.model is string && data.model.size() >= 1 && data.model.size() <= 80
         && isOptionalNum(data, 'year')
         && isOptionalString(data, 'color', 40)
         && isOptionalString(data, 'vin', 64)
+        && isOptionalString(data, 'vinNormalized', 64)
         && data.ownershipType in ['owned', 'leased']
+        && (!('sourceType' in data) || data.sourceType in ['owned', 'leased', 'other'])
         && isOptionalString(data, 'ownerOrLeasingCompany', 150)
-        && data.status in ['available', 'assigned', 'maintenance', 'out_of_service', 'leased_out', 'ended']
+        && isOptionalString(data, 'branch', 100)
+        && isOptionalString(data, 'city', 100)
+        && (!('fuelType' in data) || data.fuelType in ['petrol', 'diesel', 'hybrid', 'electric'])
+        && isOptionalNum(data, 'currentOdometer')
+        && data.status in ['available', 'assigned', 'reserved', 'pending_return_inspection', 'maintenance', 'stopped', 'retired', 'out_of_service', 'leased_out', 'ended']
+        && isOptionalString(data, 'legacyStatus', 64)
+        && isOptionalString(data, 'stopReason', 500)
+        && isOptionalString(data, 'stoppedAt', 40)
         && isOptionalString(data, 'istimaraNumber', 64)
         && isOptionalString(data, 'istimaraExpiryDate', 10)
         && isOptionalString(data, 'insuranceCompany', 120)
@@ -830,6 +875,10 @@ service cloud.firestore {
         && isOptionalString(data, 'periodicInspectionExpiryDate', 10)
         && isOptionalString(data, 'currentRiderId', 64)
         && isOptionalString(data, 'currentAssignmentId', 128)
+        && isOptionalString(data, 'activeCustodyId', 128)
+        && isOptionalString(data, 'reservedForRequestId', 128)
+        && isOptionalBool(data, 'readyToDispatch')
+        && (!('blockingReasons' in data) || (data.blockingReasons is list && data.blockingReasons.size() <= 20))
         && isOptionalString(data, 'notes', 1000)
         && isOptionalMap(data, 'customFields')
         && isValidId(data.createdByUid)
@@ -882,26 +931,257 @@ service cloud.firestore {
     function isValidVehicleMaintenance(data, docId) {
       return data.keys().hasAll(['maintenanceId', 'vehicleInternalId', 'plateNumber', 'maintenanceType', 'maintenanceDate', 'createdByUid', 'allowedUids', 'createdAt', 'updatedAt'])
         && data.keys().hasOnly([
-          'maintenanceId', 'vehicleInternalId', 'plateNumber', 'maintenanceType', 'maintenanceDate',
-          'cost', 'odometer', 'workshop', 'details', 'nextMaintenanceDate', 'nextMaintenanceOdometer',
+          'maintenanceId', 'workOrderNumber', 'vehicleInternalId', 'plateNumber', 'maintenanceType', 'maintenanceDate',
+          'workflowStatus', 'custodyId', 'riderId',
+          'cost', 'estimatedCost', 'actualCost', 'odometer', 'workshop', 'details',
+          'nextMaintenanceDate', 'nextMaintenanceOdometer', 'completedAt', 'completedOdometer',
+          'invoiceDocId', 'approvalRequestId', 'approvedByUid', 'approvedByEmail', 'approvedAt', 'vehicleWasStopped',
           'customFields', 'createdByUid', 'allowedUids', 'createdAt', 'updatedAt'
         ])
         && data.maintenanceId == docId && isValidId(data.maintenanceId)
+        && isOptionalString(data, 'workOrderNumber', 64)
         && data.vehicleInternalId is string && data.vehicleInternalId.size() >= 1 && data.vehicleInternalId.size() <= 64
         && data.plateNumber is string && data.plateNumber.size() >= 1 && data.plateNumber.size() <= 40
         && data.maintenanceType is string && data.maintenanceType.size() >= 1 && data.maintenanceType.size() <= 120
         && isValidIsoDate(data.maintenanceDate)
+        && (!('workflowStatus' in data) || data.workflowStatus in ['open', 'in_progress', 'awaiting_approval', 'completed', 'cancelled'])
+        && isOptionalString(data, 'custodyId', 128)
+        && isOptionalString(data, 'riderId', 64)
         && isOptionalNum(data, 'cost')
+        && isOptionalNum(data, 'estimatedCost')
+        && isOptionalNum(data, 'actualCost')
         && isOptionalNum(data, 'odometer')
         && isOptionalString(data, 'workshop', 150)
         && isOptionalString(data, 'details', 1200)
         && isOptionalString(data, 'nextMaintenanceDate', 10)
         && isOptionalNum(data, 'nextMaintenanceOdometer')
+        && isOptionalString(data, 'completedAt', 40)
+        && isOptionalNum(data, 'completedOdometer')
+        && isOptionalString(data, 'invoiceDocId', 128)
+        && isOptionalString(data, 'approvalRequestId', 128)
+        && isOptionalString(data, 'approvedByUid', 128)
+        && isOptionalString(data, 'approvedByEmail', 200)
+        && isOptionalString(data, 'approvedAt', 40)
+        && isOptionalBool(data, 'vehicleWasStopped')
         && isOptionalMap(data, 'customFields')
         && isValidId(data.createdByUid)
         && isValidAllowedUids(data.allowedUids)
         && data.createdAt is timestamp
         && data.updatedAt is timestamp;
+    }
+
+    // ==========================================
+    // ENTERPRISE FLEET MANAGEMENT VALIDATORS
+    // ==========================================
+
+    function isValidVehicleCustody(data, docId) {
+      return data.keys().hasAll(['custodyId', 'custodyNumber', 'vehicleInternalId', 'plateNumber', 'riderId', 'riderName', 'status', 'handoverId', 'startedAt', 'createdByUid', 'allowedUids', 'createdAt', 'updatedAt'])
+        && data.keys().hasOnly([
+          'custodyId', 'custodyNumber', 'vehicleInternalId', 'plateNumber', 'riderId', 'riderName',
+          'branch', 'city', 'status', 'handoverId', 'returnId', 'assignmentId',
+          'approvalRequestId', 'delegationDocumentId', 'startedAt', 'endedAt',
+          'startOdometer', 'endOdometer', 'fuelLevelStart', 'fuelLevelEnd',
+          'custodyNotes', 'previousCustodyId', 'createdByUid', 'allowedUids', 'createdAt', 'updatedAt'
+        ])
+        && data.custodyId == docId && isValidId(data.custodyId)
+        && data.custodyNumber is string && data.custodyNumber.size() >= 1 && data.custodyNumber.size() <= 64
+        && isValidId(data.vehicleInternalId)
+        && data.plateNumber is string && data.plateNumber.size() >= 1 && data.plateNumber.size() <= 40
+        && data.riderId is string && data.riderId.size() >= 1 && data.riderId.size() <= 64
+        && data.riderName is string && data.riderName.size() <= 150
+        && isOptionalString(data, 'branch', 100)
+        && isOptionalString(data, 'city', 100)
+        && data.status in ['active', 'pending_return', 'returned', 'transferred', 'cancelled']
+        && isValidId(data.handoverId)
+        && isOptionalString(data, 'returnId', 128)
+        && isOptionalString(data, 'assignmentId', 128)
+        && isOptionalString(data, 'approvalRequestId', 128)
+        && isOptionalString(data, 'delegationDocumentId', 128)
+        && data.startedAt is string && data.startedAt.size() <= 40
+        && isOptionalString(data, 'endedAt', 40)
+        && isOptionalNum(data, 'startOdometer')
+        && isOptionalNum(data, 'endOdometer')
+        && isOptionalString(data, 'fuelLevelStart', 32)
+        && isOptionalString(data, 'fuelLevelEnd', 32)
+        && isOptionalString(data, 'custodyNotes', 1000)
+        && isOptionalString(data, 'previousCustodyId', 128)
+        && isValidId(data.createdByUid)
+        && isValidAllowedUids(data.allowedUids)
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidVehicleHandover(data, docId) {
+      return data.keys().hasAll([
+          'handoverId', 'handoverNumber', 'vehicleInternalId', 'plateNumber', 'riderId', 'riderName',
+          'handoverType', 'status', 'handoverDate', 'handoverTime', 'fuelLevel', 'overallCondition',
+          'checklist', 'accessories', 'photoSlots', 'riderAcknowledged', 'supervisorUid', 'supervisorName',
+          'createdByUid', 'allowedUids', 'createdAt', 'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'handoverId', 'handoverNumber', 'vehicleInternalId', 'plateNumber', 'riderId', 'riderName',
+          'custodyId', 'approvalRequestId', 'handoverType', 'status', 'handoverDate', 'handoverTime',
+          'odometer', 'fuelLevel', 'overallCondition', 'notes', 'checklist', 'accessories', 'photoSlots',
+          'riderAcknowledged', 'riderAcknowledgmentMethod', 'supervisorUid', 'supervisorName',
+          'approvedByUid', 'approvedByEmail', 'approvedAt', 'pdfDocId', 'customFields',
+          'createdByUid', 'allowedUids', 'createdAt', 'updatedAt'
+        ])
+        && data.handoverId == docId && isValidId(data.handoverId)
+        && isValidId(data.vehicleInternalId)
+        && data.handoverType in ['new_handover', 'reassignment', 'temporary', 'transfer']
+        && data.status in ['draft', 'pending_approval', 'completed', 'rejected', 'cancelled']
+        && isValidIsoDate(data.handoverDate)
+        && data.checklist is list && data.checklist.size() <= 40
+        && data.accessories is list && data.accessories.size() <= 30
+        && data.photoSlots is list && data.photoSlots.size() <= 20
+        && data.riderAcknowledged is bool
+        && isValidId(data.supervisorUid)
+        && isValidId(data.createdByUid)
+        && isValidAllowedUids(data.allowedUids)
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidVehicleReturn(data, docId) {
+      return data.keys().hasAll([
+          'returnId', 'returnNumber', 'custodyId', 'vehicleInternalId', 'plateNumber', 'riderId', 'riderName',
+          'status', 'returnDate', 'returnTime', 'fuelLevelAtReturn', 'overallCondition',
+          'checklist', 'accessories', 'photoSlots', 'damageDetected', 'recommendedNextStatus',
+          'inspectorUid', 'inspectorName', 'createdByUid', 'allowedUids', 'createdAt', 'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'returnId', 'returnNumber', 'custodyId', 'handoverId', 'vehicleInternalId', 'plateNumber',
+          'riderId', 'riderName', 'status', 'returnDate', 'returnTime', 'odometerAtReturn',
+          'fuelLevelAtReturn', 'distanceDriven', 'overallCondition', 'checklist', 'accessories', 'photoSlots',
+          'damageDetected', 'damageSummary', 'damageClaimId', 'recommendedNextStatus', 'finalVehicleStatus',
+          'inspectorUid', 'inspectorName', 'approvedByUid', 'approvedByEmail', 'approvedAt',
+          'pdfDocId', 'notes', 'createdByUid', 'allowedUids', 'createdAt', 'updatedAt'
+        ])
+        && data.returnId == docId && isValidId(data.returnId)
+        && isValidId(data.custodyId)
+        && isValidId(data.vehicleInternalId)
+        && data.status in ['draft', 'pending_inspection', 'pending_approval', 'completed', 'rejected']
+        && isValidIsoDate(data.returnDate)
+        && data.checklist is list && data.checklist.size() <= 40
+        && data.accessories is list && data.accessories.size() <= 30
+        && data.photoSlots is list && data.photoSlots.size() <= 20
+        && data.damageDetected is bool
+        && data.recommendedNextStatus in ['available', 'maintenance', 'stopped']
+        && isValidId(data.inspectorUid)
+        && isValidId(data.createdByUid)
+        && isValidAllowedUids(data.allowedUids)
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidVehicleStatusHistory(data, docId) {
+      return data.keys().hasAll(['historyId', 'vehicleInternalId', 'plateNumber', 'fromStatus', 'toStatus', 'reason', 'changedByUid', 'changedByEmail', 'changedAt', 'allowedUids'])
+        && data.keys().hasOnly([
+          'historyId', 'vehicleInternalId', 'plateNumber', 'fromStatus', 'toStatus', 'reason',
+          'relatedEntityType', 'relatedEntityId', 'changedByUid', 'changedByEmail', 'changedAt', 'allowedUids'
+        ])
+        && data.historyId == docId && isValidId(data.historyId)
+        && isValidId(data.vehicleInternalId)
+        && data.reason is string && data.reason.size() >= 1 && data.reason.size() <= 500
+        && isValidId(data.changedByUid)
+        && isValidAllowedUids(data.allowedUids);
+    }
+
+    function isValidVehicleMovementHistory(data, docId) {
+      return data.keys().hasAll(['movementId', 'vehicleInternalId', 'plateNumber', 'movementType', 'summaryAr', 'actorUid', 'actorEmail', 'occurredAt', 'allowedUids'])
+        && data.keys().hasOnly([
+          'movementId', 'vehicleInternalId', 'plateNumber', 'movementType', 'summaryAr',
+          'riderId', 'riderName', 'fromBranch', 'toBranch', 'odometer', 'referenceType', 'referenceId',
+          'actorUid', 'actorEmail', 'occurredAt', 'allowedUids'
+        ])
+        && data.movementId == docId && isValidId(data.movementId)
+        && isValidId(data.vehicleInternalId)
+        && data.summaryAr is string && data.summaryAr.size() >= 1 && data.summaryAr.size() <= 500
+        && isValidId(data.actorUid)
+        && isValidAllowedUids(data.allowedUids);
+    }
+
+    function isValidFleetApprovalRequest(data, docId) {
+      return data.keys().hasAll([
+          'requestId', 'requestNumber', 'requestType', 'vehicleInternalId', 'plateNumber',
+          'status', 'requestedByUid', 'requestedByEmail', 'requestedAt',
+          'createdByUid', 'allowedUids', 'createdAt', 'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'requestId', 'requestNumber', 'requestType', 'vehicleInternalId', 'plateNumber',
+          'riderId', 'riderName', 'custodyId', 'targetEntityType', 'targetEntityId',
+          'branch', 'city', 'status', 'requestedByUid', 'requestedByEmail', 'requestedAt',
+          'requestReason', 'operationsDecision', 'operationsByUid', 'operationsByEmail', 'operationsAt', 'operationsNote',
+          'adminDecision', 'adminByUid', 'adminByEmail', 'adminAt', 'adminNote',
+          'delegationDocId', 'delegationNumber', 'delegationStartDate', 'delegationExpiryDate',
+          'estimatedAmount', 'metadata', 'createdByUid', 'allowedUids', 'createdAt', 'updatedAt'
+        ])
+        && data.requestId == docId && isValidId(data.requestId)
+        && isValidId(data.vehicleInternalId)
+        && data.requestType in ['vehicle_assignment', 'vehicle_delegation', 'handover_release', 'return_clearance', 'maintenance_cost', 'vehicle_transfer', 'damage_claim_settlement']
+        && data.status in ['pending_operations', 'pending_admin', 'pending_delegation', 'approved', 'rejected', 'cancelled', 'completed']
+        && isValidId(data.createdByUid)
+        && isValidAllowedUids(data.allowedUids)
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidVehicleDocument(data, docId) {
+      return data.keys().hasAll([
+          'vehicleDocId', 'vehicleInternalId', 'plateNumber', 'docCategory', 'titleAr',
+          'approvalStatus', 'isMandatoryForDispatch', 'createdByUid', 'allowedUids', 'createdAt', 'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'vehicleDocId', 'vehicleInternalId', 'plateNumber', 'docCategory', 'titleAr',
+          'documentNumber', 'issuerName', 'issueDate', 'expiryDate', 'privateDocId',
+          'approvalStatus', 'approvedByUid', 'approvedAt', 'rejectionReason', 'isMandatoryForDispatch',
+          'notes', 'createdByUid', 'allowedUids', 'createdAt', 'updatedAt'
+        ])
+        && data.vehicleDocId == docId && isValidId(data.vehicleDocId)
+        && isValidId(data.vehicleInternalId)
+        && data.docCategory in ['istimara', 'insurance', 'periodic_inspection', 'operating_card', 'delegation', 'lease_contract', 'other']
+        && data.approvalStatus in ['pending', 'approved', 'rejected']
+        && data.isMandatoryForDispatch is bool
+        && isValidId(data.createdByUid)
+        && isValidAllowedUids(data.allowedUids)
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidVehicleDamageClaim(data, docId) {
+      return data.keys().hasAll([
+          'claimId', 'claimNumber', 'vehicleInternalId', 'plateNumber', 'severity', 'description',
+          'liability', 'status', 'createdByUid', 'allowedUids', 'createdAt', 'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'claimId', 'claimNumber', 'vehicleInternalId', 'plateNumber', 'custodyId', 'returnId',
+          'riderId', 'riderName', 'severity', 'description', 'estimatedRepairCost', 'actualRepairCost',
+          'liability', 'status', 'photoDocIds', 'maintenanceId', 'approvalRequestId',
+          'settledAt', 'settledByUid', 'notes', 'createdByUid', 'allowedUids', 'createdAt', 'updatedAt'
+        ])
+        && data.claimId == docId && isValidId(data.claimId)
+        && isValidId(data.vehicleInternalId)
+        && data.severity in ['minor', 'moderate', 'major', 'critical']
+        && data.liability in ['rider', 'company', 'third_party', 'insurance', 'under_review']
+        && data.status in ['open', 'awaiting_approval', 'in_repair', 'settled', 'closed']
+        && isValidId(data.createdByUid)
+        && isValidAllowedUids(data.allowedUids)
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidFleetNotification(data, docId) {
+      return data.keys().hasAll(['notificationId', 'type', 'severity', 'titleAr', 'messageAr', 'targetRoles', 'readByUids', 'createdAt', 'allowedUids'])
+        && data.keys().hasOnly([
+          'notificationId', 'type', 'severity', 'titleAr', 'messageAr',
+          'vehicleInternalId', 'plateNumber', 'riderId', 'referenceType', 'referenceId',
+          'targetRoles', 'readByUids', 'createdAt', 'allowedUids'
+        ])
+        && data.notificationId == docId && isValidId(data.notificationId)
+        && data.severity in ['info', 'warning', 'critical']
+        && data.targetRoles is list && data.targetRoles.size() <= 20
+        && data.readByUids is list && data.readByUids.size() <= 100
+        && isValidAllowedUids(data.allowedUids);
     }
 
     function isValidEntityNoteTask(data, docId) {
@@ -1595,7 +1875,7 @@ service cloud.firestore {
           'scoreWeightQuality', 'scoreWeightAcceptance', 'scoreWeightCancellation',
           'minActiveOrdersPerDay', 'minActiveHoursPerDay', 'caseOverdueDays',
           'configuredBranches', 'importMaxFiles', 'importAllowUpdates', 'importStrictDates',
-          'expiryAlertDays', 'customVehicleTypes',
+          'expiryAlertDays', 'customVehicleTypes', 'fleetConfig',
           'allowedUids', 'updatedByEmail', 'updatedAt'
         ]));
       allow delete: if isValidId(settingsId) && isAdmin();
@@ -2066,6 +2346,156 @@ service cloud.firestore {
         && incoming().createdAt == existing().createdAt
         && incoming().updatedAt == request.time;
       allow delete: if isValidId(templateId) && (isAdmin() || existing().createdByUid == request.auth.uid);
+    }
+
+    // ==========================================
+    // ENTERPRISE FLEET MANAGEMENT COLLECTIONS
+    // ==========================================
+
+    // 43. vehicleCustodies
+    match /vehicleCustodies/{custodyId} {
+      allow get: if isValidId(custodyId) && hasFleetGranularPerm('fleet.view', 'view');
+      allow list: if canListResource();
+      allow create: if isValidId(custodyId) && hasFleetGranularPerm('fleet.handover.create', 'add')
+        && isValidVehicleCustody(incoming(), custodyId)
+        && incoming().createdByUid == request.auth.uid
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time;
+      allow update: if isValidId(custodyId) && (hasFleetGranularPerm('fleet.handover.complete', 'edit') || hasFleetGranularPerm('fleet.return.complete', 'edit'))
+        && isValidVehicleCustody(incoming(), custodyId)
+        && incoming().createdByUid == existing().createdByUid
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time;
+      allow delete: if isValidId(custodyId) && isAdmin();
+    }
+
+    // 44. vehicleHandovers
+    match /vehicleHandovers/{handoverId} {
+      allow get: if isValidId(handoverId) && hasFleetGranularPerm('fleet.view', 'view');
+      allow list: if canListResource();
+      allow create: if isValidId(handoverId) && hasFleetGranularPerm('fleet.handover.create', 'add')
+        && isValidVehicleHandover(incoming(), handoverId)
+        && incoming().createdByUid == request.auth.uid
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time;
+      allow update: if isValidId(handoverId) && (hasFleetGranularPerm('fleet.handover.create', 'edit') || hasFleetGranularPerm('fleet.handover.complete', 'approve'))
+        && isValidVehicleHandover(incoming(), handoverId)
+        && incoming().createdByUid == existing().createdByUid
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time;
+      allow delete: if isValidId(handoverId) && isAdmin();
+    }
+
+    // 45. vehicleReturns
+    match /vehicleReturns/{returnId} {
+      allow get: if isValidId(returnId) && hasFleetGranularPerm('fleet.view', 'view');
+      allow list: if canListResource();
+      allow create: if isValidId(returnId) && hasFleetGranularPerm('fleet.return.create', 'add')
+        && isValidVehicleReturn(incoming(), returnId)
+        && incoming().createdByUid == request.auth.uid
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time;
+      allow update: if isValidId(returnId) && (hasFleetGranularPerm('fleet.return.create', 'edit') || hasFleetGranularPerm('fleet.return.complete', 'approve'))
+        && isValidVehicleReturn(incoming(), returnId)
+        && incoming().createdByUid == existing().createdByUid
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time;
+      allow delete: if isValidId(returnId) && isAdmin();
+    }
+
+    // 46. vehicleStatusHistory (Immutable Append-Only)
+    match /vehicleStatusHistory/{historyId} {
+      allow get: if isValidId(historyId) && hasFleetGranularPerm('fleet.view', 'view');
+      allow list: if canListResource();
+      allow create: if isValidId(historyId) && hasFleetGranularPerm('fleet.vehicle.edit', 'edit')
+        && isValidVehicleStatusHistory(incoming(), historyId)
+        && incoming().changedByUid == request.auth.uid;
+      allow update: if false;
+      allow delete: if false;
+    }
+
+    // 47. vehicleMovementHistory (Immutable Append-Only)
+    match /vehicleMovementHistory/{movementId} {
+      allow get: if isValidId(movementId) && hasFleetGranularPerm('fleet.view', 'view');
+      allow list: if canListResource();
+      allow create: if isValidId(movementId) && hasFleetGranularPerm('fleet.view', 'add')
+        && isValidVehicleMovementHistory(incoming(), movementId)
+        && incoming().actorUid == request.auth.uid;
+      allow update: if false;
+      allow delete: if false;
+    }
+
+    // 48. fleetApprovalRequests
+    match /fleetApprovalRequests/{requestId} {
+      allow get: if isValidId(requestId) && hasFleetGranularPerm('fleet.view', 'view');
+      allow list: if canListResource();
+      allow create: if isValidId(requestId) && hasFleetGranularPerm('fleet.assignment.request', 'add')
+        && isValidFleetApprovalRequest(incoming(), requestId)
+        && incoming().createdByUid == request.auth.uid
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time;
+      allow update: if isValidId(requestId) && (
+          hasFleetGranularPerm('fleet.assignment.approve_operations', 'approve')
+          || hasFleetGranularPerm('fleet.assignment.approve_admin', 'approve')
+          || hasFleetGranularPerm('fleet.delegation.manage', 'edit')
+          || hasFleetGranularPerm('fleet.maintenance.approve_cost', 'approve')
+        )
+        && isValidFleetApprovalRequest(incoming(), requestId)
+        && incoming().createdByUid == existing().createdByUid
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time;
+      allow delete: if isValidId(requestId) && isAdmin();
+    }
+
+    // 49. vehicleDocuments
+    match /vehicleDocuments/{vehicleDocId} {
+      allow get: if isValidId(vehicleDocId) && hasFleetGranularPerm('fleet.view', 'view');
+      allow list: if canListResource();
+      allow create: if isValidId(vehicleDocId) && hasFleetGranularPerm('fleet.docs.manage', 'add')
+        && isValidVehicleDocument(incoming(), vehicleDocId)
+        && incoming().createdByUid == request.auth.uid
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time;
+      allow update: if isValidId(vehicleDocId) && (hasFleetGranularPerm('fleet.docs.manage', 'edit') || hasFleetGranularPerm('fleet.docs.approve', 'approve'))
+        && isValidVehicleDocument(incoming(), vehicleDocId)
+        && incoming().createdByUid == existing().createdByUid
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time;
+      allow delete: if isValidId(vehicleDocId) && (isAdmin() || hasFleetGranularPerm('fleet.docs.manage', 'delete'));
+    }
+
+    // 50. vehicleDamageClaims
+    match /vehicleDamageClaims/{claimId} {
+      allow get: if isValidId(claimId) && hasFleetGranularPerm('fleet.view', 'view');
+      allow list: if canListResource();
+      allow create: if isValidId(claimId) && (hasFleetGranularPerm('fleet.return.create', 'add') || hasFleetGranularPerm('fleet.damage.manage', 'add'))
+        && isValidVehicleDamageClaim(incoming(), claimId)
+        && incoming().createdByUid == request.auth.uid
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time;
+      allow update: if isValidId(claimId) && hasFleetGranularPerm('fleet.damage.manage', 'edit')
+        && isValidVehicleDamageClaim(incoming(), claimId)
+        && incoming().createdByUid == existing().createdByUid
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time;
+      allow delete: if isValidId(claimId) && isAdmin();
+    }
+
+    // 51. fleetNotifications
+    match /fleetNotifications/{notificationId} {
+      allow get: if isValidId(notificationId) && hasFleetGranularPerm('fleet.view', 'view');
+      allow list: if canListResource();
+      allow create: if isValidId(notificationId) && isFleetStaff()
+        && isValidFleetNotification(incoming(), notificationId);
+      allow update: if isValidId(notificationId) && isActiveMember()
+        && isValidFleetNotification(incoming(), notificationId)
+        && incoming().diff(existing()).affectedKeys().hasOnly(['readByUids']);
+      allow delete: if isValidId(notificationId) && isAdmin();
+    }
+
+    // 52. idempotencyKeys (Server-Side Only)
+    match /idempotencyKeys/{idempotencyKey} {
+      allow read, write: if false;
     }
   }
 }

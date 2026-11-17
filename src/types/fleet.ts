@@ -53,12 +53,36 @@ export type CapabilityMap = Record<GranularCapability, boolean>;
 export type ModulePermissions = Record<PermissionAction, boolean>;
 export type PermissionMatrix = Record<PermissionModule, ModulePermissions>;
 
+export type FleetPermissionAction =
+  | 'fleet.view'
+  | 'fleet.create'
+  | 'fleet.edit'
+  | 'fleet.delete'
+  | 'fleet.documents.view'
+  | 'fleet.documents.upload'
+  | 'fleet.documents.approve'
+  | 'fleet.handover.create'
+  | 'fleet.handover.approve'
+  | 'fleet.return.create'
+  | 'fleet.return.approve'
+  | 'fleet.assignment.request'
+  | 'fleet.assignment.operations_approve'
+  | 'fleet.assignment.admin_approve'
+  | 'fleet.maintenance.create'
+  | 'fleet.maintenance.approve'
+  | 'fleet.reports.view'
+  | 'fleet.reports.export'
+  | 'fleet.settings.manage';
+
+export type FleetPermissionMap = Record<FleetPermissionAction, boolean>;
+
 export interface DataScope {
   allBranches: boolean;
   branches: string[];
   cities: string[];
   platforms: string[];
   riderIds: string[];
+  vehicleIds?: string[];
 }
 
 export interface RoleTemplate {
@@ -69,6 +93,7 @@ export interface RoleTemplate {
   isSystemPreset: boolean;
   permissions: PermissionMatrix;
   capabilities?: Partial<CapabilityMap>;
+  fleetPermissions?: Partial<FleetPermissionMap>;
   createdByUid: string;
   allowedUids: string[];
   createdAt?: string;
@@ -89,6 +114,7 @@ export interface UserProfile {
   dataScope?: DataScope;
   permissionOverrides?: Partial<Record<PermissionModule, Partial<ModulePermissions>>>;
   capabilityOverrides?: Partial<CapabilityMap>;
+  fleetPermissionOverrides?: Partial<FleetPermissionMap>;
   managedByAdminUids?: string[];
   createdAt?: string;
   updatedAt?: string;
@@ -542,6 +568,7 @@ export interface OperationalSettings {
   keetaHidden?: boolean;
   expiryAlertDays?: number[];
   customVehicleTypes?: string[];
+  fleetConfig?: FleetConfigSettings;
   createdByUid: string;
   allowedUids: string[];
   updatedByEmail?: string;
@@ -764,7 +791,17 @@ export interface DocumentVersionEntry {
 
 export interface PrivateDocumentRecord {
   docId: string;
-  entityType: 'rider' | 'vehicle' | 'handover' | 'custom_field' | 'branding';
+  entityType:
+    | 'rider'
+    | 'vehicle'
+    | 'handover'
+    | 'return'
+    | 'maintenance'
+    | 'delegation'
+    | 'damage_claim'
+    | 'vehicle_doc'
+    | 'custom_field'
+    | 'branding';
   entityId: string;
   entityLabel?: string;
   docTypeId: string;
@@ -826,25 +863,49 @@ export interface PlatformAccount {
 export type VehicleStatus =
   | 'available'
   | 'assigned'
+  | 'reserved'
+  | 'pending_return_inspection'
   | 'maintenance'
+  | 'stopped'
+  | 'retired'
   | 'out_of_service'
   | 'leased_out'
   | 'ended';
 
 export type VehicleOwnershipType = 'owned' | 'leased';
+export type VehicleSourceType = 'owned' | 'leased' | 'other';
+export type VehicleFuelType = 'petrol' | 'diesel' | 'hybrid' | 'electric';
+export type DocumentComplianceStatus =
+  | 'valid'
+  | 'not_started'
+  | 'expiring_soon'
+  | 'expired'
+  | 'missing'
+  | 'pending_review'
+  | 'rejected';
 
 export interface VehicleMaster {
   vehicleInternalId: string;
   plateNumber: string;
+  plateNumberNormalized?: string;
   vehicleType: string;
   make: string;
   model: string;
   year: number | null;
   color?: string;
   vin?: string;
+  vinNormalized?: string;
   ownershipType: VehicleOwnershipType;
+  sourceType?: VehicleSourceType;
   ownerOrLeasingCompany?: string;
+  branch?: string;
+  city?: string;
+  fuelType?: VehicleFuelType;
+  currentOdometer?: number | null;
   status: VehicleStatus;
+  legacyStatus?: string;
+  stopReason?: string;
+  stoppedAt?: string;
   istimaraNumber?: string;
   istimaraExpiryDate?: string;
   insuranceCompany?: string;
@@ -853,6 +914,10 @@ export interface VehicleMaster {
   periodicInspectionExpiryDate?: string;
   currentRiderId?: string;
   currentAssignmentId?: string;
+  activeCustodyId?: string;
+  reservedForRequestId?: string;
+  readyToDispatch?: boolean;
+  blockingReasons?: string[];
   notes?: string;
   customFields?: Record<string, unknown>;
   createdByUid: string;
@@ -893,23 +958,401 @@ export interface VehicleAssignment {
   updatedAt?: string;
 }
 
+export type MaintenanceWorkflowStatus =
+  | 'open'
+  | 'in_progress'
+  | 'awaiting_approval'
+  | 'completed'
+  | 'cancelled';
+
 export interface VehicleMaintenanceRecord {
   maintenanceId: string;
+  workOrderNumber?: string;
   vehicleInternalId: string;
   plateNumber: string;
   maintenanceType: string;
   maintenanceDate: string;
+  workflowStatus?: MaintenanceWorkflowStatus;
+  custodyId?: string;
+  riderId?: string;
   cost: number | null;
+  estimatedCost?: number | null;
+  actualCost?: number | null;
   odometer: number | null;
   workshop?: string;
   details?: string;
   nextMaintenanceDate?: string;
   nextMaintenanceOdometer?: number | null;
+  completedAt?: string;
+  completedOdometer?: number | null;
+  invoiceDocId?: string;
+  approvalRequestId?: string;
+  approvedByUid?: string;
+  approvedByEmail?: string;
+  approvedAt?: string;
+  vehicleWasStopped?: boolean;
   customFields?: Record<string, unknown>;
   createdByUid: string;
   allowedUids: string[];
   createdAt?: string;
   updatedAt?: string;
+}
+
+// ==========================================
+// ENTERPRISE FLEET MANAGEMENT UPGRADE TYPES
+// ==========================================
+
+export type VehicleCustodyStatus =
+  | 'active'
+  | 'pending_return'
+  | 'returned'
+  | 'transferred'
+  | 'cancelled';
+
+export interface VehicleCustody {
+  custodyId: string;
+  custodyNumber: string;
+  vehicleInternalId: string;
+  plateNumber: string;
+  riderId: string;
+  riderName: string;
+  branch?: string;
+  city?: string;
+  status: VehicleCustodyStatus;
+  handoverId: string;
+  returnId?: string;
+  assignmentId?: string;
+  approvalRequestId?: string;
+  delegationDocumentId?: string;
+  startedAt: string;
+  endedAt?: string;
+  startOdometer: number | null;
+  endOdometer?: number | null;
+  fuelLevelStart?: string;
+  fuelLevelEnd?: string;
+  custodyNotes?: string;
+  previousCustodyId?: string;
+  createdByUid: string;
+  allowedUids: string[];
+  createdAt?: string;
+  updatedAt?: string;
+}
+
+export interface InspectionCheckItem {
+  itemKey: string;
+  labelAr: string;
+  status: 'ok' | 'issue' | 'missing' | 'na';
+  notes?: string;
+}
+
+export interface AccessoryCheckItem {
+  accessoryKey: string;
+  labelAr: string;
+  present: boolean;
+  condition?: 'good' | 'worn' | 'damaged';
+  notes?: string;
+}
+
+export interface PhotoEvidenceSlot {
+  slotKey: string;
+  labelAr: string;
+  docId: string;
+  fileName?: string;
+  uploadedAt?: string;
+}
+
+export interface VehicleHandoverRecord {
+  handoverId: string;
+  handoverNumber: string;
+  vehicleInternalId: string;
+  plateNumber: string;
+  riderId: string;
+  riderName: string;
+  custodyId?: string;
+  approvalRequestId?: string;
+  handoverType: 'new_handover' | 'reassignment' | 'temporary' | 'transfer';
+  status: 'draft' | 'pending_approval' | 'completed' | 'rejected' | 'cancelled';
+  handoverDate: string;
+  handoverTime: string;
+  odometer: number | null;
+  fuelLevel: string;
+  overallCondition: string;
+  notes?: string;
+  checklist: InspectionCheckItem[];
+  accessories: AccessoryCheckItem[];
+  photoSlots: PhotoEvidenceSlot[];
+  riderAcknowledged: boolean;
+  riderAcknowledgmentMethod?: 'signature' | 'otp' | 'verbal_confirmed' | 'paper_signed';
+  supervisorUid: string;
+  supervisorName: string;
+  approvedByUid?: string;
+  approvedByEmail?: string;
+  approvedAt?: string;
+  pdfDocId?: string;
+  customFields?: Record<string, unknown>;
+  createdByUid: string;
+  allowedUids: string[];
+  createdAt?: string;
+  updatedAt?: string;
+}
+
+export interface VehicleReturnRecord {
+  returnId: string;
+  returnNumber: string;
+  custodyId: string;
+  handoverId?: string;
+  vehicleInternalId: string;
+  plateNumber: string;
+  riderId: string;
+  riderName: string;
+  status: 'draft' | 'pending_inspection' | 'pending_approval' | 'completed' | 'rejected';
+  returnDate: string;
+  returnTime: string;
+  odometerAtReturn: number | null;
+  fuelLevelAtReturn: string;
+  distanceDriven?: number | null;
+  overallCondition: string;
+  checklist: InspectionCheckItem[];
+  accessories: AccessoryCheckItem[];
+  photoSlots: PhotoEvidenceSlot[];
+  damageDetected: boolean;
+  damageSummary?: string;
+  damageClaimId?: string;
+  recommendedNextStatus: 'available' | 'maintenance' | 'stopped';
+  finalVehicleStatus?: VehicleStatus;
+  inspectorUid: string;
+  inspectorName: string;
+  approvedByUid?: string;
+  approvedByEmail?: string;
+  approvedAt?: string;
+  pdfDocId?: string;
+  notes?: string;
+  createdByUid: string;
+  allowedUids: string[];
+  createdAt?: string;
+  updatedAt?: string;
+}
+
+export interface VehicleStatusHistoryEntry {
+  historyId: string;
+  vehicleInternalId: string;
+  plateNumber: string;
+  fromStatus: VehicleStatus | 'none';
+  toStatus: VehicleStatus;
+  reason: string;
+  relatedEntityType?: 'vehicle' | 'handover' | 'return' | 'maintenance' | 'approval' | 'custody' | 'migration';
+  relatedEntityId?: string;
+  changedByUid: string;
+  changedByEmail: string;
+  changedAt: string;
+  allowedUids: string[];
+}
+
+export interface VehicleMovementHistoryEntry {
+  movementId: string;
+  vehicleInternalId: string;
+  plateNumber: string;
+  movementType:
+    | 'vehicle_created'
+    | 'vehicle_updated'
+    | 'status_changed'
+    | 'assignment_requested'
+    | 'ops_approved'
+    | 'admin_approved'
+    | 'delegation_uploaded'
+    | 'handover_completed'
+    | 'return_initiated'
+    | 'return_completed'
+    | 'custody_transferred'
+    | 'maintenance_opened'
+    | 'maintenance_completed'
+    | 'damage_recorded'
+    | 'document_updated';
+  summaryAr: string;
+  riderId?: string;
+  riderName?: string;
+  fromBranch?: string;
+  toBranch?: string;
+  odometer?: number | null;
+  referenceType?: string;
+  referenceId?: string;
+  actorUid: string;
+  actorEmail: string;
+  occurredAt: string;
+  allowedUids: string[];
+}
+
+export type FleetApprovalRequestType =
+  | 'vehicle_assignment'
+  | 'vehicle_delegation'
+  | 'handover_release'
+  | 'return_clearance'
+  | 'maintenance_cost'
+  | 'vehicle_transfer'
+  | 'damage_claim_settlement';
+
+export type FleetApprovalStatus =
+  | 'pending_operations'
+  | 'pending_admin'
+  | 'pending_delegation'
+  | 'approved'
+  | 'rejected'
+  | 'cancelled'
+  | 'completed';
+
+export interface FleetApprovalRequest {
+  requestId: string;
+  requestNumber: string;
+  requestType: FleetApprovalRequestType;
+  vehicleInternalId: string;
+  plateNumber: string;
+  riderId?: string;
+  riderName?: string;
+  custodyId?: string;
+  targetEntityType?: string;
+  targetEntityId?: string;
+  branch?: string;
+  city?: string;
+  status: FleetApprovalStatus;
+  requestedByUid: string;
+  requestedByEmail: string;
+  requestedAt: string;
+  requestReason?: string;
+  operationsDecision?: 'approved' | 'rejected';
+  operationsByUid?: string;
+  operationsByEmail?: string;
+  operationsAt?: string;
+  operationsNote?: string;
+  adminDecision?: 'approved' | 'rejected';
+  adminByUid?: string;
+  adminByEmail?: string;
+  adminAt?: string;
+  adminNote?: string;
+  delegationDocId?: string;
+  delegationNumber?: string;
+  delegationStartDate?: string;
+  delegationExpiryDate?: string;
+  estimatedAmount?: number | null;
+  metadata?: Record<string, unknown>;
+  createdByUid: string;
+  allowedUids: string[];
+  createdAt?: string;
+  updatedAt?: string;
+}
+
+export type VehicleDocumentCategory =
+  | 'istimara'
+  | 'insurance'
+  | 'periodic_inspection'
+  | 'operating_card'
+  | 'delegation'
+  | 'lease_contract'
+  | 'other';
+
+export interface VehicleDocumentRecord {
+  vehicleDocId: string;
+  vehicleInternalId: string;
+  plateNumber: string;
+  docCategory: VehicleDocumentCategory;
+  titleAr: string;
+  documentNumber?: string;
+  issuerName?: string;
+  issueDate?: string;
+  expiryDate?: string;
+  privateDocId?: string;
+  approvalStatus: 'pending' | 'approved' | 'rejected';
+  approvedByUid?: string;
+  approvedAt?: string;
+  rejectionReason?: string;
+  isMandatoryForDispatch: boolean;
+  notes?: string;
+  createdByUid: string;
+  allowedUids: string[];
+  createdAt?: string;
+  updatedAt?: string;
+}
+
+export interface VehicleDamageClaim {
+  claimId: string;
+  claimNumber: string;
+  vehicleInternalId: string;
+  plateNumber: string;
+  custodyId?: string;
+  returnId?: string;
+  riderId?: string;
+  riderName?: string;
+  severity: 'minor' | 'moderate' | 'major' | 'critical';
+  description: string;
+  estimatedRepairCost: number | null;
+  actualRepairCost?: number | null;
+  liability: 'rider' | 'company' | 'third_party' | 'insurance' | 'under_review';
+  status: 'open' | 'awaiting_approval' | 'in_repair' | 'settled' | 'closed';
+  photoDocIds?: string[];
+  maintenanceId?: string;
+  approvalRequestId?: string;
+  settledAt?: string;
+  settledByUid?: string;
+  notes?: string;
+  createdByUid: string;
+  allowedUids: string[];
+  createdAt?: string;
+  updatedAt?: string;
+}
+
+export interface FleetNotificationRecord {
+  notificationId: string;
+  type:
+    | 'approval_needed'
+    | 'approval_decided'
+    | 'delegation_expiring'
+    | 'document_expiring'
+    | 'document_expired'
+    | 'maintenance_due'
+    | 'damage_reported'
+    | 'custody_changed'
+    | 'status_changed';
+  severity: 'info' | 'warning' | 'critical';
+  titleAr: string;
+  messageAr: string;
+  vehicleInternalId?: string;
+  plateNumber?: string;
+  riderId?: string;
+  referenceType?: string;
+  referenceId?: string;
+  targetRoles: string[];
+  readByUids: string[];
+  createdAt: string;
+  allowedUids: string[];
+}
+
+export interface IdempotencyRecord {
+  idempotencyKey: string;
+  endpoint: string;
+  actorUid: string;
+  statusCode: number;
+  responseBody: unknown;
+  createdAt: string;
+  expiresAt: string;
+}
+
+export interface FleetConfigSettings {
+  mandatoryDocCategories: VehicleDocumentCategory[];
+  documentAlertDays: number[];
+  delegationAlertDays: number[];
+  maintenanceAlertDays: number;
+  maintenanceAlertKm: number;
+  singleVehiclePerRider: boolean;
+  strictSeparationOfDuties: boolean;
+  requireOpsAndAdminForDelegation: boolean;
+  requirePhotosOnHandover: boolean;
+  requirePhotosOnReturn: boolean;
+  mandatoryPhotoSlots: Array<{ slotKey: string; labelAr: string; required: boolean }>;
+  defaultChecklistItems: Array<{ itemKey: string; labelAr: string }>;
+  defaultAccessories: Array<{ accessoryKey: string; labelAr: string }>;
+  companyReportHeader?: {
+    showLogo: boolean;
+    footerDisclaimerAr?: string;
+  };
 }
 
 export type EntityNoteTargetType = 'general' | 'rider' | 'vehicle' | 'platform_account';

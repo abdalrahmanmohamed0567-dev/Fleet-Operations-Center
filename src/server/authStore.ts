@@ -4,6 +4,7 @@ import path from 'path';
 import type {
   CapabilityMap,
   DataScope,
+  FleetPermissionMap,
   PermissionMatrix,
   Platform,
   RoleTemplate,
@@ -13,10 +14,12 @@ import type {
 import {
   BOOTSTRAPPED_OWNER_EMAIL_LOWER,
   createFullCapabilities,
+  createFullFleetPermissions,
   createFullPermissionMatrix,
   mapTemplateToLegacyRole,
   resolveDataScope,
   resolveEffectiveCapabilities,
+  resolveEffectiveFleetPermissions,
   resolveEffectivePermissions,
 } from '../shared/rbacCore.js';
 import { getLocalDoc, listLocalCollection, setLocalDoc } from './localStore.js';
@@ -45,6 +48,7 @@ export interface StoredAuthUser {
   dataScope?: DataScope;
   permissionOverrides?: UserProfile['permissionOverrides'];
   capabilityOverrides?: UserProfile['capabilityOverrides'];
+  fleetPermissionOverrides?: UserProfile['fleetPermissionOverrides'];
   managedByAdminUids?: string[];
   createdAt: string;
   updatedAt: string;
@@ -61,6 +65,7 @@ export interface ServerVerifiedUser {
   allowedPlatforms: Platform[];
   permissions: PermissionMatrix;
   capabilities: CapabilityMap;
+  fleetPermissions: FleetPermissionMap;
   dataScope: DataScope;
 }
 
@@ -172,6 +177,7 @@ export function toPublicUserProfile(u: StoredAuthUser): UserProfile {
     dataScope: u.dataScope,
     permissionOverrides: u.permissionOverrides,
     capabilityOverrides: u.capabilityOverrides,
+    fleetPermissionOverrides: u.fleetPermissionOverrides,
     managedByAdminUids: u.managedByAdminUids,
     createdAt: u.createdAt,
     updatedAt: u.updatedAt,
@@ -320,13 +326,15 @@ export async function verifySessionTokenToUser(token: string): Promise<ServerVer
       allowedPlatforms: ['hungerstation', 'keeta'],
       permissions: createFullPermissionMatrix(),
       capabilities: createFullCapabilities(),
-      dataScope: { allBranches: true, branches: [], cities: [], platforms: [], riderIds: [] },
+      fleetPermissions: createFullFleetPermissions(),
+      dataScope: { allBranches: true, branches: [], cities: [], platforms: [], riderIds: [], vehicleIds: [] },
     };
   }
 
   const roleTemplates = await listLocalCollection<RoleTemplate>('roleTemplates');
   const permissions = resolveEffectivePermissions(mergedProfile, roleTemplates);
   const capabilities = resolveEffectiveCapabilities(mergedProfile, roleTemplates);
+  const fleetPermissions = resolveEffectiveFleetPermissions(mergedProfile, roleTemplates);
   const dataScope = resolveDataScope(mergedProfile);
   const allowedPlatforms: Platform[] =
     mergedProfile.role === 'admin'
@@ -346,6 +354,7 @@ export async function verifySessionTokenToUser(token: string): Promise<ServerVer
     allowedPlatforms,
     permissions,
     capabilities,
+    fleetPermissions,
     dataScope,
   };
 }
@@ -444,6 +453,7 @@ export async function updateUserAccount(
     dataScope?: DataScope;
     permissionOverrides?: UserProfile['permissionOverrides'];
     capabilityOverrides?: UserProfile['capabilityOverrides'];
+    fleetPermissionOverrides?: UserProfile['fleetPermissionOverrides'];
   }
 ): Promise<UserProfile> {
   return withAuthLock(async () => {
@@ -485,7 +495,7 @@ export async function updateUserAccount(
       ? 'owner'
       : patch.role ?? mapTemplateToLegacyRole(nextCustomRoleId);
     const nextScope = isOwner
-      ? { allBranches: true, branches: [], cities: [], platforms: [], riderIds: [] }
+      ? { allBranches: true, branches: [], cities: [], platforms: [], riderIds: [], vehicleIds: [] }
       : patch.dataScope ?? current.dataScope;
 
     const updated: StoredAuthUser = {
@@ -503,6 +513,7 @@ export async function updateUserAccount(
       assignedCity: nextScope?.cities?.[0] || '',
       permissionOverrides: isOwner ? {} : patch.permissionOverrides ?? current.permissionOverrides,
       capabilityOverrides: isOwner ? {} : patch.capabilityOverrides ?? current.capabilityOverrides,
+      fleetPermissionOverrides: isOwner ? {} : patch.fleetPermissionOverrides ?? current.fleetPermissionOverrides,
       updatedAt: new Date().toISOString(),
     };
 

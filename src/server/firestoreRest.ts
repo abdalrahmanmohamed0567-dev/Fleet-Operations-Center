@@ -4,6 +4,7 @@ import type {
   CapabilityMap,
   DailySummary,
   DataScope,
+  FleetPermissionMap,
   HungerDailyRecord,
   HungerDistanceDailyRecord,
   KeetaDashboardDaily,
@@ -18,11 +19,14 @@ import type {
 import {
   BOOTSTRAPPED_OWNER_EMAIL_LOWER,
   createEmptyCapabilities,
+  createEmptyFleetPermissions,
   createEmptyPermissionMatrix,
   createFullCapabilities,
+  createFullFleetPermissions,
   createFullPermissionMatrix,
   resolveDataScope,
   resolveEffectiveCapabilities,
+  resolveEffectiveFleetPermissions,
   resolveEffectivePermissions,
 } from '../shared/rbacCore.js';
 import type { ParsedCollectionRecord } from './excelParser.js';
@@ -82,6 +86,7 @@ export interface VerifiedAuthUser {
   allowedPlatforms: Platform[];
   permissions: PermissionMatrix;
   capabilities: CapabilityMap;
+  fleetPermissions: FleetPermissionMap;
   dataScope: DataScope;
 }
 
@@ -122,7 +127,8 @@ export async function verifyUserFromToken(idToken: string): Promise<VerifiedAuth
       allowedPlatforms: ['hungerstation', 'keeta'],
       permissions: createFullPermissionMatrix(),
       capabilities: createFullCapabilities(),
-      dataScope: { allBranches: true, branches: [], cities: [], platforms: [], riderIds: [] },
+      fleetPermissions: createFullFleetPermissions(),
+      dataScope: { allBranches: true, branches: [], cities: [], platforms: [], riderIds: [], vehicleIds: [] },
     };
   }
 
@@ -137,7 +143,8 @@ export async function verifyUserFromToken(idToken: string): Promise<VerifiedAuth
       allowedPlatforms: ['hungerstation', 'keeta'],
       permissions: createEmptyPermissionMatrix(),
       capabilities: createEmptyCapabilities(),
-      dataScope: { allBranches: false, branches: [], cities: [], platforms: [], riderIds: [] },
+      fleetPermissions: createEmptyFleetPermissions(),
+      dataScope: { allBranches: false, branches: [], cities: [], platforms: [], riderIds: [], vehicleIds: [] },
     };
   }
 
@@ -161,6 +168,7 @@ export async function verifyUserFromToken(idToken: string): Promise<VerifiedAuth
 
   const permissions = resolveEffectivePermissions({ ...typedProfile, email: user.email, role }, roleTemplates);
   const capabilities = resolveEffectiveCapabilities({ ...typedProfile, email: user.email, role }, roleTemplates);
+  const fleetPermissions = resolveEffectiveFleetPermissions({ ...typedProfile, email: user.email, role }, roleTemplates);
   const dataScope = resolveDataScope({ ...typedProfile, email: user.email, role });
 
   return {
@@ -173,6 +181,7 @@ export async function verifyUserFromToken(idToken: string): Promise<VerifiedAuth
     allowedPlatforms,
     permissions,
     capabilities,
+    fleetPermissions,
     dataScope,
   };
 }

@@ -57,13 +57,96 @@ export const EMPLOYEE_HR_STATUS_LABELS: Record<EmployeeHrStatus, string> = {
 };
 
 export const VEHICLE_STATUS_LABELS: Record<VehicleStatus, string> = {
-  available: 'متاحة',
+  available: 'متاحة للتسليم',
   assigned: 'مسلمة لمندوب',
+  reserved: 'محجوزة للتسليم',
+  pending_return_inspection: 'بانتظار فحص الاستلام',
   maintenance: 'تحت الصيانة',
+  stopped: 'متوقفة تشغيليًا',
+  retired: 'خارج الخدمة / متقاعدة',
   out_of_service: 'خارج الخدمة',
   leased_out: 'مؤجرة',
   ended: 'منتهية العلاقة',
 };
+
+export const VEHICLE_SOURCE_LABELS: Record<'owned' | 'leased' | 'other', string> = {
+  owned: 'ملك الشركة',
+  leased: 'مستأجرة',
+  other: 'أخرى',
+};
+
+export const DOCUMENT_COMPLIANCE_LABELS: Record<string, string> = {
+  valid: 'سارية',
+  not_started: 'لم تبدأ بعد',
+  expiring_soon: 'قريبة الانتهاء',
+  expired: 'منتهية',
+  missing: 'ناقصة',
+  pending_review: 'قيد المراجعة',
+  rejected: 'مرفوضة',
+};
+
+export const APPROVAL_STATUS_LABELS: Record<string, string> = {
+  pending_operations: 'بانتظار اعتماد التشغيل',
+  pending_admin: 'بانتظار الاعتماد الإداري',
+  pending_delegation: 'بانتظار إرفاق التفويض',
+  approved: 'معتمد وجاهز للتنفيذ',
+  rejected: 'مرفوض',
+  cancelled: 'ملغي',
+  completed: 'منفّذ ومكتمل',
+};
+
+export const APPROVAL_TYPE_LABELS: Record<string, string> = {
+  vehicle_assignment: 'ربط وتخصيص مركبة',
+  vehicle_delegation: 'تفويض قيادة مركبة',
+  handover_release: 'إفراج تسليم عهدة',
+  return_clearance: 'إخلاء طرف واستلام',
+  maintenance_cost: 'اعتماد تكلفة صيانة',
+  vehicle_transfer: 'نقل عهدة بين مناديب',
+  damage_claim_settlement: 'تسوية مطالبة ضرر',
+};
+
+export const MAINTENANCE_WORKFLOW_LABELS: Record<string, string> = {
+  open: 'أمر صيانة مفتوح',
+  in_progress: 'قيد التنفيذ',
+  awaiting_approval: 'بانتظار اعتماد التكلفة',
+  completed: 'منجز ومغلق',
+  cancelled: 'ملغي',
+};
+
+export const DAMAGE_SEVERITY_LABELS: Record<string, string> = {
+  minor: 'بسيط',
+  moderate: 'متوسط',
+  major: 'جسيم',
+  critical: 'حرج / شامل',
+};
+
+export const DAMAGE_LIABILITY_LABELS: Record<string, string> = {
+  rider: 'على المندوب',
+  company: 'على الشركة',
+  third_party: 'طرف ثالث',
+  insurance: 'شركة التأمين',
+  under_review: 'قيد التحقيق',
+};
+
+export const DAMAGE_STATUS_LABELS: Record<string, string> = {
+  open: 'بلاغ مفتوح',
+  awaiting_approval: 'بانتظار اعتماد التسوية',
+  in_repair: 'تحت الإصلاح',
+  settled: 'تمت التسوية',
+  closed: 'مغلق',
+};
+
+export function normalizeVehicleStatus(rawStatus?: string, hasActiveCustody?: boolean): VehicleStatus {
+  const st = String(rawStatus || '').trim();
+  if (st === 'out_of_service' || st === 'stopped') return 'stopped';
+  if (st === 'ended' || st === 'retired') return 'retired';
+  if (st === 'leased_out') return hasActiveCustody ? 'assigned' : 'available';
+  if (st === 'reserved') return 'reserved';
+  if (st === 'pending_return_inspection') return 'pending_return_inspection';
+  if (st === 'maintenance') return 'maintenance';
+  if (st === 'assigned') return 'assigned';
+  return 'available';
+}
 
 export const DEFAULT_EXPIRY_ALERT_DAYS = [90, 60, 30, 7, 0];
 
@@ -192,10 +275,11 @@ export function computeAllDocumentExpiries(params: {
     if (!d.expiryDate) continue;
     const days = computeDaysRemaining(d.expiryDate, params.refDateIso);
     if (days !== null && days <= maxThreshold) {
+      const isFleetDoc = ['vehicle', 'vehicle_doc', 'delegation', 'handover', 'return', 'maintenance', 'damage_claim'].includes(d.entityType);
       items.push({
         id: `doc_${d.docId}`,
-        domain: d.entityType === 'vehicle' ? 'fleet' : 'hr',
-        entityType: d.entityType === 'vehicle' ? 'vehicle' : 'rider',
+        domain: isFleetDoc ? 'fleet' : 'hr',
+        entityType: isFleetDoc ? 'vehicle' : 'rider',
         entityId: d.entityId,
         entityName: d.entityLabel || d.entityId,
         docCategory: d.docTypeName || d.title,

@@ -12,6 +12,7 @@ import { DEFAULT_COMPANY_BRANDING } from './lib/dynamicSchemaEngine';
 import {
   canAccessGlobalHub,
   db,
+  DEFAULT_FLEET_CONFIG,
   DEFAULT_OPERATIONAL_SETTINGS,
   ensureOperationalSettings,
   fetchCurrentSessionProfile,
@@ -20,6 +21,7 @@ import {
   logoutUser,
   syncAuthHandle,
 } from './lib/firebase';
+import { fetchFleetOverview, type VehicleAvailabilityItem } from './lib/fleetApi';
 import {
   buildUnifiedDailyRows,
   extractFilterOptions,
@@ -47,6 +49,9 @@ import type {
   EntityNoteTask,
   ErrorCodeDictionaryEntry,
   FilterState,
+  FleetApprovalRequest,
+  FleetConfigSettings,
+  FleetNotificationRecord,
   HungerDailyRecord,
   HungerDistanceDailyRecord,
   HungerQualityMonthly,
@@ -74,8 +79,15 @@ import type {
   TrashItemRecord,
   UserProfile,
   VehicleAssignment,
+  VehicleCustody,
+  VehicleDamageClaim,
+  VehicleDocumentRecord,
+  VehicleHandoverRecord,
   VehicleMaintenanceRecord,
   VehicleMaster,
+  VehicleMovementHistoryEntry,
+  VehicleReturnRecord,
+  VehicleStatusHistoryEntry,
   WorkspaceMode,
 } from './types/fleet';
 
@@ -280,6 +292,17 @@ export default function App() {
   const [vehicles, setVehicles] = useState<VehicleMaster[]>([]);
   const [vehicleAssignments, setVehicleAssignments] = useState<VehicleAssignment[]>([]);
   const [vehicleMaintenance, setVehicleMaintenance] = useState<VehicleMaintenanceRecord[]>([]);
+  const [fleetAvailability, setFleetAvailability] = useState<VehicleAvailabilityItem[]>([]);
+  const [vehicleCustodies, setVehicleCustodies] = useState<VehicleCustody[]>([]);
+  const [vehicleHandovers, setVehicleHandovers] = useState<VehicleHandoverRecord[]>([]);
+  const [vehicleReturns, setVehicleReturns] = useState<VehicleReturnRecord[]>([]);
+  const [vehicleDocuments, setVehicleDocuments] = useState<VehicleDocumentRecord[]>([]);
+  const [vehicleDamageClaims, setVehicleDamageClaims] = useState<VehicleDamageClaim[]>([]);
+  const [fleetApprovals, setFleetApprovals] = useState<FleetApprovalRequest[]>([]);
+  const [vehicleStatusHistory, setVehicleStatusHistory] = useState<VehicleStatusHistoryEntry[]>([]);
+  const [vehicleMovementHistory, setVehicleMovementHistory] = useState<VehicleMovementHistoryEntry[]>([]);
+  const [fleetNotifications, setFleetNotifications] = useState<FleetNotificationRecord[]>([]);
+  const [fleetConfig, setFleetConfig] = useState<FleetConfigSettings>(DEFAULT_FLEET_CONFIG);
   const [entityNotesTasks, setEntityNotesTasks] = useState<EntityNoteTask[]>([]);
 
   // Enterprise Customization & System Builder State
@@ -335,6 +358,10 @@ export default function App() {
       const allowHs = effectiveAllowedNow.includes('hungerstation');
       const allowKt = keetaActiveNow && effectiveAllowedNow.includes('keeta');
 
+      const canFetchFleetOverview =
+        hasPermission(profile, loadedRoles, 'fleet', 'view') ||
+        hasPermission(profile, loadedRoles, 'executive', 'view');
+
       const [
         hungerDaily,
         hungerDistanceDaily,
@@ -370,6 +397,7 @@ export default function App() {
         snapshotsList,
         reportTpls,
         viewsList,
+        fleetOverview,
       ] = await Promise.all([
         allowHs ? safeGetCollection<HungerDailyRecord>('hungerDaily', profile) : Promise.resolve([]),
         allowHs ? safeGetCollection<HungerDistanceDailyRecord>('hungerDistanceDaily', profile) : Promise.resolve([]),
@@ -405,6 +433,7 @@ export default function App() {
         safeGetCollection<ConfigSnapshotRecord>('configSnapshots', profile),
         safeGetCollection<CustomReportTemplate>('customReportTemplates', profile),
         safeGetCollection<SavedViewConfig>('savedViews', profile),
+        canFetchFleetOverview ? fetchFleetOverview().catch(() => null) : Promise.resolve(null),
       ]);
 
       let loadedBranding: CompanyBrandingDoc = {
@@ -466,9 +495,20 @@ export default function App() {
       setDocumentTypes(docTypes);
       setPrivateDocs(privDocs);
       setPlatformAccounts(platAccounts);
-      setVehicles(vehList);
-      setVehicleAssignments(vehAssignments);
-      setVehicleMaintenance(vehMaint);
+      setVehicles(fleetOverview?.vehicles ?? vehList);
+      setVehicleAssignments(fleetOverview?.assignments ?? vehAssignments);
+      setVehicleMaintenance(fleetOverview?.maintenance ?? vehMaint);
+      setFleetAvailability(fleetOverview?.availability ?? []);
+      setVehicleCustodies(fleetOverview?.custodies ?? []);
+      setVehicleHandovers(fleetOverview?.handovers ?? []);
+      setVehicleReturns(fleetOverview?.returns ?? []);
+      setVehicleDocuments(fleetOverview?.vehicleDocuments ?? []);
+      setVehicleDamageClaims(fleetOverview?.damageClaims ?? []);
+      setFleetApprovals(fleetOverview?.approvals ?? []);
+      setVehicleStatusHistory(fleetOverview?.statusHistory ?? []);
+      setVehicleMovementHistory(fleetOverview?.movementHistory ?? []);
+      setFleetNotifications(fleetOverview?.notifications ?? []);
+      setFleetConfig(fleetOverview?.fleetConfig ?? opSettings.fleetConfig ?? DEFAULT_FLEET_CONFIG);
       setEntityNotesTasks(notesTasks);
 
       setDynamicFields(dynFields);
@@ -599,6 +639,17 @@ export default function App() {
     setVehicles([]);
     setVehicleAssignments([]);
     setVehicleMaintenance([]);
+    setFleetAvailability([]);
+    setVehicleCustodies([]);
+    setVehicleHandovers([]);
+    setVehicleReturns([]);
+    setVehicleDocuments([]);
+    setVehicleDamageClaims([]);
+    setFleetApprovals([]);
+    setVehicleStatusHistory([]);
+    setVehicleMovementHistory([]);
+    setFleetNotifications([]);
+    setFleetConfig(DEFAULT_FLEET_CONFIG);
     setEntityNotesTasks([]);
     setCompanyBranding({ ...DEFAULT_COMPANY_BRANDING, createdByUid: '', allowedUids: [] });
     setDynamicFields([]);
@@ -723,12 +774,42 @@ export default function App() {
     [platformAccounts, keetaActive, userDataScope]
   );
 
+  const isVehicleScopeUnrestricted = useMemo(
+    () =>
+      userDataScope.allBranches &&
+      userDataScope.cities.length === 0 &&
+      userDataScope.riderIds.length === 0 &&
+      (!userDataScope.vehicleIds || userDataScope.vehicleIds.length === 0),
+    [userDataScope]
+  );
+
   const scopedVehicles = useMemo(() => {
-    if (userDataScope.allBranches && userDataScope.cities.length === 0 && userDataScope.riderIds.length === 0) {
+    if (isVehicleScopeUnrestricted) {
       return vehicles;
     }
-    return vehicles.filter((v) => !v.currentRiderId || scopedRiderIdSet.has(v.currentRiderId));
-  }, [vehicles, userDataScope, scopedRiderIdSet]);
+    return vehicles.filter((v) => {
+      if (userDataScope.vehicleIds && userDataScope.vehicleIds.length > 0 && !userDataScope.vehicleIds.includes(v.vehicleInternalId)) {
+        return false;
+      }
+      if (
+        !matchesDataScope(
+          {
+            branch: v.branch,
+            city: v.city,
+            internalRiderId: v.currentRiderId,
+            vehicleInternalId: v.vehicleInternalId,
+          },
+          userDataScope
+        )
+      ) {
+        return false;
+      }
+      if (userDataScope.riderIds.length > 0 && v.currentRiderId && !scopedRiderIdSet.has(v.currentRiderId)) {
+        return false;
+      }
+      return true;
+    });
+  }, [vehicles, isVehicleScopeUnrestricted, userDataScope, scopedRiderIdSet]);
 
   const scopedVehicleIdSet = useMemo(
     () => new Set(scopedVehicles.map((v) => v.vehicleInternalId)),
@@ -736,31 +817,113 @@ export default function App() {
   );
 
   const scopedVehicleAssignments = useMemo(() => {
-    if (userDataScope.allBranches && userDataScope.cities.length === 0 && userDataScope.riderIds.length === 0) {
+    if (isVehicleScopeUnrestricted) {
       return vehicleAssignments;
     }
     return vehicleAssignments.filter(
       (a) => scopedRiderIdSet.has(a.companyRiderId) || scopedVehicleIdSet.has(a.vehicleInternalId)
     );
-  }, [vehicleAssignments, userDataScope, scopedRiderIdSet, scopedVehicleIdSet]);
+  }, [vehicleAssignments, isVehicleScopeUnrestricted, scopedRiderIdSet, scopedVehicleIdSet]);
 
   const scopedVehicleMaintenance = useMemo(() => {
-    if (userDataScope.allBranches && userDataScope.cities.length === 0 && userDataScope.riderIds.length === 0) {
+    if (isVehicleScopeUnrestricted) {
       return vehicleMaintenance;
     }
     return vehicleMaintenance.filter((m) => scopedVehicleIdSet.has(m.vehicleInternalId));
-  }, [vehicleMaintenance, userDataScope, scopedVehicleIdSet]);
+  }, [vehicleMaintenance, isVehicleScopeUnrestricted, scopedVehicleIdSet]);
+
+  const scopedFleetAvailability = useMemo(
+    () =>
+      isVehicleScopeUnrestricted
+        ? fleetAvailability
+        : fleetAvailability.filter((a) => scopedVehicleIdSet.has(a.vehicleInternalId)),
+    [fleetAvailability, isVehicleScopeUnrestricted, scopedVehicleIdSet]
+  );
+
+  const scopedVehicleCustodies = useMemo(
+    () =>
+      isVehicleScopeUnrestricted
+        ? vehicleCustodies
+        : vehicleCustodies.filter(
+            (c) => scopedVehicleIdSet.has(c.vehicleInternalId) || scopedRiderIdSet.has(c.riderId)
+          ),
+    [vehicleCustodies, isVehicleScopeUnrestricted, scopedVehicleIdSet, scopedRiderIdSet]
+  );
+
+  const scopedVehicleDocuments = useMemo(
+    () =>
+      isVehicleScopeUnrestricted
+        ? vehicleDocuments
+        : vehicleDocuments.filter((d) => scopedVehicleIdSet.has(d.vehicleInternalId)),
+    [vehicleDocuments, isVehicleScopeUnrestricted, scopedVehicleIdSet]
+  );
+
+  const scopedStatusHistory = useMemo(
+    () =>
+      isVehicleScopeUnrestricted
+        ? vehicleStatusHistory
+        : vehicleStatusHistory.filter((h) => scopedVehicleIdSet.has(h.vehicleInternalId)),
+    [vehicleStatusHistory, isVehicleScopeUnrestricted, scopedVehicleIdSet]
+  );
+
+  const scopedMovementHistory = useMemo(
+    () =>
+      isVehicleScopeUnrestricted
+        ? vehicleMovementHistory
+        : vehicleMovementHistory.filter((h) => scopedVehicleIdSet.has(h.vehicleInternalId)),
+    [vehicleMovementHistory, isVehicleScopeUnrestricted, scopedVehicleIdSet]
+  );
+
+  const scopedFleetApprovals = useMemo(
+    () =>
+      isVehicleScopeUnrestricted
+        ? fleetApprovals
+        : fleetApprovals.filter((a) => scopedVehicleIdSet.has(a.vehicleInternalId)),
+    [fleetApprovals, isVehicleScopeUnrestricted, scopedVehicleIdSet]
+  );
+
+  const scopedVehicleHandovers = useMemo(
+    () =>
+      isVehicleScopeUnrestricted
+        ? vehicleHandovers
+        : vehicleHandovers.filter((h) => scopedVehicleIdSet.has(h.vehicleInternalId) || scopedRiderIdSet.has(h.riderId)),
+    [vehicleHandovers, isVehicleScopeUnrestricted, scopedVehicleIdSet, scopedRiderIdSet]
+  );
+
+  const scopedVehicleReturns = useMemo(
+    () =>
+      isVehicleScopeUnrestricted
+        ? vehicleReturns
+        : vehicleReturns.filter((r) => scopedVehicleIdSet.has(r.vehicleInternalId) || scopedRiderIdSet.has(r.riderId)),
+    [vehicleReturns, isVehicleScopeUnrestricted, scopedVehicleIdSet, scopedRiderIdSet]
+  );
+
+  const scopedDamageClaims = useMemo(
+    () =>
+      isVehicleScopeUnrestricted
+        ? vehicleDamageClaims
+        : vehicleDamageClaims.filter((c) => scopedVehicleIdSet.has(c.vehicleInternalId)),
+    [vehicleDamageClaims, isVehicleScopeUnrestricted, scopedVehicleIdSet]
+  );
+
+  const scopedFleetNotifications = useMemo(
+    () =>
+      isVehicleScopeUnrestricted
+        ? fleetNotifications
+        : fleetNotifications.filter((n) => !n.vehicleInternalId || scopedVehicleIdSet.has(n.vehicleInternalId)),
+    [fleetNotifications, isVehicleScopeUnrestricted, scopedVehicleIdSet]
+  );
 
   const scopedPrivateDocs = useMemo(() => {
-    if (userDataScope.allBranches && userDataScope.cities.length === 0 && userDataScope.riderIds.length === 0) {
+    if (isVehicleScopeUnrestricted) {
       return privateDocs;
     }
     return privateDocs.filter((d) =>
-      d.entityType === 'vehicle'
+      ['vehicle', 'vehicle_doc', 'delegation', 'handover', 'return', 'maintenance', 'damage_claim'].includes(d.entityType)
         ? scopedVehicleIdSet.has(d.entityId)
         : scopedRiderIdSet.has(d.entityId)
     );
-  }, [privateDocs, userDataScope, scopedVehicleIdSet, scopedRiderIdSet]);
+  }, [privateDocs, isVehicleScopeUnrestricted, scopedVehicleIdSet, scopedRiderIdSet]);
 
   const effectiveFilters: FilterState = useMemo(
     () => (lockedPlatform ? { ...filters, platform: lockedPlatform } : filters),
@@ -1095,9 +1258,13 @@ export default function App() {
 
           {(safeActiveNav === 'fleet_dashboard' ||
             safeActiveNav === 'fleet_vehicles' ||
+            safeActiveNav === 'fleet_assignments' ||
+            safeActiveNav === 'fleet_approvals' ||
             safeActiveNav === 'fleet_handover' ||
             safeActiveNav === 'fleet_docs' ||
-            safeActiveNav === 'fleet_maintenance') && (
+            safeActiveNav === 'fleet_maintenance' ||
+            safeActiveNav === 'fleet_reports' ||
+            safeActiveNav === 'fleet_settings') && (
             <FleetManagementModule
               key={safeActiveNav}
               vehicles={scopedVehicles}
@@ -1106,6 +1273,18 @@ export default function App() {
               riders={scopedDataset.riderMaster}
               privateDocs={scopedPrivateDocs}
               documentTypes={documentTypes}
+              availability={scopedFleetAvailability}
+              custodies={scopedVehicleCustodies}
+              handovers={scopedVehicleHandovers}
+              returns={scopedVehicleReturns}
+              approvals={scopedFleetApprovals}
+              damageClaims={scopedDamageClaims}
+              notifications={scopedFleetNotifications}
+              vehicleDocuments={scopedVehicleDocuments}
+              statusHistory={scopedStatusHistory}
+              movementHistory={scopedMovementHistory}
+              fleetConfig={fleetConfig}
+              companyBranding={companyBranding}
               settings={settings}
               currentUser={userProfile}
               roleTemplates={roleTemplates}
@@ -1115,6 +1294,7 @@ export default function App() {
               savedViews={savedViews}
               initialSubTab={safeActiveNav as FleetSubTab}
               onOpenRider360={openRider360ByCompanyId}
+              onNotificationsUpdated={(next) => setFleetNotifications(next)}
               onRefresh={() => loadAllOperationalData(userProfile)}
             />
           )}

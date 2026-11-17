@@ -94,9 +94,13 @@ export type NavKey =
   // الأسطول والمركبات
   | 'fleet_dashboard'
   | 'fleet_vehicles'
+  | 'fleet_assignments'
+  | 'fleet_approvals'
   | 'fleet_handover'
   | 'fleet_docs'
   | 'fleet_maintenance'
+  | 'fleet_reports'
+  | 'fleet_settings'
   // العمليات
   | 'operations'
   | 'riders'
@@ -269,9 +273,13 @@ export function getNavItemsForWorkspace(
     // 4. الأسطول
     { key: 'fleet_dashboard', label: 'لوحة تحكم الأسطول', sectionId: 'fleet', group: titleFor('fleet', 'إدارة الأسطول'), icon: Car, module: 'fleet' },
     { key: 'fleet_vehicles', label: 'سجل المركبات والسيارات', sectionId: 'fleet', group: titleFor('fleet', 'إدارة الأسطول'), icon: Truck, module: 'fleet' },
+    { key: 'fleet_assignments', label: 'الربط والتفويضات', sectionId: 'fleet', group: titleFor('fleet', 'إدارة الأسطول'), icon: Link2, module: 'fleet' },
+    { key: 'fleet_approvals', label: 'مركز اعتمادات الأسطول', sectionId: 'fleet', group: titleFor('fleet', 'إدارة الأسطول'), icon: FileCheck2, module: 'fleet' },
     { key: 'fleet_handover', label: 'عهدة التسليم والاستلام', sectionId: 'fleet', group: titleFor('fleet', 'إدارة الأسطول'), icon: ArrowLeftRight, module: 'fleet' },
     { key: 'fleet_docs', label: 'وثائق المركبات والانتهاء', sectionId: 'fleet', group: titleFor('fleet', 'إدارة الأسطول'), icon: FolderLock, module: 'fleet' },
-    { key: 'fleet_maintenance', label: 'سجل الصيانة والأعطال', sectionId: 'fleet', group: titleFor('fleet', 'إدارة الأسطول'), icon: Wrench, module: 'fleet' },
+    { key: 'fleet_maintenance', label: 'سجل الصيانة والأضرار', sectionId: 'fleet', group: titleFor('fleet', 'إدارة الأسطول'), icon: Wrench, module: 'fleet' },
+    { key: 'fleet_reports', label: 'تقارير الأسطول والطباعة', sectionId: 'fleet', group: titleFor('fleet', 'إدارة الأسطول'), icon: FileSpreadsheet, module: 'fleet' },
+    { key: 'fleet_settings', label: 'إعدادات وسياسات الأسطول', sectionId: 'fleet', group: titleFor('fleet', 'إدارة الأسطول'), icon: SlidersHorizontal, module: 'fleet' },
 
     // 5. العمليات والتقارير
     { key: 'operations', label: 'التحكم والحالات التشغيلية', sectionId: 'operations', group: titleFor('operations', 'العمليات والتقارير'), icon: SlidersHorizontal, module: 'operations' },

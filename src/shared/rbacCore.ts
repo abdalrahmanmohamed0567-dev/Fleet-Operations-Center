@@ -1,6 +1,8 @@
 import type {
   CapabilityMap,
   DataScope,
+  FleetPermissionAction,
+  FleetPermissionMap,
   GranularCapability,
   ModulePermissions,
   OperationalSettings,
@@ -57,6 +59,114 @@ export const GRANULAR_CAPABILITIES: Array<{ key: GranularCapability; labelAr: st
   { key: 'change_branding', labelAr: 'تعديل الهوية البصرية', descriptionAr: 'تغيير الألوان والشعار واسم النظام ونمط الدخول' },
   { key: 'manage_company', labelAr: 'إدارة بيانات الشركة', descriptionAr: 'تعديل السجل التجاري والرقم الضريبي وبيانات التواصل' },
 ];
+
+export const FLEET_GRANULAR_PERMISSIONS: Array<{
+  key: FleetPermissionAction;
+  labelAr: string;
+  groupAr: string;
+}> = [
+  { key: 'fleet.view', labelAr: 'عرض المركبات ولوحة الأسطول', groupAr: 'المركبات' },
+  { key: 'fleet.create', labelAr: 'إضافة مركبة جديدة', groupAr: 'المركبات' },
+  { key: 'fleet.edit', labelAr: 'تعديل بيانات وحالة المركبة', groupAr: 'المركبات' },
+  { key: 'fleet.delete', labelAr: 'أرشفة وحذف المركبات', groupAr: 'المركبات' },
+  { key: 'fleet.documents.view', labelAr: 'عرض وثائق المركبات والتفويض', groupAr: 'الوثائق' },
+  { key: 'fleet.documents.upload', labelAr: 'رفع وتجديد وثائق المركبات', groupAr: 'الوثائق' },
+  { key: 'fleet.documents.approve', labelAr: 'اعتماد ورفض وثائق المركبات', groupAr: 'الوثائق' },
+  { key: 'fleet.handover.create', labelAr: 'إنشاء محاضر تسليم العهدة', groupAr: 'العهد والتسليم' },
+  { key: 'fleet.handover.approve', labelAr: 'اعتماد تسليم العهدة', groupAr: 'العهد والتسليم' },
+  { key: 'fleet.return.create', labelAr: 'إنشاء فحص واستلام العهدة', groupAr: 'العهد والتسليم' },
+  { key: 'fleet.return.approve', labelAr: 'اعتماد استلام وإغلاق العهدة', groupAr: 'العهد والتسليم' },
+  { key: 'fleet.assignment.request', labelAr: 'رفع طلب ربط / تفويض مركبة', groupAr: 'الربط والاعتماد' },
+  { key: 'fleet.assignment.operations_approve', labelAr: 'اعتماد التشغيل المبدئي للربط', groupAr: 'الربط والاعتماد' },
+  { key: 'fleet.assignment.admin_approve', labelAr: 'الاعتماد الإداري النهائي للربط', groupAr: 'الربط والاعتماد' },
+  { key: 'fleet.maintenance.create', labelAr: 'فتح وتسجيل أوامر الصيانة والأضرار', groupAr: 'الصيانة' },
+  { key: 'fleet.maintenance.approve', labelAr: 'اعتماد تكاليف وإغلاق الصيانة', groupAr: 'الصيانة' },
+  { key: 'fleet.reports.view', labelAr: 'عرض تقارير وحركة الأسطول', groupAr: 'التقارير والإعدادات' },
+  { key: 'fleet.reports.export', labelAr: 'تصدير وطباعة تقارير الأسطول', groupAr: 'التقارير والإعدادات' },
+  { key: 'fleet.settings.manage', labelAr: 'إدارة سياسات وإعدادات الأسطول', groupAr: 'التقارير والإعدادات' },
+];
+
+export function createEmptyFleetPermissions(): FleetPermissionMap {
+  return {
+    'fleet.view': false,
+    'fleet.create': false,
+    'fleet.edit': false,
+    'fleet.delete': false,
+    'fleet.documents.view': false,
+    'fleet.documents.upload': false,
+    'fleet.documents.approve': false,
+    'fleet.handover.create': false,
+    'fleet.handover.approve': false,
+    'fleet.return.create': false,
+    'fleet.return.approve': false,
+    'fleet.assignment.request': false,
+    'fleet.assignment.operations_approve': false,
+    'fleet.assignment.admin_approve': false,
+    'fleet.maintenance.create': false,
+    'fleet.maintenance.approve': false,
+    'fleet.reports.view': false,
+    'fleet.reports.export': false,
+    'fleet.settings.manage': false,
+  };
+}
+
+export function createFullFleetPermissions(): FleetPermissionMap {
+  return {
+    'fleet.view': true,
+    'fleet.create': true,
+    'fleet.edit': true,
+    'fleet.delete': true,
+    'fleet.documents.view': true,
+    'fleet.documents.upload': true,
+    'fleet.documents.approve': true,
+    'fleet.handover.create': true,
+    'fleet.handover.approve': true,
+    'fleet.return.create': true,
+    'fleet.return.approve': true,
+    'fleet.assignment.request': true,
+    'fleet.assignment.operations_approve': true,
+    'fleet.assignment.admin_approve': true,
+    'fleet.maintenance.create': true,
+    'fleet.maintenance.approve': true,
+    'fleet.reports.view': true,
+    'fleet.reports.export': true,
+    'fleet.settings.manage': true,
+  };
+}
+
+export function deriveLegacyFleetPermissions(
+  matrix: PermissionMatrix,
+  roleOrTemplateId?: string
+): FleetPermissionMap {
+  const f = matrix?.fleet || makeModulePerm();
+  const docs = matrix?.documents || makeModulePerm();
+  const rep = matrix?.reports || makeModulePerm();
+  const setMod = matrix?.settings || makeModulePerm();
+  const isOpsMgr = roleOrTemplateId === 'operations_manager';
+  const isFleetMgr = roleOrTemplateId === 'fleet_manager';
+
+  return {
+    'fleet.view': Boolean(f.view),
+    'fleet.create': Boolean(f.add),
+    'fleet.edit': Boolean(f.edit),
+    'fleet.delete': Boolean(f.delete),
+    'fleet.documents.view': Boolean(docs.view || f.view),
+    'fleet.documents.upload': Boolean((docs.add || docs.edit) && (f.add || f.edit)),
+    'fleet.documents.approve': Boolean(docs.approve || f.approve || isFleetMgr),
+    'fleet.handover.create': Boolean(f.add || f.edit),
+    'fleet.handover.approve': Boolean(f.approve || isFleetMgr),
+    'fleet.return.create': Boolean(f.add || f.edit),
+    'fleet.return.approve': Boolean(f.approve || isFleetMgr),
+    'fleet.assignment.request': Boolean(f.add || f.edit),
+    'fleet.assignment.operations_approve': Boolean(f.approve && (isOpsMgr || !isFleetMgr)),
+    'fleet.assignment.admin_approve': Boolean(f.approve && (isFleetMgr || !isOpsMgr)),
+    'fleet.maintenance.create': Boolean(f.add || f.edit),
+    'fleet.maintenance.approve': Boolean(f.approve || isFleetMgr),
+    'fleet.reports.view': Boolean(f.view && rep.view),
+    'fleet.reports.export': Boolean(f.export || (f.view && rep.export)),
+    'fleet.settings.manage': Boolean(setMod.edit && (f.approve || isFleetMgr)),
+  };
+}
 
 export function createEmptyCapabilities(): CapabilityMap {
   return {
@@ -159,6 +269,7 @@ export const DEFAULT_ROLE_TEMPLATES: Omit<RoleTemplate, 'createdByUid' | 'allowe
     isSystemPreset: true,
     permissions: createFullPermissionMatrix(),
     capabilities: createFullCapabilities(),
+    fleetPermissions: createFullFleetPermissions(),
   },
   {
     roleId: 'operations_manager',
@@ -180,6 +291,15 @@ export const DEFAULT_ROLE_TEMPLATES: Omit<RoleTemplate, 'createdByUid' | 'allowe
       audit: ALL_VIEW_EXPORT,
     },
     capabilities: { ...createEmptyCapabilities(), print: true, archive: true },
+    fleetPermissions: {
+      ...createEmptyFleetPermissions(),
+      'fleet.view': true,
+      'fleet.documents.view': true,
+      'fleet.assignment.request': true,
+      'fleet.assignment.operations_approve': true,
+      'fleet.reports.view': true,
+      'fleet.reports.export': true,
+    },
   },
   {
     roleId: 'hr_manager',
@@ -200,6 +320,12 @@ export const DEFAULT_ROLE_TEMPLATES: Omit<RoleTemplate, 'createdByUid' | 'allowe
       audit: makeModulePerm({ view: true }),
     },
     capabilities: { ...createEmptyCapabilities(), print: true, archive: true },
+    fleetPermissions: {
+      ...createEmptyFleetPermissions(),
+      'fleet.view': true,
+      'fleet.documents.view': true,
+      'fleet.reports.view': true,
+    },
   },
   {
     roleId: 'hr_employee',
@@ -215,6 +341,7 @@ export const DEFAULT_ROLE_TEMPLATES: Omit<RoleTemplate, 'createdByUid' | 'allowe
       reports: makeModulePerm({ view: true }),
     },
     capabilities: { ...createEmptyCapabilities(), print: true },
+    fleetPermissions: createEmptyFleetPermissions(),
   },
   {
     roleId: 'fleet_manager',
@@ -234,6 +361,10 @@ export const DEFAULT_ROLE_TEMPLATES: Omit<RoleTemplate, 'createdByUid' | 'allowe
       audit: makeModulePerm({ view: true }),
     },
     capabilities: { ...createEmptyCapabilities(), print: true, archive: true },
+    fleetPermissions: {
+      ...createFullFleetPermissions(),
+      'fleet.assignment.operations_approve': false,
+    },
   },
   {
     roleId: 'fleet_employee',
@@ -249,6 +380,19 @@ export const DEFAULT_ROLE_TEMPLATES: Omit<RoleTemplate, 'createdByUid' | 'allowe
       reports: makeModulePerm({ view: true }),
     },
     capabilities: { ...createEmptyCapabilities(), print: true },
+    fleetPermissions: {
+      ...createEmptyFleetPermissions(),
+      'fleet.view': true,
+      'fleet.create': true,
+      'fleet.edit': true,
+      'fleet.documents.view': true,
+      'fleet.documents.upload': true,
+      'fleet.handover.create': true,
+      'fleet.return.create': true,
+      'fleet.assignment.request': true,
+      'fleet.maintenance.create': true,
+      'fleet.reports.view': true,
+    },
   },
   {
     roleId: 'platform_supervisor',
@@ -266,6 +410,12 @@ export const DEFAULT_ROLE_TEMPLATES: Omit<RoleTemplate, 'createdByUid' | 'allowe
       reports: makeModulePerm({ view: true, export: true }),
     },
     capabilities: { ...createEmptyCapabilities(), print: true },
+    fleetPermissions: {
+      ...createEmptyFleetPermissions(),
+      'fleet.view': true,
+      'fleet.assignment.request': true,
+      'fleet.reports.view': true,
+    },
   },
   {
     roleId: 'accountant',
@@ -283,6 +433,13 @@ export const DEFAULT_ROLE_TEMPLATES: Omit<RoleTemplate, 'createdByUid' | 'allowe
       reports: makeModulePerm({ view: true, export: true, approve: true }),
     },
     capabilities: { ...createEmptyCapabilities(), print: true },
+    fleetPermissions: {
+      ...createEmptyFleetPermissions(),
+      'fleet.view': true,
+      'fleet.maintenance.approve': true,
+      'fleet.reports.view': true,
+      'fleet.reports.export': true,
+    },
   },
   {
     roleId: 'reports_viewer',
@@ -301,6 +458,11 @@ export const DEFAULT_ROLE_TEMPLATES: Omit<RoleTemplate, 'createdByUid' | 'allowe
       alerts: makeModulePerm({ view: true }),
     },
     capabilities: { ...createEmptyCapabilities(), print: true },
+    fleetPermissions: {
+      ...createEmptyFleetPermissions(),
+      'fleet.view': true,
+      'fleet.reports.view': true,
+    },
   },
 ];
 
@@ -432,6 +594,53 @@ export function hasPermission(
   return Boolean(matrix[module]?.[action]);
 }
 
+export function resolveEffectiveFleetPermissions(
+  user: Pick<
+    UserProfile,
+    'email' | 'role' | 'customRoleId' | 'permissionOverrides' | 'fleetPermissionOverrides' | 'active'
+  > | null | undefined,
+  roleTemplates: RoleTemplate[] = []
+): FleetPermissionMap {
+  if (!user || !user.active) return createEmptyFleetPermissions();
+  if (isSuperAdminUser(user)) return createFullFleetPermissions();
+
+  const targetRoleId = user.customRoleId || mapLegacyRoleToTemplateId(user.role);
+  const defaultTemplate =
+    DEFAULT_ROLE_TEMPLATES.find((r) => r.roleId === targetRoleId) ||
+    DEFAULT_ROLE_TEMPLATES.find((r) => r.roleId === 'reports_viewer')!;
+  const template = roleTemplates.find((r) => r.roleId === targetRoleId);
+  const effectiveMatrix = resolveEffectivePermissions(user, roleTemplates);
+  const derivedFallback = deriveLegacyFleetPermissions(effectiveMatrix, targetRoleId);
+
+  const out = createEmptyFleetPermissions();
+  for (const item of FLEET_GRANULAR_PERMISSIONS) {
+    const key = item.key;
+    const overrideVal = user.fleetPermissionOverrides?.[key];
+    if (overrideVal !== undefined) {
+      out[key] = Boolean(overrideVal);
+    } else if (template?.fleetPermissions && template.fleetPermissions[key] !== undefined) {
+      out[key] = Boolean(template.fleetPermissions[key]);
+    } else if (defaultTemplate.fleetPermissions && defaultTemplate.fleetPermissions[key] !== undefined) {
+      out[key] = Boolean(defaultTemplate.fleetPermissions[key]);
+    } else {
+      out[key] = Boolean(derivedFallback[key]);
+    }
+  }
+  return out;
+}
+
+export function hasFleetPermission(
+  user: Pick<
+    UserProfile,
+    'email' | 'role' | 'customRoleId' | 'permissionOverrides' | 'fleetPermissionOverrides' | 'active'
+  > | null | undefined,
+  roleTemplates: RoleTemplate[],
+  action: FleetPermissionAction
+): boolean {
+  const map = resolveEffectiveFleetPermissions(user, roleTemplates);
+  return Boolean(map[action]);
+}
+
 export function hasCapability(
   user: Pick<UserProfile, 'email' | 'role' | 'customRoleId' | 'capabilityOverrides' | 'active'> | null | undefined,
   roleTemplates: RoleTemplate[],
@@ -445,7 +654,7 @@ export function resolveDataScope(
   user: Pick<UserProfile, 'email' | 'role' | 'customRoleId' | 'assignedBranch' | 'assignedCity' | 'allowedPlatforms' | 'dataScope'> | null | undefined
 ): DataScope {
   if (!user || isSuperAdminUser(user)) {
-    return { allBranches: true, branches: [], cities: [], platforms: [], riderIds: [] };
+    return { allBranches: true, branches: [], cities: [], platforms: [], riderIds: [], vehicleIds: [] };
   }
   const ds = user.dataScope;
   const branches = Array.isArray(ds?.branches) ? ds.branches.filter(Boolean) : [];
@@ -462,24 +671,34 @@ export function resolveDataScope(
       ? user.allowedPlatforms
       : [];
   const riderIds = Array.isArray(ds?.riderIds) ? ds.riderIds.filter(Boolean) : [];
+  const vehicleIds = Array.isArray(ds?.vehicleIds) ? ds.vehicleIds.filter(Boolean) : [];
   return {
     allBranches: ds?.allBranches !== undefined ? Boolean(ds.allBranches) : branches.length === 0 && !user.assignedBranch,
     branches,
     cities,
     platforms,
     riderIds,
+    vehicleIds,
   };
 }
 
 export function matchesDataScope(
-  item: { branch?: string; city?: string; platform?: string; platformId?: string; riderId?: string; internalRiderId?: string },
+  item: {
+    branch?: string;
+    city?: string;
+    platform?: string;
+    platformId?: string;
+    riderId?: string;
+    internalRiderId?: string;
+    vehicleInternalId?: string;
+  },
   scope: DataScope
 ): boolean {
   if (!scope.allBranches && scope.branches.length > 0 && item.branch) {
     if (!scope.branches.includes(item.branch)) return false;
   }
   if (!scope.allBranches && scope.branches.length > 0 && !item.branch && scope.cities.length === 0) {
-    // Allow records without branch unless explicitly restricted by riderIds
+    // Allow records without branch unless explicitly restricted by riderIds/vehicleIds
   }
   if (scope.cities.length > 0 && item.city && !scope.cities.includes(item.city)) {
     return false;
@@ -491,6 +710,9 @@ export function matchesDataScope(
   const rid = item.internalRiderId || item.riderId;
   if (scope.riderIds.length > 0 && rid && !scope.riderIds.includes(rid)) {
     return false;
+  }
+  if (scope.vehicleIds && scope.vehicleIds.length > 0 && item.vehicleInternalId) {
+    if (!scope.vehicleIds.includes(item.vehicleInternalId)) return false;
   }
   return true;
 }
